@@ -1,0 +1,11 @@
+.git/
+docs/
+tests/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+config/profile.yml
+out/
+data/

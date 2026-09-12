@@ -1,4 +1,4 @@
-# NetWatch Architecture
+# DawnPatrol Architecture
 
 **Status:** Draft for review
 **Date:** 2026-09-12
@@ -22,7 +22,7 @@ environment-specific lives in configuration, so the repo can be published public
 4. **Atomic and extensible.** Drop a `.py` file into a folder, it gets picked up. No
    registration lists to edit, no core code to touch.
 5. **Real state.** Trends and baselines come from a persistent database, not from
-   "search your notes for a title starting with NetWatch State".
+   "search your notes for a title starting with DawnPatrol State".
 6. **Bounded cost.** Hard token, dollar, and tool-call ceilings enforced by the harness.
 
 ### Non-goals
@@ -92,7 +92,7 @@ Ten stages. Stages 1-6 and 8-10 are fully deterministic; only stage 7 calls the 
 ```
 
 Every stage writes a structured record to `state.db` so a failed run is debuggable
-without re-running it. `netwatch run --stop-after analyze` is a first-class mode — it
+without re-running it. `dawnpatrol run --stop-after analyze` is a first-class mode — it
 gives you the full evidence bundle with zero API spend, which is how you develop
 analyzers.
 
@@ -120,7 +120,7 @@ The split in one line: **sources fetch, analyzers count, the agent decides.**
 ## 4. Repository layout
 
 ```
-netwatch/
+dawnpatrol/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
@@ -128,7 +128,7 @@ netwatch/
 ├── README.md
 ├── config/
 │   └── profile.example.yml         # network topology template, no real values
-├── netwatch/
+├── dawnpatrol/
 │   ├── __init__.py
 │   ├── cli.py                      # run / list-plugins / validate / render / probe
 │   ├── scheduler.py                # in-process cron loop
@@ -295,7 +295,7 @@ def discover(package, base_class) -> dict[str, type]:
 
 **Enablement is automatic and env-driven.** A plugin declares its required env vars; if
 all of them are set, it is enabled. No registry file, no `ENABLED_PLUGINS` list to
-maintain. `NETWATCH_DISABLE=pihole_dns` is the escape hatch, and `NETWATCH_SOURCES=...`
+maintain. `DAWNPATROL_DISABLE=pihole_dns` is the escape hatch, and `DAWNPATROL_SOURCES=...`
 pins an explicit set when you want determinism.
 
 ### 6.1 Sources
@@ -449,15 +449,15 @@ ephemeral so scripts get recreated every day".
 
 **`run.db`** — per-run, disposable, `${DATA_DIR}/runs/<run_id>/run.db`. One `events`
 table plus indexes on `(ts)`, `(kind, ts)`, `(src_ip)`, `(dst_port)`, `(domain)`,
-`(client_ip)`. Retained for `NETWATCH_RUN_RETENTION_DAYS` (default 7) so you can re-run
+`(client_ip)`. Retained for `DAWNPATROL_RUN_RETENTION_DAYS` (default 7) so you can re-run
 analysis or let the agent drill into yesterday. At ~300k rows this is roughly 60-120 MB
 per run.
 
 Raw events age out, but a **narrow long-term slice** does not. `state.db` keeps DNS
 resolutions and, once a flow source exists, connection tuples as thin rows for
-`NETWATCH_IOC_RETENTION_DAYS` (default 180) — a few bytes each, no message payload. This
+`DAWNPATROL_IOC_RETENTION_DAYS` (default 180) — a few bytes each, no message payload. This
 is what makes retrospective hunting possible: when an IOC surfaces next month,
-`netwatch hunt --domain evil.example --days 180` answers whether anything here ever
+`dawnpatrol hunt --domain evil.example --days 180` answers whether anything here ever
 touched it. Detection is usually retroactive; the store should assume that.
 
 **`state.db`** — permanent, `${DATA_DIR}/state.db`:
@@ -494,7 +494,7 @@ Configuration per run:
 
 - `thinking: {"type": "adaptive"}` — this is genuinely reasoning-heavy work.
 - `output_config: {"effort": ...}` — the primary cost/quality dial,
-  `NETWATCH_AI_EFFORT`, default `high`.
+  `DAWNPATROL_AI_EFFORT`, default `high`.
 - `output_config.task_budget` (beta `task-budgets-2026-03-13`) — gives the model a token
   ceiling it can pace itself against, so it wraps up gracefully rather than being cut off
   mid-investigation.
@@ -503,7 +503,7 @@ Configuration per run:
   `fallbacks: "default"`) — security log content occasionally trips classifiers, and a
   refused run should degrade to a fallback model rather than produce no report.
 
-`NETWATCH_AI_MODEL` is an env var. Nothing in the pipeline depends on the model choice;
+`DAWNPATROL_AI_MODEL` is an env var. Nothing in the pipeline depends on the model choice;
 `claude-haiku-4-5` is a perfectly reasonable setting for a quiet network or for testing.
 
 ### 8.2 Prompt structure and caching
@@ -595,12 +595,12 @@ working. Without caching it is several times that, which is why the cache-hit as
 is in the run record.
 
 Levers, all env vars, in the order worth reaching for:
-1. `NETWATCH_AI_EFFORT` — `medium` for routine days.
-2. `NETWATCH_AI_MAX_TOOL_CALLS` — caps loop length.
-3. `NETWATCH_AI_TASK_BUDGET_TOKENS` — the model paces itself.
-4. `NETWATCH_AI_MAX_COST_USD` — hard abort; the run still produces a
+1. `DAWNPATROL_AI_EFFORT` — `medium` for routine days.
+2. `DAWNPATROL_AI_MAX_TOOL_CALLS` — caps loop length.
+3. `DAWNPATROL_AI_TASK_BUDGET_TOKENS` — the model paces itself.
+4. `DAWNPATROL_AI_MAX_COST_USD` — hard abort; the run still produces a
    deterministic-only report rather than nothing.
-5. `NETWATCH_AI_MODEL` — Sonnet 5 or Haiku 4.5.
+5. `DAWNPATROL_AI_MODEL` — Sonnet 5 or Haiku 4.5.
 
 A run that trips the cost ceiling degrades to "analyzer signals rendered without agent
 narrative", flagged in the data-quality section. It never produces no report at all.
@@ -632,7 +632,7 @@ section, so you can see when the model tried to over-reach. That is useful signa
 whether the prompt needs tuning.
 
 **Suppression** gets its own mechanism because its absence is how these systems die. When
-a finding turns out to be benign-but-weird, `netwatch suppress <finding_id> --reason
+a finding turns out to be benign-but-weird, `dawnpatrol suppress <finding_id> --reason
 "..." --days 90` writes a matcher to `state.db`. Future matching findings move to a
 one-line "suppressed" appendix rather than being deleted — so a tuned-out pattern that
 changes character is still visible — and every suppression carries an expiry that forces
@@ -666,7 +666,7 @@ Detection self-test        : 3/3 canaries detected
 A failed canary is itself a CRITICAL finding: the pipeline is not detecting things it is
 definitionally supposed to detect, which means every GREEN since the last successful
 canary is suspect. Canaries run on a configurable subset of runs
-(`NETWATCH_CANARY_EVERY_N_RUNS`, default 1) since they cost almost nothing.
+(`DAWNPATROL_CANARY_EVERY_N_RUNS`, default 1) since they cost almost nothing.
 
 This is the difference between a report that says GREEN and a report that says GREEN and
 demonstrates it was actually looking.
@@ -676,44 +676,44 @@ demonstrates it was actually looking.
 ## 10. Configuration
 
 **Secrets and runtime knobs: environment variables.** Every one supports a `_FILE`
-suffix (`NETWATCH_SOURCE_LIBRENMS_TOKEN_FILE=/run/secrets/librenms`) for Docker secrets.
+suffix (`DAWNPATROL_SOURCE_LIBRENMS_TOKEN_FILE=/run/secrets/librenms`) for Docker secrets.
 
 ```bash
 # Schedule
-NETWATCH_SCHEDULE="0 6 * * *"        # cron; empty = run once and exit
-NETWATCH_TZ="UTC"
-NETWATCH_RUN_ON_START=true
-NETWATCH_WINDOW_HOURS=48
+DAWNPATROL_SCHEDULE="0 6 * * *"        # cron; empty = run once and exit
+DAWNPATROL_TZ="UTC"
+DAWNPATROL_RUN_ON_START=true
+DAWNPATROL_WINDOW_HOURS=48
 
 # Paths
-NETWATCH_DATA_DIR=/var/lib/netwatch
-NETWATCH_OUTPUT_DIR=/out
-NETWATCH_PROFILE=/etc/netwatch/profile.yml
+DAWNPATROL_DATA_DIR=/var/lib/dawnpatrol
+DAWNPATROL_OUTPUT_DIR=/out
+DAWNPATROL_PROFILE=/etc/dawnpatrol/profile.yml
 
 # AI
 ANTHROPIC_API_KEY=...
-NETWATCH_AI_MODEL=claude-opus-5
-NETWATCH_AI_EFFORT=high
-NETWATCH_AI_MAX_COST_USD=3.00
-NETWATCH_AI_MAX_TOOL_CALLS=25
+DAWNPATROL_AI_MODEL=claude-opus-5
+DAWNPATROL_AI_EFFORT=high
+DAWNPATROL_AI_MAX_COST_USD=3.00
+DAWNPATROL_AI_MAX_TOOL_CALLS=25
 
 # Sources — presence of required vars auto-enables the plugin
-NETWATCH_SOURCE_LIBRENMS_URL=http://10.128.10.55/api/v0
-NETWATCH_SOURCE_LIBRENMS_TOKEN=...
-NETWATCH_SOURCE_LIBRENMS_DEVICES=3,4,7
-NETWATCH_SOURCE_PIHOLE_URL=http://10.128.10.69/api
-NETWATCH_SOURCE_PIHOLE_PASSWORD=...
+DAWNPATROL_SOURCE_LIBRENMS_URL=http://10.128.10.55/api/v0
+DAWNPATROL_SOURCE_LIBRENMS_TOKEN=...
+DAWNPATROL_SOURCE_LIBRENMS_DEVICES=3,4,7
+DAWNPATROL_SOURCE_PIHOLE_URL=http://10.128.10.69/api
+DAWNPATROL_SOURCE_PIHOLE_PASSWORD=...
 
 # Enrichment
-NETWATCH_ENRICH_ABUSEIPDB_KEY=...
-NETWATCH_ENRICH_ABUSEIPDB_BUDGET=25
-NETWATCH_ENRICH_ISMALICIOUS_KEY=...
+DAWNPATROL_ENRICH_ABUSEIPDB_KEY=...
+DAWNPATROL_ENRICH_ABUSEIPDB_BUDGET=25
+DAWNPATROL_ENRICH_ISMALICIOUS_KEY=...
 
 # Outputs
-NETWATCH_OUTPUT_SMTP_HOST=...
-NETWATCH_OUTPUT_SMTP_TO=...
-NETWATCH_OUTPUT_WEBHOOK_URL=...
-NETWATCH_OUTPUT_WEBHOOK_RUN_WHEN=AMBER,RED
+DAWNPATROL_OUTPUT_SMTP_HOST=...
+DAWNPATROL_OUTPUT_SMTP_TO=...
+DAWNPATROL_OUTPUT_WEBHOOK_URL=...
+DAWNPATROL_OUTPUT_WEBHOOK_RUN_WHEN=AMBER,RED
 ```
 
 **Network topology: a mounted YAML profile.** This is everything that is true about *your*
@@ -776,20 +776,20 @@ the entries are injected into the cached profile block.
 **Scheduling is in-process**, `croniter` plus a sleep loop, rather than cron or
 supercronic. One process, PID 1 is the app, logs go to stdout unmodified, signal handling
 and graceful shutdown are straightforward, and the schedule is a plain env var. Running
-`NETWATCH_SCHEDULE=""` executes one run and exits, which is exactly what you want for
+`DAWNPATROL_SCHEDULE=""` executes one run and exits, which is exactly what you want for
 testing and for driving it from an external scheduler instead.
 
 ```dockerfile
 FROM python:3.12-slim
-RUN useradd -r -u 10001 netwatch
+RUN useradd -r -u 10001 dawnpatrol
 WORKDIR /app
 COPY pyproject.toml ./
 RUN pip install --no-cache-dir .
-COPY netwatch/ ./netwatch/
-USER netwatch
-VOLUME ["/var/lib/netwatch", "/out"]
-HEALTHCHECK --interval=5m CMD python -m netwatch.cli healthcheck
-ENTRYPOINT ["python", "-m", "netwatch.cli"]
+COPY dawnpatrol/ ./dawnpatrol/
+USER dawnpatrol
+VOLUME ["/var/lib/dawnpatrol", "/out"]
+HEALTHCHECK --interval=5m CMD python -m dawnpatrol.cli healthcheck
+ENTRYPOINT ["python", "-m", "dawnpatrol.cli"]
 CMD ["serve"]
 ```
 
@@ -799,18 +799,18 @@ reads a heartbeat file the scheduler touches, so a wedged scheduler is visible t
 CLI surface:
 
 ```
-netwatch serve                       # scheduler loop (default)
-netwatch run                         # one full run now
-netwatch run --stop-after analyze    # no API spend; dumps the evidence bundle
-netwatch run --dry-run               # everything except delivery
-netwatch run --from-run <id>         # re-analyze stored events, no re-collection
-netwatch probe                       # connectivity + auth check on every source
-netwatch list-plugins                # what was discovered and whether it is enabled
-netwatch validate                    # config and profile validation
-netwatch canary --check              # run the detection self-test standalone
-netwatch suppress <id> --days 90     # tune out a false positive, with an expiry
-netwatch hunt --domain x --days 180  # retrospective IOC search over the long-term store
-netwatch render <run_id> --format md # re-render a stored report
+dawnpatrol serve                       # scheduler loop (default)
+dawnpatrol run                         # one full run now
+dawnpatrol run --stop-after analyze    # no API spend; dumps the evidence bundle
+dawnpatrol run --dry-run               # everything except delivery
+dawnpatrol run --from-run <id>         # re-analyze stored events, no re-collection
+dawnpatrol probe                       # connectivity + auth check on every source
+dawnpatrol list-plugins                # what was discovered and whether it is enabled
+dawnpatrol validate                    # config and profile validation
+dawnpatrol canary --check              # run the detection self-test standalone
+dawnpatrol suppress <id> --days 90     # tune out a false positive, with an expiry
+dawnpatrol hunt --domain x --days 180  # retrospective IOC search over the long-term store
+dawnpatrol render <run_id> --format md # re-render a stored report
 ```
 
 `--from-run` matters for iteration: you can develop analyzers and prompt changes against
@@ -874,7 +874,7 @@ be firewalled to an allowlist.
 
 | Phase | Scope | Outcome |
 |---|---|---|
-| 1 | Core models, registry, config, store, CLI, `librenms_syslog` + `pihole_dns` sources, `file_report` output, Dockerfile | `netwatch run --stop-after analyze` produces a verified event store from your real network |
+| 1 | Core models, registry, config, store, CLI, `librenms_syslog` + `pihole_dns` sources, `file_report` output, Dockerfile | `dawnpatrol run --stop-after analyze` produces a verified event store from your real network |
 | 2 | Analyzers: volume, patterns, DNS anomalies, segments, correlation, baseline delta | Full evidence bundle with signals; still zero API spend |
 | 3 | Agent harness, tools, structured output, adjudication, plaintext renderer, SMTP output | Feature parity with the current agent, end to end |
 | 3.5 | Canary self-validation, suppression, long-term IOC store and `hunt` | The report becomes trustworthy, not merely well-formatted |
@@ -917,7 +917,7 @@ These change what gets built, so I would rather ask than assume.
 
 ### Deferred: source coverage
 
-Which telemetry NetWatch consumes is deliberately out of scope for this document. The
+Which telemetry DawnPatrol consumes is deliberately out of scope for this document. The
 initial build targets the two sources that exist today (`librenms_syslog`, `pihole_dns`),
 and `EventKind` already reserves `IDS` and `FLOW` for later.
 

@@ -1,0 +1,92 @@
+"""The read-only SQL tool's safety comes from structure, not from asking nicely."""
+
+from __future__ import annotations
+
+import pytest
+
+from dawnpatrol.agent import sqlguard
+
+RUN = "run123"
+
+
+def test_plain_select_is_allowed_and_gains_a_limit():
+    sql, cap = sqlguard.validate(
+        f"SELECT src_ip FROM events WHERE run_id='{RUN}'", RUN)
+    assert sql.lower().endswith(f"limit {cap}")
+
+
+def test_existing_limit_is_respected_and_capped():
+    sql, cap = sqlguard.validate(
+        f"SELECT src_ip FROM events WHERE run_id='{RUN}' LIMIT 5", RUN)
+    assert cap == 5
+    sql, cap = sqlguard.validate(
+        f"SELECT src_ip FROM events WHERE run_id='{RUN}' LIMIT 99999", RUN)
+    assert cap == sqlguard.MAX_LIMIT
+
+
+def test_cte_is_allowed():
+    sql, _ = sqlguard.validate(
+        f"WITH top AS (SELECT src_ip, COUNT(*) c FROM events "
+        f"WHERE run_id='{RUN}' GROUP BY src_ip) SELECT * FROM top", RUN)
+    assert sql.lower().startswith("with")
+
+
+@pytest.mark.parametrize("sql", [
+    "DELETE FROM events",
+    "UPDATE events SET src_ip='x'",
+    "INSERT INTO events (id) VALUES (1)",
+    "DROP TABLE events",
+    "TRUNCATE events",
+    "ALTER TABLE events ADD COLUMN x INT",
+    "CREATE TABLE bad (x INT)",
+    "PRAGMA table_info(events)",
+    "ATTACH DATABASE '/etc/passwd' AS p",
+    "SELECT load_file('/etc/passwd')",
+    "SELECT * FROM events INTO OUTFILE '/tmp/x'",
+])
+def test_writes_and_escapes_are_rejected(sql):
+    with pytest.raises(sqlguard.SQLRejected):
+        sqlguard.validate(sql, RUN)
+
+
+def test_stacked_statements_are_rejected():
+    with pytest.raises(sqlguard.SQLRejected):
+        sqlguard.validate(
+            f"SELECT 1 FROM events WHERE run_id='{RUN}'; DROP TABLE events", RUN)
+
+
+def test_comment_hidden_write_is_rejected():
+    with pytest.raises(sqlguard.SQLRejected):
+        sqlguard.validate(
+            f"SELECT 1 FROM events WHERE run_id='{RUN}' /* x */; DELETE FROM runs", RUN)
+
+
+def test_tables_outside_the_allowlist_are_rejected():
+    for table in ("runs", "deliveries", "enrichment_cache", "suppressions", "sqlite_master"):
+        with pytest.raises(sqlguard.SQLRejected, match="not readable"):
+            sqlguard.validate(f"SELECT * FROM {table}", RUN)
+
+
+def test_events_query_must_be_scoped_to_the_run():
+    with pytest.raises(sqlguard.SQLRejected, match="run_id"):
+        sqlguard.validate("SELECT * FROM events", RUN)
+
+
+def test_long_term_tables_need_no_run_scope():
+    sql, _ = sqlguard.validate("SELECT domain FROM ioc_dns WHERE domain LIKE '%evil%'", RUN)
+    assert "ioc_dns" in sql
+    sql, _ = sqlguard.validate("SELECT value FROM entities WHERE etype='domain'", RUN)
+    assert "entities" in sql
+
+
+def test_empty_and_oversized_queries_are_rejected():
+    with pytest.raises(sqlguard.SQLRejected):
+        sqlguard.validate("", RUN)
+    with pytest.raises(sqlguard.SQLRejected):
+        sqlguard.validate("SELECT " + "x" * 5000, RUN)
+
+
+def test_schema_description_names_the_run_and_dialect():
+    text = sqlguard.describe_schema(RUN, "sqlite")
+    assert RUN in text and "sqlite" in text
+    assert "ioc_dns" in text and "entities" in text

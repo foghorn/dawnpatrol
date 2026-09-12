@@ -1,32 +1,52 @@
-# Legacy Open-WebUI agent documentation — reference only, contains API keys
+# ─── Environment-specific: NEVER commit ────────────────────────────────
+# Legacy Open-WebUI agent documentation - contains live API keys
 docs/oldagentfiles/
 
-# Environment / secrets
+# Real network topology / site profile. Only the .example is tracked.
+config/profile.yml
+config/profile.*.yml
+!config/profile.example.yml
+config/local/
+site/
+
+# Secrets and environment
 .env
 .env.*
 !.env.example
+secrets/
 *.key
 *.pem
+*.p12
 
-# Python
+# Runtime data: databases, reports, logs
+data/
+out/
+reports/
+state/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+
+# ─── Python ────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
+build/
+dist/
 .venv/
 venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
-# Runtime output
-/out/
-/reports/
-/state/
-*.db
-*.sqlite3
-*.log
-
-# Editor / OS
+# ─── Editor / OS ───────────────────────────────────────────────────────
 .DS_Store
 .idea/
 .vscode/
+*.swp

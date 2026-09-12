@@ -1,0 +1,117 @@
+# DawnPatrol site profile - the description of YOUR network.
+#
+# Copy to config/profile.yml and edit. That path is gitignored, so this file is
+# the only one that ever gets committed. Nothing here is executable: it is data
+# that analyzers use to resolve zones, and that the model reads as context.
+#
+# The profile is rendered into the cached portion of the prompt, so keep it
+# stable. Nothing here should change between runs unless your network did.
+
+site:
+  name: home                 # appears in report titles and subject lines
+  timezone: UTC              # reports are always written in UTC
+
+# ─────────────────────────────────────────────────────────────────────────
+# Zones
+#
+# Every source and destination address is resolved to a zone at normalize time.
+# This is what lets one analyzer say "an untrusted segment reached an unexpected
+# destination" without any address being hardcoded in the source tree.
+# ─────────────────────────────────────────────────────────────────────────
+zones:
+  - name: lan
+    cidrs: ["192.168.1.0/24"]
+    trust: trusted           # trusted | semi-trusted | untrusted | guest | dmz
+    notes: General client devices.
+
+  - name: iot
+    cidrs: ["192.168.50.0/24"]
+    trust: untrusted
+    # If this segment sits behind a NAT gateway, name it. DawnPatrol then states
+    # the attribution limit explicitly instead of naming a device it cannot see.
+    gateway: "192.168.1.8"
+    notes: >
+      Cameras and home automation. Unpatchable and chatty. Expected behaviour is
+      a small, stable set of vendor cloud endpoints plus NTP; anything else is
+      worth explaining.
+    # Egress outside this list is flagged. Leading wildcards are fine.
+    expected_egress_domains:
+      - "*.vendor-cloud.example"
+      - "*.pool.ntp.org"
+
+  - name: dmz
+    cidrs: ["192.168.15.0/24"]
+    trust: semi-trusted
+    gateway: "192.168.1.2"
+    notes: >
+      Internet-reachable hosts. Inbound sessions that traverse the edge and
+      unexpected outbound connections are both significant here.
+    expected_egress_domains:
+      - "*.microsoft.com"
+
+# ─────────────────────────────────────────────────────────────────────────
+# Hosts
+#
+# Optional, but a named host turns "192.168.50.43" into something a human can
+# act on without looking anything up.
+# ─────────────────────────────────────────────────────────────────────────
+hosts:
+  - ip: "192.168.1.1"
+    name: edge
+    role: router/firewall/vpn
+    model: "Example RT-1234"
+
+  - ip: "192.168.1.53"
+    name: pihole
+    role: dns-resolver
+    authoritative_resolver: true
+
+  - ip: "192.168.1.55"
+    name: librenms
+    role: monitoring
+
+# ─────────────────────────────────────────────────────────────────────────
+# Policy
+# ─────────────────────────────────────────────────────────────────────────
+policy:
+  # A changing WAN address is an ISP lease renewal, not an incident.
+  wan_ip_is_dynamic: true
+
+  # Any internal host resolving DNS somewhere else is a policy violation and a
+  # HIGH-severity signal: its name resolution is no longer being observed.
+  approved_resolvers:
+    - "192.168.1.53"
+
+  # Called out explicitly in the report whenever they appear.
+  attack_surface_ports:
+    [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 1194,
+     1433, 3306, 3389, 5060, 5432, 5900, 8080, 8443, 8728]
+
+  # Traffic from behind these addresses cannot be attributed to a device.
+  # DawnPatrol says so rather than implying a segment was silent.
+  nat_attribution_limited_behind:
+    - "192.168.1.8"
+    - "192.168.1.2"
+
+  # Never spend a reputation lookup on these, and never treat them as novel.
+  # Omit the key entirely to use the built-in list of major providers.
+  #benign_domain_suffixes:
+  #  - google.com
+  #  - microsoft.com
+
+# ─────────────────────────────────────────────────────────────────────────
+# Known quirks
+#
+# Established local facts, so they are never rediscovered as findings. These
+# are injected into the model's context verbatim.
+# ─────────────────────────────────────────────────────────────────────────
+known_quirks:
+  - >
+    Some consumer router firmware mislabels routine wireless-roaming and
+    watchdog chatter as 'emerg' severity. Break an emerg count down by program
+    before drawing any conclusion from it.
+
+# ─────────────────────────────────────────────────────────────────────────
+# Per-source hints (optional). Keys are source plugin names.
+# ─────────────────────────────────────────────────────────────────────────
+source_hints: {}
