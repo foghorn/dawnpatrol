@@ -1,0 +1,32 @@
+# Legacy Open-WebUI agent documentation — reference only, contains API keys
+docs/oldagentfiles/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime output
+/out/
+/reports/
+/state/
+*.db
+*.sqlite3
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
