@@ -22,8 +22,15 @@ services:
       - ./out:/out                               # reports - see README: Permissions
       - ./config/profile.yml:/etc/dawnpatrol/profile.yml:ro
     # DawnPatrol reaches your monitoring hosts, its reputation APIs, and its model
-    # provider. It never listens. Add an egress allowlist here if you firewall
-    # outbound traffic.
+    # provider, and by default it never listens. Add an egress allowlist here if
+    # you firewall outbound traffic.
+    #
+    # Uncomment to expose the optional MCP surface (DAWNPATROL_MCP_ENABLED=true
+    # in .env) to an external agent - bind it to a specific host address, not
+    # 0.0.0.0, unless you have already put a bearer token in front of it another
+    # way:
+    # ports:
+    #   - "127.0.0.1:8420:8420"
 
 volumes:
   dawnpatrol-data:

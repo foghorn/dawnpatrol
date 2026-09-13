@@ -175,6 +175,35 @@ class ScheduleSettings:
 
 
 @dataclass(slots=True)
+class MCPSettings:
+    """The optional read/trigger surface for an external agent.
+
+    Off by default - this is the one thing in the whole design that listens.
+    The bearer token is never logged when the operator supplied it; it is
+    logged once, at startup, only when none was configured and one had to be
+    generated, since that log line is the only place to learn it.
+    """
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8420
+    token: SecretStr = field(default_factory=lambda: SecretStr(""))
+    path: str = "/mcp"
+
+    @classmethod
+    def from_env(cls, registry: SecretRegistry) -> MCPSettings:
+        token = read_secret(f"{ENV_PREFIX}MCP_TOKEN")
+        registry.register(token)
+        return cls(
+            enabled=read_bool(f"{ENV_PREFIX}MCP_ENABLED", False),
+            host=read_env(f"{ENV_PREFIX}MCP_HOST", "0.0.0.0") or "0.0.0.0",
+            port=read_int(f"{ENV_PREFIX}MCP_PORT", 8420),
+            token=token,
+            path=read_env(f"{ENV_PREFIX}MCP_PATH", "/mcp") or "/mcp",
+        )
+
+
+@dataclass(slots=True)
 class RetentionSettings:
     """Raw events age out quickly; a narrow IOC slice persists for hunting."""
 
@@ -219,6 +248,7 @@ class Settings:
     enrichment_enabled: bool = True
     log_level: str = "INFO"
     dry_run: bool = False
+    mcp: MCPSettings = field(default_factory=MCPSettings)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -241,6 +271,7 @@ class Settings:
             ai=AISettings.from_env(registry),
             schedule=ScheduleSettings.from_env(),
             retention=RetentionSettings.from_env(),
+            mcp=MCPSettings.from_env(registry),
             secrets=registry,
             enabled_sources=read_list(f"{ENV_PREFIX}SOURCES"),
             enabled_analyzers=read_list(f"{ENV_PREFIX}ANALYZERS"),
@@ -287,4 +318,6 @@ class Settings:
             "schedule": self.schedule.cron or "(run once)",
             "retention_raw_days": self.retention.raw_days,
             "retention_ioc_days": self.retention.ioc_days,
+            "mcp": (f"enabled on {self.mcp.host}:{self.mcp.port}{self.mcp.path}"
+                    if self.mcp.enabled else "disabled"),
         }

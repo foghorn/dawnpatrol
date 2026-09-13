@@ -32,7 +32,8 @@ class FileReportOutput(Output):
         try:
             target.mkdir(parents=True, exist_ok=True)
             for fmt in self.formats:
-                suffix = {"plaintext": "txt", "markdown": "md", "json": "json"}.get(fmt, fmt)
+                suffix = {"plaintext": "txt", "markdown": "md", "json": "json",
+                         "html": "html"}.get(fmt, fmt)
                 body = rendered if fmt == self.renderer else render_with(fmt, report)
                 path = target / f"report-{report.run_id}.{suffix}"
                 path.write_text(body, encoding="utf-8")

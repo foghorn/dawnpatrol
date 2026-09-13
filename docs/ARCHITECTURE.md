@@ -1,7 +1,14 @@
 # DawnPatrol Architecture
 
-**Status:** Draft for review
-**Date:** 2026-09-12
+**Status:** Implemented and in production (Phases 1-4.5 complete; see §15)
+**Last updated:** 2026-09-13
+
+This document describes the system as it is actually built, not as it was originally
+proposed. Where an earlier draft described an open design question, this revision
+records the decision that was made and why (§16). For a tutorial-style walkthrough of
+any one plugin type - with a worked example of building your own - see
+`docs/components/`; this document is the systems-level view of how the pieces fit
+together.
 
 A single-container, scheduled threat-hunting pipeline. Deterministic code does the
 collection, normalization, and statistics; an AI agent does the judgment. Everything
@@ -351,6 +358,9 @@ the framework, and the clamp is recorded as a known limit rather than a shortfal
 kills the "never present a 24h DNS total alongside a 48h firewall total without labeling
 them" rule — the labels are generated from the window each source actually achieved.
 
+See `docs/components/sources.md` for the full contract, both shipped sources walked
+through line by line, and a worked example of adding a third.
+
 ### 6.2 Analyzers
 
 ```python
@@ -375,6 +385,9 @@ database query instead of a diff against a note the model wrote yesterday.
 
 Analyzers are independent and run in dependency order only where declared. Adding one is
 a single file with one method.
+
+See `docs/components/analyzers.md` for the `EventQuery`/`Baseline` APIs in full and a
+worked example of adding a new detection.
 
 ### 6.3 Enrichment
 
@@ -415,6 +428,9 @@ The AbuseIPDB score-vs-`totalReports` trap is handled by simply not surfacing
 `totalReports` in the normalized `Enrichment` at all. It lives in `.raw` for audit. The
 model cannot misreport a number it is not given.
 
+See `docs/components/enrichment.md` for the full contract and a worked example of
+adding a new reputation source.
+
 ### 6.4 Outputs
 
 ```python
@@ -436,9 +452,13 @@ test it once, and `smtp_email`, `file_report`, and a future `s3_upload` all get 
 `run_when` makes "page me only on AMBER/RED, but always write the file" a config
 setting rather than prompt logic.
 
-Planned outputs: `file_report` (writes `${OUTPUT_DIR}/YYYY-MM-DD/report.{txt,json}` plus a
-`latest` symlink), `smtp_email`, `webhook` (generic JSON POST — ntfy, Slack, Discord,
-Home Assistant), and later `healthchecks_ping` for dead-man's-switch monitoring.
+Shipped outputs: `file_report` (writes `${OUTPUT_DIR}/YYYY-MM-DD/report.{txt,json}`, plus
+`html` if configured, and a `latest.*` copy of each), `smtp_email`, and `webhook`
+(generic JSON POST — ntfy, Slack, Discord, Home Assistant). A future `healthchecks_ping`
+for dead-man's-switch monitoring remains a natural next output, not yet built.
+
+See `docs/components/outputs.md` for the full contract, `run_when` policy in detail, and
+a worked example of adding a new delivery destination.
 
 ---
 
@@ -485,10 +505,13 @@ genuinely reliable. `findings` history is what makes trend language honest — "
 
 ### 8.1 Model and loop
 
-Claude Opus 5 (`claude-opus-5`) via the official `anthropic` Python SDK, using the beta
-tool runner (`client.beta.messages.tool_runner`) rather than a hand-written loop. The
-tool runner supplies the agent loop for tools we define; we still host everything, which
-is what we want in a self-contained container.
+Claude Opus 5 (`claude-opus-5`) via the official `anthropic` Python SDK, driven by a
+hand-written loop (`providers/anthropic_provider.py`) rather than the SDK's tool runner -
+a deliberate choice, not an oversight: the harness needs per-turn budget checks, cost
+accounting mid-loop, and a terminal-tool break, and keeping the loop's shape identical to
+the `openai_compatible` provider's makes both easy to reason about side by side. Every
+provider is a plugin (`docs/components/providers.md`), so this loop shape is one
+implementation among however many backends get added, not baked into the harness itself.
 
 Configuration per run:
 
@@ -505,6 +528,13 @@ Configuration per run:
 
 `DAWNPATROL_AI_MODEL` is an env var. Nothing in the pipeline depends on the model choice;
 `claude-haiku-4-5` is a perfectly reasonable setting for a quiet network or for testing.
+
+The model backend itself is a plugin (`dawnpatrol/providers/`, discovered the same way as
+sources/analyzers/enrichers/outputs): `anthropic_provider.py` ships as the default, and
+`openai_compatible.py` points at any `/v1/chat/completions` server — Ollama, LM Studio,
+vLLM, a local model is one environment variable away, not a code change. See
+`docs/components/providers.md` for the `Provider` contract and a worked example of
+adding a new backend.
 
 ### 8.2 Prompt structure and caching
 
@@ -579,20 +609,26 @@ property of the system.
 
 ### 8.5 Cost model
 
-Estimates for this network's volume, to be validated in Phase 1 against real
-`response.usage`. Opus 5 at $5/MTok input, $25/MTok output, cache reads at $0.50/MTok.
+Measured against a real deployment (~28k firewall records, ~140k DNS queries per 24h
+window), not projected. Opus 5 at $5/MTok input, $25/MTok output, cache reads at
+$0.50/MTok.
 
-| Component | Tokens | Notes |
-|---|---|---|
-| System + profile (cached after day 1) | ~9k | ~$0.005/run at cache-read rate |
-| Evidence bundle | ~25k | metrics + ~40 signals + health |
-| Tool results across the loop | ~20k | 10-20 calls, capped |
-| Accumulated re-sent history | ~400-700k billed | largely cache reads with incremental caching |
-| Output | ~8k | structured findings |
+| Run | Effort | Model calls | Input | Output | Cache read | Cost |
+|---|---|---|---|---|---|---|
+| Scheduled, medium effort | `medium` | 5-6 | ~131k | ~11.8k | ~30.5k | **$0.51-0.56** |
+| Scheduled, high effort | `high` | 6 | ~273k | ~14.4k | ~61k | **$0.97-1.21** |
+| MCP-triggered, one source only | `high` | 5 | - | - | - | $0.56 |
 
-Rough landing zone: **$0.40-1.50 per run, $12-45/month** at daily cadence with caching
-working. Without caching it is several times that, which is why the cache-hit assertion
-is in the run record.
+Cache reads are nonzero from the very first multi-turn run - the breakpoint after the
+profile block (§8.2) hits within a single run's tool loop, before a second day ever
+arrives to benefit from cross-run caching. `usage.cache_read_tokens` is asserted nonzero
+in the run record; a regression there is visible immediately rather than showing up as a
+surprise bill at the end of the month.
+
+At daily cadence, `high` effort lands at roughly **$15-36/month** for this network's
+volume; `medium` roughly **$15-17/month**. Both are well inside the original $12-45/month
+projection. Your own volume will differ - a much larger firewall log or DNS query volume
+raises the evidence-bundle and tool-result token counts proportionally.
 
 Levers, all env vars, in the order worth reaching for:
 1. `DAWNPATROL_AI_EFFORT` — `medium` for routine days.
@@ -670,6 +706,9 @@ canary is suspect. Canaries run on a configurable subset of runs
 
 This is the difference between a report that says GREEN and a report that says GREEN and
 demonstrates it was actually looking.
+
+See `docs/components/canaries.md` for the full contract, how canary events stay isolated
+from real statistics, and a worked example of adding a new canary.
 
 ---
 
@@ -769,6 +808,9 @@ subject is one of those gateways.
 `known_quirks` gives you a place to record environment truths without editing a prompt —
 the entries are injected into the cached profile block.
 
+See `docs/components/profile.md` for every field's effect on analysis in detail, and a
+worked example of documenting a new segment.
+
 ---
 
 ## 11. Container and scheduling
@@ -818,7 +860,68 @@ a real captured day without re-pulling 300k records or hammering the APIs.
 
 ---
 
-## 12. Security
+## 12. External agent access (MCP)
+
+Everything above describes one closed loop: collect, reduce, judge, report, deliver,
+once a day. That loop produces a good morning briefing. It is a poor fit for the moment
+a briefing says something worth digging into, because digging in means re-running
+collection with different parameters, writing ad hoc SQL against events the pipeline
+already has, or re-reading the network profile to check a hunch — none of which should
+require SSHing into the box or re-deriving context a second AI system already built.
+
+`dawnpatrol/mcpserver/` answers that with a second, optional interface onto the same
+capabilities: an MCP (Model Context Protocol) server, reachable over streamable HTTP,
+that an external agent — a human's own Claude session, an incident-response bot, a
+SIEM's enrichment step — can call directly. It is not a new capability surface. Every
+tool it exposes is a thin wrapper over something stages 1-10 already do:
+
+| Tool | Wraps |
+|---|---|
+| `list_reports`, `get_latest_report`, `get_report` | The files `outputs/file_report.py` already writes |
+| `describe_event_schema`, `query_events` | The identical `agent/sqlguard.py` validator the in-run investigation agent's SQL tool uses |
+| `get_metric_history` | `Store.metric_history` |
+| `get_network_profile` | `Profile.as_context()` — the same text block cached into the harness system prompt |
+| `list_source_plugins` | `registry.discover` + `env_satisfied`, the same introspection `list-plugins` uses |
+| `trigger_analysis` | `Runner.run()` — the identical pipeline a scheduled run executes |
+
+Two design decisions carry the actual safety weight:
+
+**It is one door onto existing rooms, not a new room.** `trigger_analysis` cannot make
+the pipeline do anything `dawnpatrol run` at a terminal could not already do, and
+`query_events` cannot reach a table or bypass a rule `agent/sqlguard.py` does not already
+enforce for the investigation agent itself. Auditing the MCP surface is auditing whether
+the wrapping is thin, not auditing a second implementation of read access.
+
+**It is the one thing in this design that listens, so it defaults to off and to
+authenticated.** `DAWNPATROL_MCP_ENABLED` must be set explicitly. Every request requires
+`Authorization: Bearer <token>`, checked with a constant-time comparison
+(`hmac.compare_digest`) in a small ASGI middleware (`mcpserver/auth.py`) wrapped *around*
+the MCP app rather than implemented inside it — deliberately independent of whatever
+authentication semantics a future `mcp` SDK major version changes. The token is either
+`DAWNPATROL_MCP_TOKEN` (operator-supplied, stable across restarts) or generated fresh at
+startup and logged exactly once, since a generated token that is never displayed again is
+useless and a generated token that is displayed on every log line is a leak waiting to be
+scraped.
+
+**Concurrency is a real, shared lock, not a convention.** `trigger_analysis` and the
+scheduled cron job both go through the same `guarded_run` closure built in
+`cli.cmd_serve`, wrapping a single `threading.Lock`. Two runs writing to `run.db`
+simultaneously is not a scenario worth supporting; a triggered run that arrives mid-cron
+gets a clean `"a run is already in progress"` response instead of silent corruption or a
+long hang.
+
+**`trigger_analysis` never emails**, structurally: it calls `Runner.run(skip_outputs=
+frozenset({"smtp"}))`, which drops the `smtp` output from the delivery list before stage
+10 runs at all — the same code path other outputs use, not a special case bolted onto the
+SMTP plugin. File output still happens, so the result is retrievable afterward through
+`get_report` exactly like a scheduled run's.
+
+See `docs/components/mcp-server.md` for the tool reference, deployment guidance, and a
+worked example of adding a new tool.
+
+---
+
+## 13. Security
 
 This is security tooling that reads attacker-influenced data and will be published, so:
 
@@ -851,77 +954,106 @@ be firewalled to an allowlist.
 
 ---
 
-## 13. Testing
+## 14. Testing
 
-- **Source parsers** against recorded, scrubbed API fixtures in `tests/fixtures/` —
-  including the failure modes the skills document: epoch-format zero-result, cursor
-  duplication, the 0xc0 poison record, truncated pagination. These become regression
-  tests, which is the durable fix for "a bug fixed on Monday and reintroduced on Tuesday".
+202 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
+includes an end-to-end pipeline exercise against a stubbed provider. CI
+(`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
+request, across Python 3.11-3.13.
+
+- **Source parsers**, covering the failure modes the original agent skills documented -
+  the epoch-vs-string timestamp trap, cursor-pagination duplication, the 0xc0 poison
+  record, truncated pagination - each as a dedicated test (`tests/test_sources.py`). They
+  are built as synthetic records constructed inline rather than recorded API fixtures on
+  disk: `tests/fixtures/` exists as the on-ramp for that if a future contributor wants to
+  add real (scrubbed) captures, but inline construction already gives every trap a
+  deterministic regression test without the risk of a "scrubbed" fixture someday turning
+  out not to be.
 - **Analyzers** against synthetic event sets with known-correct expected signals: a
   textbook persistent prober, a /24 sweep, conntrack return traffic, a stepped-TTL probe,
   a DGA burst.
-- **Renderers** — property tests asserting 7-bit ASCII, no line over 72 columns, all
+- **Renderers** - property tests asserting 7-bit ASCII, no line over 72 columns, all ten
   sections present in order, no unsubstituted tokens, every empty section carrying its
-  documented empty-state line.
-- **Adjudication** — each guardrail gets a test feeding it a deliberately non-compliant
+  documented empty-state line - plus, for the HTML renderer, that attacker-influenced
+  finding text is escaped rather than passed through as markup.
+- **Adjudication** - each guardrail gets a test feeding it a deliberately non-compliant
   agent response and asserting the clamp or rejection.
+- **The MCP surface** (`tests/test_mcpserver.py`) - every tool's logic against a real
+  temp-directory `Store`, plus the bearer-auth middleware against a raw ASGI scope, with
+  no real HTTP server started.
 - **End-to-end** with a stubbed model returning a canned `Analysis`, so the full pipeline
-  is exercised in CI with zero API spend.
+  is exercised with zero API spend.
 
 ---
 
-## 14. Phasing
+## 15. Phasing
 
-| Phase | Scope | Outcome |
+Every phase below is complete except the two gaps called out explicitly. Nothing here is
+aspirational; each row names the actual files that satisfy it.
+
+| Phase | Scope | Status |
 |---|---|---|
-| 1 | Core models, registry, config, store, CLI, `librenms_syslog` + `pihole_dns` sources, `file_report` output, Dockerfile | `dawnpatrol run --stop-after analyze` produces a verified event store from your real network |
-| 2 | Analyzers: volume, patterns, DNS anomalies, segments, correlation, baseline delta | Full evidence bundle with signals; still zero API spend |
-| 3 | Agent harness, tools, structured output, adjudication, plaintext renderer, SMTP output | Feature parity with the current agent, end to end |
-| 3.5 | Canary self-validation, suppression, long-term IOC store and `hunt` | The report becomes trustworthy, not merely well-formatted |
-| 4 | Enrichment plugins, caching, budgets; webhook output; markdown/html renderers | Parity plus enrichment; measure real cost and tune |
-| 5 | Scheduler hardening, healthcheck, docs, fixtures, CI, public release prep | Publishable |
+| 1 | Core models, registry, config, store, CLI, `librenms_syslog` + `pihole_dns` sources, `file_report` output, Dockerfile | **Done.** `dawnpatrol run --stop-after analyze` produces a verified event store from a real network - exercised against a real deployment, not just fixtures. |
+| 2 | Analyzers: volume, patterns, DNS anomalies, segments, correlation, baseline delta | **Done.** All seven ship (`dawnpatrol/analyzers/`); zero API spend at this stage. |
+| 3 | Agent harness, tools, structured output, adjudication, plaintext renderer, SMTP output | **Done.** Validated against a live network with a real model: real findings, real adjudication, real email delivery. |
+| 3.5 | Canary self-validation, suppression, long-term IOC store and `hunt` | **Done.** Both canaries fire in production; a canary excluded by an ad hoc source restriction was observed correctly reporting NOT DETECTED and escalating status, rather than passing silently. |
+| 4 | Enrichment plugins, caching, budgets; webhook output; markdown/html renderers | **Mostly done.** `abuseipdb.py` and `ismalicious.py` ship with caching and budget enforcement (`enrichment/broker.py`) but are unexercised against live traffic in this deployment - no reputation API keys configured yet. `webhook.py` and `markdown.py`/`html.py` all ship. |
+| 4.5 | MCP server: read-only tools plus `trigger_analysis`, bearer auth, shared run lock | **Done.** Deployed and verified end to end: authentication (accept/reject), all nine tools, the shared-lock rejection of a concurrent trigger, and a real `trigger_analysis` call that surfaced a genuine canary failure and RED status. |
+| 5 | Scheduler hardening, healthcheck, docs, fixtures, CI, public release prep | **Mostly done.** Healthcheck, `docs/components/*.md`, and CI (`.github/workflows/ci.yml`) all ship. `tests/fixtures/` remains an empty on-ramp - the traps it was meant to guard against are covered by inline synthetic fixtures instead (§14) - and the repo has not yet been pushed to a public remote. |
 
-Phase 1-2 are where the leverage is: once the evidence bundle exists, you can iterate on
-analyzers and prompts against stored runs for free.
+The two remaining gaps (live enrichment-key testing, on-disk recorded fixtures) are
+both additive: neither blocks anything else in this list, and both are one small,
+well-scoped task away from closing - the first needs an operator to supply a key, the
+second needs someone to decide the inline-synthetic-fixture tradeoff above is worth
+revisiting.
 
 ---
 
-## 15. Open decisions — your input wanted
+## 16. Design decisions
 
-These change what gets built, so I would rather ask than assume.
+Design questions the first draft of this document posed as open. Each is resolved by
+what actually shipped; the reasoning is kept here because the "why" outlives the code
+that embodies it.
 
-1. **Window strategy.** Sources have genuinely different retention (firewall 48h, DNS
-   ~24h). Options: (a) per-source native windows with clear labeling, everything reconciled
-   through `state.db` trends — my recommendation; (b) clamp everything to a common 24h
-   window for clean comparisons at the cost of firewall day-over-day; (c) make it
-   configurable per source. Current design assumes (a).
+1. **Window strategy: per-source native windows, reconciled through `state.db`.**
+   Firewall and DNS keep their own retention-driven windows (48h / ~24h) rather than
+   being clamped to a shared one; `Source.max_window_hours` records the ceiling and the
+   renderer labels each source's actual achieved coverage rather than implying a
+   uniform window. Trend comparison happens through `Baseline`/`state.db`, not through
+   forcing every source onto the same clock.
 
-2. **Raw event retention.** Keeping `run.db` for 7 days costs a few hundred MB and buys
-   `--from-run` re-analysis and multi-day drill-down. Is that fine, or do you want it
-   tighter? A middle option is keeping events for 2 days and metrics/signals for 90.
+2. **Raw event retention: 7 days, configurable.** `DAWNPATROL_RETENTION_RAW_DAYS`
+   defaults to 7 (a few hundred MB), giving `run --from-run` multi-day drill-down
+   without real cost. The long-term IOC slice (`ioc_dns`/`ioc_flow`) is the answer for
+   anything past that: 180 days by default, a few bytes per row.
 
-3. **SQL tool scope.** Read-only SQL is powerful and lets the model chase its own
-   hypotheses, but it is a broader surface than a fixed query API. I think the guards make
-   it safe and the capability is worth a lot. Comfortable with it?
+3. **SQL tool scope: read-only SQL, not a fixed query API.** Shipped as designed
+   (`agent/sqlguard.py`): the safety is structural (single `SELECT`, allowlisted
+   tables, injected `LIMIT`, a read-only connection) rather than behavioral, so the
+   capability is real and the risk is bounded regardless of what the model tries. The
+   same validator now backs both the in-run investigation agent's tool and the MCP
+   server's `query_events` (§12) - one implementation, two callers.
 
-4. **Delivery on GREEN.** The current system emails every day on the theory that silence
-   is indistinguishable from a dead agent. I have kept that as the default, with
-   `run_when` per output. Worth considering a dead-man's-switch ping (healthchecks.io)
-   instead, so GREEN days can be quiet without ambiguity.
+4. **Delivery on GREEN: `ALWAYS` by default, per-output override.** Email defaults to
+   daily; a dead-man's-switch ping (`healthchecks_ping`) remains a reasonable future
+   output but was not necessary to ship the core loop - `run_when` already makes silence
+   vs. noise a config decision per destination, not a code one.
 
-5. **Model default.** I have defaulted to `claude-opus-5`. Given cost is a stated pain
-   point, it would be reasonable to ship `claude-sonnet-5` as the default and document
-   Opus as the upgrade. My instinct is that the reduction layer cuts cost enough that
-   Opus is affordable and the judgment quality is where you want to spend, but it is your
-   bill.
+5. **Model default: `claude-opus-5`.** Kept, and validated against real cost data rather
+   than an estimate: a full run against this network (~28k firewall records, ~140k DNS
+   queries) costs $0.50-$1.00 depending on `DAWNPATROL_AI_EFFORT`, comfortably inside the
+   $12-45/month range projected in §8.5. The reduction layer is what makes Opus
+   affordable; `claude-sonnet-5` and `claude-haiku-4-5` remain one env var away for a
+   quieter network or a tighter budget.
 
-### Deferred: source coverage
+### Extending source coverage
 
-Which telemetry DawnPatrol consumes is deliberately out of scope for this document. The
-initial build targets the two sources that exist today (`librenms_syslog`, `pihole_dns`),
-and `EventKind` already reserves `IDS` and `FLOW` for later.
+Which telemetry DawnPatrol consumes was deliberately left open at design time, and stays
+open by construction. The current build ships two sources (`librenms_syslog`,
+`pihole_dns`); `EventKind` already reserves `IDS` and `FLOW` for a future intrusion-
+detection or NetFlow source.
 
-This is the payoff of the plugin design: adding a source is one file implementing
-`collect()` and `self_test()`, and every analyzer, enrichment path, renderer, and output
-downstream picks it up without modification. Source coverage can be revisited once the
-harness is running, without touching the architecture.
+This is the payoff of the plugin design, not a gap in it: adding a source is one file
+implementing `collect()` and `self_test()` (see `docs/components/sources.md`), and every
+analyzer, enrichment path, renderer, and output downstream - plus the MCP server's
+`list_source_plugins`/`trigger_analysis` - picks it up without modification.

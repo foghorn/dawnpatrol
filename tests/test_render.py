@@ -209,3 +209,23 @@ def test_json_renderer_is_valid_json():
 def test_degraded_report_says_so_plainly():
     body = render_with("plaintext", make_report(degraded=True, executive_summary=""))
     assert "statistics only" in body.lower()
+
+
+# --------------------------------------------------------------------------- #
+# HTML renderer
+# --------------------------------------------------------------------------- #
+
+
+def test_html_renderer_produces_a_full_document():
+    body = render_with("html", make_report(findings=[sample_finding()]))
+    assert body.strip().startswith("<!doctype html>")
+    assert "</html>" in body
+
+
+def test_html_renderer_escapes_attacker_influenced_text():
+    """Finding text can contain log-derived strings; they must never inject markup."""
+    f = sample_finding()
+    f.why = "Domain observed: <script>alert(1)</script> & friends"
+    body = render_with("html", make_report(findings=[f]))
+    assert "<script>alert" not in body
+    assert "&lt;script&gt;" in body
