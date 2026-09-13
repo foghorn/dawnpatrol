@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Background: night into dawn -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#050b1a"/>
+      <stop offset="55%" stop-color="#0b1830"/>
+      <stop offset="100%" stop-color="#1a2a44"/>
+    </linearGradient>
+
+    <!-- Sun -->
+    <radialGradient id="sun" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffe9b0"/>
+      <stop offset="40%" stop-color="#ffb347"/>
+      <stop offset="75%" stop-color="#ff7a3c"/>
+      <stop offset="100%" stop-color="#ff5a2e" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Shield fill: dawn gradient -->
+    <linearGradient id="shieldFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#12213c"/>
+      <stop offset="45%" stop-color="#1c2f52"/>
+      <stop offset="70%" stop-color="#8a4a2e"/>
+      <stop offset="100%" stop-color="#ff9d4d"/>
+    </linearGradient>
+
+    <linearGradient id="shieldStroke" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8fb8ff"/>
+      <stop offset="100%" stop-color="#ffcf8a"/>
+    </linearGradient>
+
+    <!-- Cyan scan glow -->
+    <linearGradient id="scanLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#33e6ff" stop-opacity="0"/>
+      <stop offset="50%" stop-color="#33e6ff" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#33e6ff" stop-opacity="0"/>
+    </linearGradient>
+
+    <clipPath id="shieldClip">
+      <path d="M512 96 L748 190 C748 190 764 470 512 928 C260 470 276 190 276 190 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <!-- Radar sweep rings centered behind shield -->
+  <g stroke="#33e6ff" fill="none" opacity="0.35">
+    <circle cx="512" cy="560" r="220" stroke-width="2"/>
+    <circle cx="512" cy="560" r="300" stroke-width="2" opacity="0.7"/>
+    <circle cx="512" cy="560" r="380" stroke-width="2" opacity="0.45"/>
+    <circle cx="512" cy="560" r="460" stroke-width="2" opacity="0.25"/>
+  </g>
+
+  <!-- Sun glow rising behind shield base -->
+  <circle cx="512" cy="760" r="260" fill="url(#sun)"/>
+
+  <!-- Shield body -->
+  <path d="M512 96 L748 190 C748 190 764 470 512 928 C260 470 276 190 276 190 Z"
+        fill="url(#shieldFill)" stroke="url(#shieldStroke)" stroke-width="10" stroke-linejoin="round"/>
+
+  <!-- Clipped interior details -->
+  <g clip-path="url(#shieldClip)">
+    <!-- Horizon sun disc rising at base of shield -->
+    <circle cx="512" cy="860" r="210" fill="url(#sun)"/>
+    <circle cx="512" cy="860" r="150" fill="#ffb347" opacity="0.9"/>
+
+    <!-- Horizon line -->
+    <rect x="180" y="705" width="664" height="6" fill="#ffd9a0" opacity="0.85"/>
+
+    <!-- Concentric radar arcs inside shield, upper half (night sky) -->
+    <g stroke="#7fd0ff" fill="none" opacity="0.5">
+      <circle cx="512" cy="705" r="90" stroke-width="3"/>
+      <circle cx="512" cy="705" r="160" stroke-width="3" opacity="0.7"/>
+      <circle cx="512" cy="705" r="230" stroke-width="3" opacity="0.45"/>
+    </g>
+
+    <!-- Diagonal cyan scan line cutting through shield -->
+    <rect x="150" y="440" width="750" height="34" transform="rotate(-18 512 460)" fill="url(#scanLine)"/>
+
+    <!-- Small stars, night portion -->
+    <g fill="#cfe8ff">
+      <circle cx="360" cy="260" r="4"/>
+      <circle cx="430" cy="330" r="3"/>
+      <circle cx="620" cy="250" r="3.5"/>
+      <circle cx="660" cy="340" r="3"/>
+      <circle cx="512" cy="220" r="4"/>
+    </g>
+  </g>
+
+  <!-- Shield outer rim highlight -->
+  <path d="M512 96 L748 190 C748 190 764 470 512 928 C260 470 276 190 276 190 Z"
+        fill="none" stroke="#ffffff" stroke-width="2" opacity="0.15"/>
+</svg>
