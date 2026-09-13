@@ -92,11 +92,11 @@ class DNSAnomalyAnalyzer(Analyzer):
             add(Metric(key=f"dns.block.{reason}", value=count, section="dns",
                        label=f"Blocked: {reason}"))
 
-        for domain, count, blk in q.dns_domain_stats(n=25, blocked=True):
+        for domain, count, _blk in q.dns_domain_stats(n=25, blocked=True):
             add(Metric(key=f"dns.top_blocked.{domain}", value=count, section="dns_blocked",
                        label=domain))
 
-        for client, count, blk in q.dns_client_stats(n=20):
+        for client, count, _blk in q.dns_client_stats(n=20):
             add(Metric(key=f"dns.client.{client}", value=count, section="dns_clients",
                        label=profile.label_for(client)))
 

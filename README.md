@@ -1,14 +1,46 @@
 # DawnPatrol
 
-A scheduled network threat-hunting pipeline in a single container. Deterministic
-code collects, verifies, and reduces your telemetry; an AI agent does the
-judgment on top of it. One report per run, to files, email, or a webhook.
+**Your network, reviewed every morning by something that never gets tired of
+reading firewall logs.**
 
-The design principle is a boundary: **sources fetch, analyzers count, the agent
-decides.** Pagination, integrity checks, statistics, report formatting, and
-severity guardrails are all code — testable, free to run, and identical every
-day. The model is spent on the part it is actually good at: looking across
-pre-computed signals and deciding what a human should care about.
+DawnPatrol is a scheduled network threat-hunting pipeline in a single
+container. Deterministic code collects, verifies, and reduces your telemetry;
+an AI agent spends its judgment on what actually matters. One report per run,
+to files, email, or a webhook — waiting in your inbox before you've had
+coffee.
+
+---
+
+## Why this exists
+
+The obvious way to point an LLM at your logs is to paste them into a chat
+window and ask "anything weird here?" That works until your firewall produces
+75,000 lines and your DNS resolver produces 140,000 queries in a day — at
+which point you're either truncating the evidence, paying to re-derive the
+same `Counter(ports).most_common(15)` every single morning, or both. And a
+model that has to re-parse epoch-vs-string timestamp quirks and pagination
+edge cases from scratch each run has fewer tokens and less attention left for
+the part it's actually good at: deciding what's worth your time.
+
+DawnPatrol draws a hard boundary instead:
+
+> **Sources fetch, analyzers count, the agent decides.**
+
+Pagination, integrity checks, statistics, report formatting, and severity
+guardrails are all plain code — testable, free to run, and identical every
+day. A run's ~300,000 raw events get reduced to a few dozen metrics and
+signals before the model ever sees them. The AI is spent entirely on
+correlation and judgment: is this three-source cluster hammering port 8443 for
+24 hours actually interesting, or is it just Tuesday? Is that DNS client with
+an 80% block rate compromised, or is it just a smart TV with a lot of ad
+trackers?
+
+In production against a real home network — LibreNMS firewall syslog (~28,000
+syslog records, of which ~23,000 are firewall drop/accept lines) plus Pi-hole
+DNS (~140,000 queries) per 24-hour window — a full run (collection through a
+live Claude Opus 5 investigation, adjudication, and delivery) completes in
+under three minutes and costs **$0.50-$1.00**, depending on effort level.
+That's not a projection; that's what it actually costs to run this every day.
 
 ---
 
@@ -17,6 +49,10 @@ pre-computed signals and deciding what a human should care about.
 ```bash
 cp .env.example .env                      # fill in hosts and credentials
 cp config/profile.example.yml config/profile.yml   # describe your network
+
+# The container writes reports as a non-root user; a fresh bind mount needs
+# to allow that before the first run (see Permissions, below).
+mkdir -p out && chmod o+w out
 
 docker compose run --rm dawnpatrol validate      # config and profile check
 docker compose run --rm dawnpatrol list-plugins  # what is enabled, and why not
@@ -28,6 +64,17 @@ docker compose up -d                             # start the scheduler
 `run --stop-after analyze` executes the whole pipeline except the model call. It
 prints the signals the analyzers found and costs nothing, which makes it the
 right way to develop detections and to sanity-check a new deployment.
+
+### Permissions
+
+The container runs as a fixed non-root user, by design — the agent has no
+shell and no filesystem access beyond its own mount points, and dropping root
+inside the image is part of that. The tradeoff: a plain bind mount (`./out`)
+keeps the host directory's original ownership, so the first write into it
+fails with `Permission denied` until you widen it once with `chmod o+w out`
+(shown above). The database volume doesn't need this — Docker initializes a
+named volume from the image's own ownership, so it's correct from the first
+run.
 
 ---
 
@@ -119,6 +166,11 @@ disabled one is waiting for.
 
 Analyzers are pure functions over the event store: no network, no model calls.
 That is what makes them testable against fixtures and fast to iterate on.
+Ships today with two sources (LibreNMS syslog, Pi-hole DNS) and seven
+analyzers (firewall volume, firewall pattern classification, DNS anomalies,
+beaconing, per-segment review, cross-source correlation, and baseline delta) —
+the shape is built for a third source and an eighth analyzer to be a single
+new file, not a rewrite.
 
 ---
 
@@ -147,6 +199,12 @@ reads `Detection self-test: 2/2 canaries detected`. A failed canary is itself a
 CRITICAL finding, because it means every GREEN since the last successful check
 is unverified. Canary events are analyzed in an isolated pass, so they never
 touch a reported statistic.
+
+None of this is aspirational — it's what a real deployment produces every
+morning: a report that names its own blind spots (a segment behind a NAT
+gateway with no per-device visibility, a DNS source that came back short of
+its own reported total) right alongside its findings, instead of a
+confident-sounding wall of text with no way to check its work.
 
 ---
 
@@ -190,6 +248,10 @@ tables. For MySQL, point it at a read-only database user as well.
 Every rendered report is scanned for configured secret values before any output
 runs; a match aborts delivery.
 
+The container itself drops root before running your code, per the Dockerfile's
+`USER` directive — the non-root uid is also why the `out/` bind mount needs the
+one-time permission fix under Quick start.
+
 ---
 
 ## Development
@@ -197,16 +259,18 @@ runs; a match aborts delivery.
 ```bash
 python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/pytest -q
+.venv/bin/ruff check dawnpatrol tests
 ```
 
 The suite runs fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract,
-and every adjudication guardrail.
+and every adjudication guardrail. CI (`.github/workflows/ci.yml`) runs the same
+lint and test suite on every push and pull request, across Python 3.11-3.13.
 
 See `docs/ARCHITECTURE.md` for the full design.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

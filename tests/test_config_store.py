@@ -7,10 +7,9 @@ from datetime import datetime, timedelta
 import pytest
 
 from dawnpatrol.config import DatabaseSettings, Settings
-from dawnpatrol.models import UTC, EntityType, Severity, Window
+from dawnpatrol.models import UTC, EntityType
 from dawnpatrol.profile import Profile
 from dawnpatrol.secrets import SecretRegistry, SecretStr, read_env
-
 
 # --------------------------------------------------------------------------- #
 # Secrets

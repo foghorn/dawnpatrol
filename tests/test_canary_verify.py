@@ -116,7 +116,6 @@ def ctx(settings, profile, store, window):
 
 
 def full_result(window, n=100):
-    from datetime import timedelta
     step = (window.end - window.start) / n
     events = [
         Event(ts=window.start + step * i, source="fake", kind=EventKind.FIREWALL,

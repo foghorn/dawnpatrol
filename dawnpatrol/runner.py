@@ -37,8 +37,6 @@ from .models import (
     UTC,
     CollectionResult,
     DeliveryResult,
-    Event,
-    EventKind,
     Metric,
     Report,
     Signal,

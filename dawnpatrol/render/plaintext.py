@@ -15,7 +15,7 @@ from __future__ import annotations
 import textwrap
 import unicodedata
 
-from ..models import Finding, Report, Severity, SourceHealth, Status
+from ..models import Finding, Report, SourceHealth
 
 WIDTH = 72
 INDENT = "  "

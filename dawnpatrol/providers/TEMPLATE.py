@@ -39,7 +39,7 @@ class TemplateProvider(Provider):
         on_turn: Callable[[TokenUsage], None] | None = None,
     ) -> AgentRun:
         run = AgentRun()
-        by_name = {t.name: t for t in tools}
+        _by_name = {t.name: t for t in tools}
         # ... build the request, loop on tool calls, dispatch through by_name ...
         # When the model calls SUBMIT_TOOL, set run.analysis and break.
         run.error = f"{self.name} provider is a template and does not implement {SUBMIT_TOOL}"
