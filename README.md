@@ -1,5 +1,7 @@
 # DawnPatrol
 
+<img src="docs/dawnpatrol_logo.svg" alt="DawnPatrol logo" width="200">
+
 **An AI SOC analyst for your home or office network — one that reads every log,
 every morning, and never gets bored, never gets tired, and never stops
 learning the network it watches.**

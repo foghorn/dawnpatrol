@@ -72,6 +72,32 @@ def test_events_query_must_be_scoped_to_the_run():
         sqlguard.validate("SELECT * FROM events", RUN)
 
 
+@pytest.mark.parametrize("sql", [
+    "SELECT * FROM(events)",
+    "SELECT * FROM (events)",
+    "SELECT * FROM((events))",
+])
+def test_parenthesized_events_reference_still_requires_run_scope(sql):
+    """A missing space after FROM must not hide the table from the run-id check."""
+    with pytest.raises(sqlguard.SQLRejected, match="run_id"):
+        sqlguard.validate(sql, RUN)
+
+
+@pytest.mark.parametrize("table", ("runs", "deliveries", "enrichment_cache",
+                                   "suppressions", "sqlite_master"))
+def test_parenthesized_disallowed_table_is_still_rejected(table):
+    """The same trick must not hide a disallowed table from the allowlist check."""
+    with pytest.raises(sqlguard.SQLRejected, match="not readable"):
+        sqlguard.validate(f"SELECT * FROM({table})", RUN)
+
+
+def test_subquery_in_from_is_not_mistaken_for_a_table_reference():
+    # Must not be rejected as an illegal reference to a table named "select".
+    sql, _ = sqlguard.validate(
+        f"SELECT * FROM (SELECT src_ip FROM events WHERE run_id='{RUN}') t", RUN)
+    assert "events" in sql
+
+
 def test_long_term_tables_need_no_run_scope():
     sql, _ = sqlguard.validate("SELECT domain FROM ioc_dns WHERE domain LIKE '%evil%'", RUN)
     assert "ioc_dns" in sql

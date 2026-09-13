@@ -24,8 +24,19 @@ _FORBIDDEN = re.compile(
     re.IGNORECASE,
 )
 _COMMENT = re.compile(r"(--[^\n]*|/\*.*?\*/)", re.DOTALL)
-_TABLE_REF = re.compile(r"\b(?:from|join)\s+([`\"\[]?)([a-zA-Z_][a-zA-Z0-9_]*)\1",
-                        re.IGNORECASE)
+# `(?:\s|\()*` absorbs any mix of whitespace and open-parens between the
+# keyword and the identifier, so `FROM(events)`, `FROM (events)`, and
+# `FROM((events))` are all caught the same as `FROM events` - a bare
+# whitespace requirement here let a query hide its table reference from the
+# allowlist/run-scope checks below by simply omitting the space.
+_TABLE_REF = re.compile(
+    r"\b(?:from|join)(?:\s|\()*([`\"\[]?)([a-zA-Z_][a-zA-Z0-9_]*)\1",
+    re.IGNORECASE,
+)
+# A subquery like `FROM (SELECT ...)` makes the pattern above capture
+# "select"/"with" as if it were a table name; those aren't real references
+# and the nested FROM inside the subquery is matched separately anyway.
+_NOT_A_TABLE = {"select", "with"}
 _LIMIT_RE = re.compile(r"\blimit\s+(\d+)", re.IGNORECASE)
 
 
@@ -50,7 +61,9 @@ def validate(sql: str, run_id: str, max_rows: int = DEFAULT_LIMIT) -> tuple[str,
     if _FORBIDDEN.search(stripped):
         raise SQLRejected("query contains a forbidden keyword; this tool is read-only")
 
-    referenced = {m.group(2).lower() for m in _TABLE_REF.finditer(stripped)}
+    referenced = {
+        m.group(2).lower() for m in _TABLE_REF.finditer(stripped)
+    } - _NOT_A_TABLE
     # CTE names are self-referential and legitimate; allow anything defined by WITH.
     cte_names = {
         m.group(1).lower()
