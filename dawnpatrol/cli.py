@@ -6,6 +6,7 @@ import argparse
 import json
 import logging
 import sys
+import threading
 from datetime import datetime
 
 from . import __version__
@@ -148,11 +149,31 @@ def _dispatch(command: str, args: argparse.Namespace, settings: Settings) -> int
 
 def cmd_serve(settings, profile, store, args) -> int:
     runner = Runner(settings, profile, store)
+    run_lock = threading.Lock()
+
+    def guarded_run(**kwargs):
+        """Shared by the scheduler and the MCP trigger tool - never two runs at once."""
+        if not run_lock.acquire(blocking=False):
+            return None, "a run is already in progress; try again shortly"
+        try:
+            return runner.run(**kwargs), None
+        finally:
+            run_lock.release()
 
     def job() -> None:
-        outcome = runner.run()
-        if outcome.error:
+        outcome, busy = guarded_run()
+        if busy:
+            log.warning("scheduled run skipped: %s", busy)
+        elif outcome.error:
             log.error("run error: %s", outcome.error)
+
+    if settings.mcp.enabled:
+        from .mcpserver import serve_forever
+        thread = threading.Thread(
+            target=serve_forever, args=(settings, profile, store, guarded_run),
+            name="mcp-server", daemon=True,
+        )
+        thread.start()
 
     return Scheduler(settings, job).serve()
 

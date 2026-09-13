@@ -131,7 +131,8 @@ class Runner:
 
     def run(self, *, window_hours: int | None = None, dry_run: bool = False,
             stop_after: str = "", now: datetime | None = None,
-            reuse_run_id: str | None = None) -> RunOutcome:
+            reuse_run_id: str | None = None, sources: list[str] | None = None,
+            skip_outputs: frozenset[str] = frozenset()) -> RunOutcome:
         started = now or datetime.now(UTC)
         hours = window_hours or self.settings.window_hours
         window = Window.ending_now(hours, now=started)
@@ -159,8 +160,21 @@ class Runner:
         try:
             # 1-2 COLLECT
             with _timed(timings, "collect"):
-                sources = self.load_sources()
-                if not sources:
+                active_sources = self.load_sources()
+                if sources is not None:
+                    wanted = set(sources)
+                    known = {s.name for s in active_sources}
+                    unknown = wanted - known
+                    active_sources = [s for s in active_sources if s.name in wanted]
+                    if unknown:
+                        outcome.error = (
+                            f"requested source(s) not enabled: {', '.join(sorted(unknown))}. "
+                            f"Enabled sources: {', '.join(sorted(known)) or '(none)'}"
+                        )
+                        self.store.finish_run(run_id, finished_at=datetime.now(UTC),
+                                              error=outcome.error)
+                        return outcome
+                if not active_sources:
                     outcome.error = (
                         "no sources are enabled. Set the environment variables for at "
                         "least one source plugin (see `dawnpatrol list-plugins`)."
@@ -168,7 +182,7 @@ class Runner:
                     self.store.finish_run(run_id, finished_at=datetime.now(UTC),
                                           error=outcome.error)
                     return outcome
-                results = self._collect(sources, ctx)
+                results = self._collect(active_sources, ctx)
 
             # 3-4 VERIFY
             with _timed(timings, "verify"):
@@ -243,7 +257,7 @@ class Runner:
 
             # 9 RENDER
             with _timed(timings, "render"):
-                outputs = self.load_outputs()
+                outputs = [o for o in self.load_outputs() if o.name not in skip_outputs]
                 needed = {o.renderer for o in outputs} | {"plaintext"}
                 for name in needed:
                     outcome.rendered[name] = render_with(name, report)

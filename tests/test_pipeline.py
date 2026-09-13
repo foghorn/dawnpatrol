@@ -261,6 +261,28 @@ def test_no_sources_enabled_is_a_clear_error(runner, settings):
     assert "no sources are enabled" in outcome.error
 
 
+def test_sources_filter_accepts_a_known_source(runner):
+    outcome = runner.run(sources=["synthetic"])
+    assert outcome.report is not None
+    assert outcome.error is None
+
+
+def test_sources_filter_rejects_an_unknown_name(runner):
+    outcome = runner.run(sources=["not-a-real-source"])
+    assert outcome.report is None
+    assert "not enabled" in outcome.error
+    assert "not-a-real-source" in outcome.error
+
+
+def test_skip_outputs_suppresses_only_the_named_output(runner):
+    normal = runner.run()
+    assert any(d.output == "file" and d.ok and not d.skipped
+              for d in normal.deliveries)
+
+    skipped = runner.run(skip_outputs=frozenset({"file"}))
+    assert not any(d.output == "file" for d in skipped.deliveries)
+
+
 def test_run_is_recorded_in_the_database(runner, store):
     outcome = runner.run()
     rows = store.recent_runs(5)

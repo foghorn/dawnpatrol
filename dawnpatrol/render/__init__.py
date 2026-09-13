@@ -9,12 +9,13 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from ..models import Report
-from . import json_report, markdown, plaintext
+from . import html, json_report, markdown, plaintext
 
 RENDERERS: dict[str, Callable[[Report], str]] = {
     "plaintext": plaintext.render,
     "markdown": markdown.render,
     "json": json_report.render,
+    "html": html.render,
 }
 
 
@@ -25,4 +26,4 @@ def render(name: str, report: Report) -> str:
     return fn(report)
 
 
-__all__ = ["render", "RENDERERS", "plaintext", "markdown", "json_report"]
+__all__ = ["render", "RENDERERS", "plaintext", "markdown", "json_report", "html"]
