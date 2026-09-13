@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import Integer, and_, case, cast, func, select
 
 from . import schema as S
-from .models import UTC, EventKind
+from .models import EventKind
 from .store import Store, _aware
 
 

@@ -232,7 +232,7 @@ class Event:
 
 `src_zone` / `dst_zone` are assigned by matching IPs against the segments in
 `profile.yml`. That is what lets an analyzer say "IoT → external on a non-vendor port"
-without hardcoding `10.128.50.0/24` anywhere in the source tree.
+without hardcoding `192.168.50.0/24` anywhere in the source tree.
 
 Downstream types:
 
@@ -698,10 +698,10 @@ DAWNPATROL_AI_MAX_COST_USD=3.00
 DAWNPATROL_AI_MAX_TOOL_CALLS=25
 
 # Sources — presence of required vars auto-enables the plugin
-DAWNPATROL_SOURCE_LIBRENMS_URL=http://10.128.10.55/api/v0
+DAWNPATROL_SOURCE_LIBRENMS_URL=http://librenms.example/api/v0
 DAWNPATROL_SOURCE_LIBRENMS_TOKEN=...
 DAWNPATROL_SOURCE_LIBRENMS_DEVICES=3,4,7
-DAWNPATROL_SOURCE_PIHOLE_URL=http://10.128.10.69/api
+DAWNPATROL_SOURCE_PIHOLE_URL=http://pihole.example/api
 DAWNPATROL_SOURCE_PIHOLE_PASSWORD=...
 
 # Enrichment
@@ -724,40 +724,40 @@ site: { name: "home", timezone: "UTC" }
 
 zones:
   - name: lan
-    cidrs: ["10.128.10.0/24"]
+    cidrs: ["192.168.1.0/24"]
     trust: trusted
   - name: iot
-    cidrs: ["10.128.50.0/24"]
+    cidrs: ["192.168.50.0/24"]
     trust: untrusted
-    gateway: "10.128.10.8"
+    gateway: "192.168.1.8"
     notes: "Cameras and home automation. Unpatchable and chatty. Highest-risk
             segment. Expected egress: a small stable set of vendor cloud
             endpoints plus NTP. Anything else is notable."
     expected_egress_domains: ["*.vendor-cloud.example", "*.pool.ntp.org"]
   - name: dmz
-    cidrs: ["10.128.15.0/24"]
+    cidrs: ["192.168.15.0/24"]
     trust: semi-trusted
-    gateway: "10.128.10.2"
+    gateway: "192.168.1.2"
     notes: "Windows Server reached via TeamViewer. Inbound RDP/SMB reaching this
             host is HIGH. Unexpected outbound is HIGH."
     expected_egress_domains: ["*.teamviewer.com", "*.microsoft.com"]
 
 hosts:
-  - { ip: "10.128.10.1",  role: "router/firewall/vpn", model: "ASUS RT-AX88U Pro" }
-  - { ip: "10.128.10.69", role: "dns-resolver", authoritative_resolver: true }
-  - { ip: "10.128.10.55", role: "monitoring" }
+  - { ip: "192.168.1.1",  role: "router/firewall/vpn", model: "Example RT-1234" }
+  - { ip: "192.168.1.53", role: "dns-resolver", authoritative_resolver: true }
+  - { ip: "192.168.1.55", role: "monitoring" }
 
 policy:
   wan_ip_is_dynamic: true            # a WAN IP change is not an incident
-  approved_resolvers: ["10.128.10.69"]
+  approved_resolvers: ["192.168.1.53"]
   attack_surface_ports: [22, 23, 80, 443, 445, 1194, 3306, 3389, 5060,
                          5432, 5900, 8080, 8443, 8728]
-  nat_attribution_limited_behind: ["10.128.10.8", "10.128.10.2"]
+  nat_attribution_limited_behind: ["192.168.1.8", "192.168.1.2"]
 
 known_quirks:
-  - "ASUS/Broadcom firmware mislabels routine ROAMAST/DBG/WATCHDOG chatter as
-     'emerg' severity. Break emerg counts down by program before concluding."
-  - "Client 10.128.10.211 emits malformed DNS-SD names with non-UTF-8 bytes.
+  - "Some consumer router firmware mislabels routine roaming/watchdog chatter
+     as 'emerg' severity. Break emerg counts down by program before concluding."
+  - "One IoT client emits malformed DNS-SD names with non-UTF-8 bytes.
      Client-side quirk, not a security finding."
 ```
 

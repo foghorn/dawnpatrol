@@ -62,7 +62,7 @@ class SegmentReviewAnalyzer(Analyzer):
                            profile: Profile, zone) -> None:
         patterns = [p.lower().lstrip("*.") for p in zone.expected_egress_domains]
         unexpected: list[tuple[str, int]] = []
-        for domain, count, _blk in q.dns_domain_stats(n=2000):
+        for domain, _count, _blk in q.dns_domain_stats(n=2000):
             if not domain:
                 continue
             if any(domain == p or domain.endswith("." + p) for p in patterns):

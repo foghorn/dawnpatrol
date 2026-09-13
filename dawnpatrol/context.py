@@ -25,9 +25,9 @@ class RunContext:
     run_id: str
     started_at: datetime
     window: Window
-    settings: "Settings"
-    profile: "Profile"
-    store: "Store"
+    settings: Settings
+    profile: Profile
+    store: Store
     run_number: int = 1
     dry_run: bool = False
     notes: list[str] = field(default_factory=list)

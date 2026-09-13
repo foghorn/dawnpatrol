@@ -232,7 +232,7 @@ def cmd_list_plugins(settings: Settings) -> int:
                 state = f"disabled (needs {', '.join(missing)})"
             print(f"  {cls.name:22} {state}")
     print("\nproviders:")
-    for name, cls in sorted(available_providers().items()):
+    for name, _cls in sorted(available_providers().items()):
         marker = " <- selected" if name == settings.ai.provider else ""
         print(f"  {name:22}{marker}")
     print("\nrenderers:")

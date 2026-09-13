@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
-from .models import UTC, AnalyzerResult, CanaryResult, Event, EventKind, Window
+from .models import AnalyzerResult, CanaryResult, Event, EventKind, Window
 
 log = logging.getLogger(__name__)
 

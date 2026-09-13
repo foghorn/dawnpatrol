@@ -10,12 +10,12 @@ from __future__ import annotations
 import logging
 import signal
 import threading
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from croniter import CroniterBadCronError, croniter
+from croniter import croniter
 
 from .config import Settings
 from .errors import ConfigError

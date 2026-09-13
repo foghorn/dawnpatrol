@@ -171,8 +171,9 @@ def test_retention_ceiling_is_declared(pihole):
 
 
 def test_window_is_clamped_to_retention(pihole, window):
-    from dawnpatrol.models import Window
     from datetime import timedelta
+
+    from dawnpatrol.models import Window
     long_window = Window(start=window.end - timedelta(hours=48), end=window.end)
     assert pihole.effective_window(long_window).hours == 24
 

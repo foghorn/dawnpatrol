@@ -53,7 +53,7 @@ def beacon_score(timestamps: list[float]) -> dict[str, float] | None:
     if span < MIN_SPAN_HOURS * 3600:
         return None
 
-    gaps = [b - a for a, b in zip(ordered, ordered[1:]) if b > a]
+    gaps = [b - a for a, b in zip(ordered, ordered[1:], strict=False) if b > a]
     if len(gaps) < MIN_SAMPLES - 1:
         return None
 

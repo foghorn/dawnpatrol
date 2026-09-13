@@ -10,11 +10,11 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import IntEnum, StrEnum
 from typing import Any
 
-UTC = timezone.utc
+UTC = UTC
 
 
 # --------------------------------------------------------------------------- #

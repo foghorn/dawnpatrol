@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..models import Metric, Report, Signal, SourceHealth, Window
+from ..models import Metric, Signal, SourceHealth, Window
 from ..profile import Profile
 
 MAX_SIGNALS = 60

@@ -7,7 +7,6 @@ what makes it safe to iterate on prompts and analyzers.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 
 import pytest
 
@@ -307,7 +306,8 @@ def test_canary_events_never_appear_in_reported_metrics(runner):
 
 
 def test_canary_domain_absent_from_every_rendered_format(runner):
-    from dawnpatrol.render import RENDERERS, render as render_with
+    from dawnpatrol.render import RENDERERS
+    from dawnpatrol.render import render as render_with
     report = runner.run().report
     for name in RENDERERS:
         body = render_with(name, report)
