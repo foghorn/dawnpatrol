@@ -15,6 +15,7 @@ from email.message import EmailMessage
 
 from ..context import RunContext
 from ..models import DeliveryResult, Report, Status
+from ..render import render as render_with
 from ..render.plaintext import subject_line
 from ..secrets import read_bool, read_env, read_int, read_list, read_secret
 from .base import Output
@@ -24,7 +25,11 @@ log = logging.getLogger(__name__)
 
 class SMTPEmailOutput(Output):
     name = "smtp"
-    renderer = "plaintext"
+    #: The formatted version is what a reader actually sees; plaintext rides
+    #: along underneath as the multipart/alternative fallback (see emit()) for
+    #: clients and spam filters that prefer or require it - never the other
+    #: way around.
+    renderer = "html_email"
     requires_env = frozenset({"DAWNPATROL_OUTPUT_SMTP_HOST", "DAWNPATROL_OUTPUT_SMTP_TO"})
     default_run_when = frozenset({Status.GREEN, Status.AMBER, Status.RED})
     #: Daily by default - silence is otherwise indistinguishable from a dead agent.
@@ -51,9 +56,13 @@ class SMTPEmailOutput(Output):
         message["To"] = ", ".join(recipients)
         message["X-DawnPatrol-Status"] = report.status.value
         message["X-DawnPatrol-Run"] = report.run_id
-        # Plain text only. No HTML alternative, no attachments: the report must
-        # stand alone in the body of the message.
-        message.set_content(rendered, subtype="plain", charset="us-ascii")
+        # multipart/alternative: a plain-text part every client and spam
+        # filter can fall back to, with the formatted HTML as the preferred
+        # alternative a normal reader actually sees. No attachments either
+        # way - the report stands alone in the body of the message.
+        message.set_content(render_with("plaintext", report), subtype="plain",
+                            charset="us-ascii")
+        message.add_alternative(rendered, subtype="html", charset="utf-8")
 
         if ctx.dry_run:
             return DeliveryResult(output=self.name, ok=True, skipped=True,

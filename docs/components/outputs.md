@@ -1,11 +1,11 @@
 # Outputs
 
 An output pairs a renderer with a destination. That split matters: renderers
-(`plaintext`, `markdown`, `json`, `html`) are shared library code, not plugins, so a new
-delivery destination inherits a correct, already-tested report body instead of
-re-implementing formatting. `smtp_email`, `file_report`, `webhook`, and a future
-`s3_upload` all get the ASCII-safe plaintext contract right by construction, because
-none of them format anything themselves.
+(`plaintext`, `markdown`, `json`, `html`, `html_email`) are shared library code, not
+plugins, so a new delivery destination inherits a correct, already-tested report body
+instead of re-implementing formatting. `smtp_email`, `file_report`, `webhook`, and a
+future `s3_upload` all get their format's contract right by construction, because none
+of them format anything themselves.
 
 Three ship today: `file_report` (always on), `smtp_email`, `webhook`.
 
@@ -15,7 +15,7 @@ Three ship today: `file_report` (always on), `smtp_email`, `webhook`.
 # dawnpatrol/outputs/base.py
 class Output(ABC):
     name: str
-    renderer: str = "plaintext"          # "plaintext" | "markdown" | "html" | "json"
+    renderer: str = "plaintext"          # "plaintext" | "markdown" | "html" | "html_email" | "json"
     requires_env: frozenset[str]
     default_run_when: frozenset[Status] = {GREEN, AMBER, RED}
     default_important_only: bool = False
@@ -51,12 +51,33 @@ output and say so in a comment; don't assume.
 
 ## Walkthrough: `smtp_email.py`
 
-Plain `smtplib`, STARTTLS or SSL per `DAWNPATROL_OUTPUT_SMTP_STARTTLS`/`_SSL`, one
-`EmailMessage` with `subtype="plain", charset="us-ascii"` - the plaintext renderer's
-7-bit guarantee is what makes that charset declaration honest rather than a lie that
-happens to work. Recipients come from `DAWNPATROL_OUTPUT_SMTP_TO`, an environment
-variable, never from anything in the report body - the structural reason log content
-can't redirect a delivery.
+Plain `smtplib`, STARTTLS or SSL per `DAWNPATROL_OUTPUT_SMTP_STARTTLS`/`_SSL`. The
+message is `multipart/alternative` with two parts, built with the standard library's
+`EmailMessage`:
+
+```python
+message.set_content(render_with("plaintext", report), subtype="plain", charset="us-ascii")
+message.add_alternative(rendered, subtype="html", charset="utf-8")   # rendered = html_email
+```
+
+`renderer = "html_email"` on the class is what the `rendered` argument to `emit()`
+actually is; the plaintext part is rendered a second time, directly, inside `emit()`
+itself, specifically so both parts exist regardless of which renderer the class declares
+as primary. Every mail client that opens the message shows the HTML part - that's the
+"preferred" alternative in MIME's ordering, formatted findings, colored status badge, a
+real table for statistics; the plain-text part underneath is there for the minority of
+clients that can't render HTML, for spam filters that weight a missing plaintext part
+negatively, and for accessibility tools - never seen by a normal reader, never the thing
+you're designing for, but there. Recipients come from `DAWNPATROL_OUTPUT_SMTP_TO`, an
+environment variable, never from anything in the report body - the structural reason
+log content can't redirect a delivery.
+
+`html_email.py` is a separate module from the general-purpose `html.py` renderer used by
+`file_report`/`webhook`, not a shared one, because email has a stricter rendering
+contract than a browser or a webhook does: every mail client (Outlook's desktop client
+renders through Word's engine, not a browser engine, in particular) has to be assumed
+incapable of honoring a `<style>` block, so every rule in `html_email.py` is inlined
+directly onto the element it applies to.
 
 ## Walkthrough: `webhook.py`
 

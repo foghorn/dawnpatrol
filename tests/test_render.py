@@ -29,7 +29,7 @@ from dawnpatrol.models import (
 )
 from dawnpatrol.render import RENDERERS
 from dawnpatrol.render import render as render_with
-from dawnpatrol.render.plaintext import WIDTH, subject_line, to_ascii
+from dawnpatrol.render.plaintext import subject_line, to_ascii
 
 
 def make_report(**kw) -> Report:
@@ -93,10 +93,18 @@ def test_output_is_pure_ascii():
     body.encode("ascii")  # raises if anything non-ASCII survived
 
 
-def test_no_line_exceeds_the_width_limit():
-    body = render_with("plaintext", make_report(findings=[sample_finding()]))
-    long_lines = [ln for ln in body.split("\n") if len(ln) > WIDTH]
-    assert not long_lines, f"lines over {WIDTH} columns: {long_lines[:3]}"
+def test_long_paragraphs_are_not_hard_wrapped():
+    """A prior version hard-wrapped every paragraph to 72 columns, which
+    double-wrapped against mail clients that already soft-wrap text/plain
+    bodies to the reader's own width. The client decides now, not the
+    renderer - a long sentence stays on one line."""
+    long_sentence = (
+        "This single sentence is deliberately much longer than seventy two "
+        "characters so that a hard-wrapping renderer would have broken it "
+        "across more than one line, which is exactly the behaviour we removed."
+    )
+    body = render_with("plaintext", make_report(executive_summary=long_sentence))
+    assert long_sentence in body.split("\n")
 
 
 def test_no_markdown_syntax_leaks_into_plaintext():
@@ -229,3 +237,94 @@ def test_html_renderer_escapes_attacker_influenced_text():
     body = render_with("html", make_report(findings=[f]))
     assert "<script>alert" not in body
     assert "&lt;script&gt;" in body
+
+
+# --------------------------------------------------------------------------- #
+# HTML email renderer
+# --------------------------------------------------------------------------- #
+
+
+def test_html_email_renderer_produces_a_full_document():
+    body = render_with("html_email", make_report(findings=[sample_finding()]))
+    assert body.strip().startswith("<!doctype html>")
+    assert "</html>" in body
+
+
+def test_html_email_renderer_has_no_style_block():
+    """A <style> block is not reliably honoured by mail clients (Outlook's
+    Word-based renderer in particular) - every rule here must be inline."""
+    body = render_with("html_email", make_report(findings=[sample_finding()]))
+    assert "<style" not in body
+    # Every element carries its own style attribute rather than a class.
+    assert 'style="' in body
+    assert "class=" not in body
+
+
+def test_html_email_renderer_escapes_attacker_influenced_text():
+    f = sample_finding()
+    f.why = "Domain observed: <script>alert(1)</script> & friends"
+    body = render_with("html_email", make_report(findings=[f]))
+    assert "<script>alert" not in body
+    assert "&lt;script&gt;" in body
+
+
+def test_html_email_renderer_colors_status_and_severity():
+    red_report = make_report(status=Status.RED, findings=[sample_finding()])
+    body = render_with("html_email", red_report)
+    assert "#ffebe9" in body  # RED status badge background
+    assert "#cf222e" in body  # HIGH severity finding border
+
+
+def test_html_email_is_the_smtp_output_renderer_with_a_plaintext_fallback():
+    """The email must render as multipart/alternative: HTML as the preferred
+    part a normal client shows, plain text underneath as the fallback."""
+    from dawnpatrol.outputs.smtp_email import SMTPEmailOutput
+
+    assert SMTPEmailOutput.renderer == "html_email"
+
+
+def test_smtp_output_sends_multipart_alternative_html_and_plaintext(monkeypatch):
+    import smtplib
+    import types
+
+    from dawnpatrol.outputs.smtp_email import SMTPEmailOutput
+
+    monkeypatch.setenv("DAWNPATROL_OUTPUT_SMTP_HOST", "smtp.example.invalid")
+    monkeypatch.setenv("DAWNPATROL_OUTPUT_SMTP_TO", "you@example.invalid")
+
+    sent: list = []
+
+    class FakeSMTP:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def starttls(self, *a, **kw):
+            pass
+
+        def send_message(self, message):
+            sent.append(message)
+
+    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+
+    report = make_report(findings=[sample_finding()])
+    html_body = render_with("html_email", report)
+    output = SMTPEmailOutput()
+    ctx = types.SimpleNamespace(dry_run=False)
+    result = output.emit(html_body, report, ctx)
+
+    assert result.ok
+    assert len(sent) == 1
+    message = sent[0]
+    assert message.is_multipart()
+    parts = {part.get_content_type(): part for part in message.walk()
+            if not part.is_multipart()}
+    assert "text/plain" in parts
+    assert "text/html" in parts
+    assert "<!doctype html>" in parts["text/html"].get_content()
+    assert sample_finding().title in parts["text/plain"].get_content()
