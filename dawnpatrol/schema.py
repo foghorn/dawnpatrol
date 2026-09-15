@@ -256,6 +256,19 @@ canaries = Table(
     Index("ix_canaries_run", "run_id"),
 )
 
+#: Free-text context an external agent submits over MCP, read back on every
+#: future run alongside profile.yml - see mcpserver/tools.py and agent/harness.py.
+#: Off by default (DAWNPATROL_MCP_NOTEBOOK_ENABLED); never touched by the
+#: scheduled pipeline itself, only by an operator-authorized external agent.
+notebook = Table(
+    "notebook", metadata,
+    Column("id", PK, primary_key=True, autoincrement=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("author", String(_NAME), default=""),
+    Column("text", Text, nullable=False),
+    Index("ix_notebook_created", "created_at"),
+)
+
 deliveries = Table(
     "deliveries", metadata,
     Column("id", PK, primary_key=True, autoincrement=True),

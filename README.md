@@ -276,6 +276,7 @@ to connect to directly:
 | `get_network_profile` | The zones/hosts/policy/quirks documentation from `profile.yml`. |
 | `list_source_plugins` | Which sources are enabled - the valid names for the next tool. |
 | `trigger_analysis` | Collect fresh data and run a full analysis now, optionally scoped to specific sources, **without emailing the result**. Real API spend, same pipeline a scheduled run would use. |
+| `read_notebook` / `add_notebook_entry` / `delete_notebook_entry` | Read, submit, and retract free-text notes that future runs see alongside `profile.yml` — a separate opt-in, see below. |
 
 This is a second door onto capabilities that already exist, not a new set of
 them: `trigger_analysis` runs the identical `Runner` a scheduled run does,
@@ -293,9 +294,21 @@ the container logs at startup. Bind it to a specific address
 (`DAWNPATROL_MCP_HOST`), not a public one, and treat the token like any other
 credential in `.env`.
 
+**The agent notebook** (`DAWNPATROL_MCP_NOTEBOOK_ENABLED`, default off even
+when MCP itself is on) is the one write path that shapes future automated
+judgment rather than just reading data or running the existing pipeline: an
+agent can leave a note — "a new device went on the IoT segment today," "this
+finding was confirmed benign" — and every future run reads it alongside
+`profile.yml`, capped to the most recent entries so it can't grow the context
+(or the bill) forever. It supplements the profile; it can never make the model
+report a finding that isn't backed by a real analyzer signal. It's a
+materially bigger blast radius than the rest of the MCP surface if the token
+leaks, which is exactly why it needs its own opt-in.
+
 See [docs/components/mcp-server.md](docs/components/mcp-server.md) for the
-full tool reference, deployment guidance, and a real example of the detection
-self-test correctly catching a gap during an ad hoc, source-restricted run.
+full tool reference, the notebook's full design rationale, deployment
+guidance, and a real example of the detection self-test correctly catching a
+gap during an ad hoc, source-restricted run.
 
 ---
 
@@ -328,7 +341,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-202 tests, fully offline — no network, no API key, no spend — including an
+220 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract

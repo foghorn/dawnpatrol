@@ -12,7 +12,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import create_engine, delete, func, insert, select, text, update
+from sqlalchemy import create_engine, delete, event, func, insert, select, text, update
 from sqlalchemy.engine import Engine
 
 from . import schema as S
@@ -64,10 +64,34 @@ class Store:
             self._tune_sqlite()
 
     def _tune_sqlite(self) -> None:
-        with self.engine.begin() as conn:
-            conn.exec_driver_sql("PRAGMA journal_mode=WAL")
-            conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
-            conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+        """Applied on every pooled connection, not just the one that opens first.
+
+        The MCP server and the scheduler each pull connections from the same
+        pool concurrently. A one-shot ``PRAGMA`` run at startup only ever
+        configures whichever single DBAPI connection happened to be open at
+        that moment - every other connection the pool hands out afterward
+        reverts to SQLite's own defaults, in particular ``busy_timeout=0``,
+        which turns an ordinary write held during a large batch insert (a
+        180k-event PERSIST stage, say) into an immediate "database is locked"
+        for anything else trying to write at the same time, rather than a
+        short, harmless wait. Verified against a real deployment: the MCP
+        server's own write path hit exactly this before this fix.
+        """
+
+        @event.listens_for(self.engine, "connect")
+        def _set_pragma(dbapi_conn: Any, _record: Any) -> None:
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")
+            cur.execute("PRAGMA foreign_keys=ON")
+            cur.execute("PRAGMA busy_timeout=30000")
+            cur.close()
+
+        # Force the listener to fire once now too, so callers that only ever
+        # use a single connection (the common case) don't wait on the first
+        # real query to discover misconfiguration.
+        with self.engine.connect():
+            pass
 
     def create_all(self) -> None:
         S.metadata.create_all(self.engine)
@@ -492,6 +516,56 @@ class Store:
             result = conn.execute(
                 delete(S.suppressions).where(S.suppressions.c.id == suppression_id)
             )
+        return result.rowcount > 0
+
+    # ----- agent notebook ---------------------------------------------------- #
+    # Off by default (DAWNPATROL_MCP_NOTEBOOK_ENABLED); written only by an
+    # external agent over MCP, read back by the harness alongside profile.yml.
+
+    def add_notebook_entry(self, text: str, author: str = "") -> int:
+        with self.engine.begin() as conn:
+            result = conn.execute(insert(S.notebook).values(
+                created_at=datetime.now(UTC), author=author, text=text,
+            ))
+        return int(result.inserted_primary_key[0])
+
+    def list_notebook_entries(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Oldest first - a notebook reads top to bottom, like a log."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(S.notebook)
+                .order_by(S.notebook.c.created_at.asc(), S.notebook.c.id.asc())
+                .limit(limit)
+            ).mappings().all()
+        return [
+            {"id": r["id"], "created_at": _aware(r["created_at"]).isoformat(),
+             "author": r["author"] or "", "text": r["text"]}
+            for r in rows
+        ]
+
+    def recent_notebook_entries(self, limit: int) -> list[dict[str, Any]]:
+        """The most recent ``limit`` entries, oldest of that set first.
+
+        Used to bound how much notebook content is injected into a run's
+        prompt - unlike :meth:`list_notebook_entries`, which is for reading
+        the full history and should never silently drop the oldest entries.
+        """
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(S.notebook)
+                .order_by(S.notebook.c.created_at.desc(), S.notebook.c.id.desc())
+                .limit(limit)
+            ).mappings().all()
+        rows = list(reversed(rows))
+        return [
+            {"id": r["id"], "created_at": _aware(r["created_at"]).isoformat(),
+             "author": r["author"] or "", "text": r["text"]}
+            for r in rows
+        ]
+
+    def delete_notebook_entry(self, entry_id: int) -> bool:
+        with self.engine.begin() as conn:
+            result = conn.execute(delete(S.notebook).where(S.notebook.c.id == entry_id))
         return result.rowcount > 0
 
     # ----- canaries and deliveries -------------------------------------------- #

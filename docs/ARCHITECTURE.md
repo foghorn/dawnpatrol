@@ -916,8 +916,27 @@ frozenset({"smtp"}))`, which drops the `smtp` output from the delivery list befo
 SMTP plugin. File output still happens, so the result is retrievable afterward through
 `get_report` exactly like a scheduled run's.
 
-See `docs/components/mcp-server.md` for the tool reference, deployment guidance, and a
-worked example of adding a new tool.
+**The agent notebook is a second, narrower door, gated separately.** Every tool above is
+read-only except `trigger_analysis`, and even that only runs the existing pipeline - it
+doesn't change what a *future* run believes. `add_notebook_entry` does: text an external
+agent submits is stored in a new `notebook` table (`schema.py`) and read back by
+`agent/harness.py`, appended to `system_context` immediately after
+`profile.as_context()` - alongside the network documentation, never in place of it. That
+is a materially different trust boundary (shaping future judgment, not just reading data
+or spending API budget), so it does not turn on with `DAWNPATROL_MCP_ENABLED` - it needs
+its own `DAWNPATROL_MCP_NOTEBOOK_ENABLED`, off by default even when the rest of the MCP
+surface is on. Two bounds keep it from becoming an unbounded cost or context-injection
+surface: `DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS` rejects an over-long single note
+outright, and `DAWNPATROL_MCP_NOTEBOOK_MAX_INJECTED` caps injection to the most recent N
+entries even though the full history stays readable via `read_notebook`. A note still
+cannot fabricate a finding - `adjudicate.py`'s `signal_ids` requirement applies uniformly
+regardless of what the model was told in its system prompt. `delete_notebook_entry`
+removes one permanently by id - immediate, no expiry mechanism, no soft-archive - since a
+note is context an agent retracts when it's stale or wrong, not a tuning rule that needs
+its own audit trail the way a suppression does.
+
+See `docs/components/mcp-server.md` for the tool reference, the notebook's full design
+rationale, deployment guidance, and a worked example of adding a new tool.
 
 ---
 
@@ -956,7 +975,7 @@ be firewalled to an allowlist.
 
 ## 14. Testing
 
-202 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
+220 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
 includes an end-to-end pipeline exercise against a stubbed provider. CI
 (`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
 request, across Python 3.11-3.13.

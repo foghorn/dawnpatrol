@@ -217,6 +217,10 @@ def cmd_validate(settings, profile, store, args) -> int:
         print("  WARNING: no zones defined; segment review and zone attribution "
               "will be unavailable")
     print("\ndatabase: reachable, tables present")
+    if settings.mcp.notebook_enabled and not settings.mcp.enabled:
+        print("  WARNING: DAWNPATROL_MCP_NOTEBOOK_ENABLED is set but "
+              "DAWNPATROL_MCP_ENABLED is not - no agent can submit a note "
+              "until the MCP server itself is also enabled")
     providers = available_providers()
     print(f"\nproviders discovered: {', '.join(sorted(providers)) or 'none'}")
     if settings.ai.enabled:

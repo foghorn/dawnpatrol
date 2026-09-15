@@ -53,6 +53,12 @@ already in progress"` response.
 | `get_network_profile` | `()` | The zones/hosts/policy/quirks documentation - the same text the analysis agent sees. |
 | `list_source_plugins` | `()` | Which sources are enabled - the valid `sources` values for the next tool. |
 | `trigger_analysis` | `(sources=None, window_hours=None)` | Collect fresh data and run a full analysis now, **without emailing the result**. Real API spend, real time (a couple of minutes). |
+| `read_notebook`¹ | `(limit=500)` | Every note submitted so far, oldest first. |
+| `add_notebook_entry`¹ | `(text, author="")` | Submit a note that future runs will see alongside `profile.yml`. |
+| `delete_notebook_entry`¹ | `(entry_id)` | Permanently remove a note that's no longer relevant, by id (from `read_notebook`). |
+
+¹ Only registered when `DAWNPATROL_MCP_NOTEBOOK_ENABLED=true` - a separate opt-in from
+`DAWNPATROL_MCP_ENABLED`, covered below.
 
 `trigger_analysis` is the one tool with a side effect, and it's worth being precise
 about what "without emailing" means mechanically: it calls
@@ -72,6 +78,61 @@ system (`docs/components/canaries.md`) doing exactly its job even under a partia
 externally-triggered run - which is the kind of thing you want verified with a real
 call, not just asserted in a design doc.
 
+## The agent notebook: a second, narrower door
+
+Every tool above is read-only except `trigger_analysis`, and even that only *runs*
+something - it doesn't change what future runs think. `add_notebook_entry` is
+different in kind: it writes free-text context that gets read back into every future
+run's prompt, alongside `profile.yml`, until it ages out. That's a genuinely different
+trust boundary - not "can this agent see my data or spend my API budget," but "can this
+agent shape what the analyst believes about my network going forward" - which is why it
+needs its own opt-in (`DAWNPATROL_MCP_NOTEBOOK_ENABLED`) rather than turning on
+automatically with the rest of the MCP surface.
+
+**What it's for.** `profile.yml` is deliberately stable, hand-edited, version-controlled
+context: zones, hosts, policy. The notebook is for context that changes faster than
+that file should - "a new smart plug went on the IoT segment this morning, expect new
+egress to `*.tuya.com` for a while," "the DMZ Windows box is getting a firmware update
+this week, ignore a reboot," "yesterday's finding about client X was confirmed benign,
+here's why." An agent investigating something over `trigger_analysis` can leave a note
+for tomorrow's scheduled run to pick up, instead of that context living only in a chat
+transcript that the next run never sees.
+
+**How it reaches the model.** `agent/harness.py` appends the notebook block to
+`system_context` immediately after `profile.as_context()`, in the same cached
+system-prompt segment - literally "alongside the core documentation," never replacing
+it. The instruction injected alongside the notes is explicit that `profile.yml` is the
+authority if the two ever disagree.
+
+**Bounded on the read side, unbounded on the write side.** Every note ever submitted
+stays readable in full through `read_notebook` - "read all the notes submitted so far"
+is taken literally. But only the most recent `DAWNPATROL_MCP_NOTEBOOK_MAX_INJECTED`
+(default 50) are actually injected into a run's context, and any single note over
+`DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS` (default 4000) is rejected outright rather than
+silently truncated. Without both caps, an unbounded, ever-growing notebook would
+otherwise quietly inflate every future run's token cost forever.
+
+**Notes are retractable, not append-only forever.** `delete_notebook_entry` removes one
+permanently by id - unlike suppressions, there's no expiry or soft-archive here, because
+a note is context, not a tuning rule with its own audit trail. Delete one when it's
+stale (the temporary device is gone, the situation it described has resolved) or simply
+wrong. Deletion is immediate and takes effect on the very next run - there's no need to
+wait for it to age out of `notebook_max_injected`.
+
+**What it cannot do.** A note can bias interpretation and supply context - it cannot
+manufacture a finding. `adjudicate.py`'s structural rule still applies uniformly: every
+`Finding` must cite a real analyzer `Signal.id`, and a note is not one. The worst a
+malicious or mistaken note can do is bias the model's *narrative* about real signals; it
+cannot make the model report something the deterministic layer never observed.
+
+**The real security implication of enabling it.** With the notebook off, a leaked bearer
+token lets someone read your reports and spend your API budget. With it on, a leaked
+token also lets someone durably shape what your analyst believes about your network
+going forward, run after run, until you notice and remove or override the note. Treat
+`DAWNPATROL_MCP_NOTEBOOK_ENABLED` as a materially bigger blast radius than the rest of
+the MCP surface, not the same one - which is exactly why it isn't bundled into
+`DAWNPATROL_MCP_ENABLED`.
+
 ## Deployment
 
 ```bash
@@ -80,6 +141,11 @@ DAWNPATROL_MCP_HOST=0.0.0.0        # bind inside the container
 DAWNPATROL_MCP_PORT=5030
 DAWNPATROL_MCP_PATH=/mcp
 DAWNPATROL_MCP_TOKEN=              # set it, or leave blank and read the startup log once
+
+# Optional, and off even when the above is on - see "a second, narrower door" above.
+DAWNPATROL_MCP_NOTEBOOK_ENABLED=false
+DAWNPATROL_MCP_NOTEBOOK_MAX_INJECTED=50
+DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS=4000
 ```
 
 Publish the port bound to a specific host address you control - not a public one -
