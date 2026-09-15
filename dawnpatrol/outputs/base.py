@@ -21,7 +21,7 @@ ALL_STATUSES = frozenset({Status.GREEN, Status.AMBER, Status.RED})
 
 class Output(ABC):
     name: str = ""
-    #: Renderer key: "plaintext" | "markdown" | "html" | "json".
+    #: Renderer key: "plaintext" | "markdown" | "html" | "html_email" | "json".
     renderer: str = "plaintext"
     requires_env: frozenset[str] = frozenset()
     #: Default delivery policy. Overridden per output via

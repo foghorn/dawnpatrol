@@ -15,7 +15,7 @@ something and start there if you want to understand why it's shaped the way it i
 | [Providers](providers.md) | Which model actually does the judgment, and how do I point at a different one? |
 | [Canaries](canaries.md) | How does the pipeline prove it is still detecting anything at all? |
 | [Network profile](profile.md) | How does `profile.yml` turn a raw IP into "IoT segment, untrusted, behind a NAT gateway"? |
-| [MCP server](mcp-server.md) | How does an external agent read reports and trigger analysis on demand? |
+| [MCP server](mcp-server.md) | How does an external agent read reports, trigger analysis on demand, and leave notes that shape future runs? |
 
 ## The shape all five plugin folders share
 

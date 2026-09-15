@@ -1,4 +1,4 @@
-"""Plain-text renderer: 7-bit ASCII, hard-wrapped at 72 columns.
+"""Plain-text renderer: 7-bit ASCII, one fact per line.
 
 This module is the entire reason the formatting rules stopped being a prompt
 problem. The model never writes the report body, so there is no "do not use
@@ -8,22 +8,27 @@ unit test.
 One fact per line, ``Label: value``. Not aligned columns: many mail clients
 render text/plain in a proportional font, where every space-aligned table
 collapses into ragged noise, and you cannot detect that from the sending side.
+
+Content is not hard-wrapped to a fixed column count - that was an early
+decision to keep line breaks predictable, but it fought with real mail clients
+that already soft-wrap text/plain bodies to the reader's own width, producing
+double-wrapped, ragged paragraphs instead. The client decides how to display
+long lines now; this renderer's job is ASCII safety and a stable structure,
+not column layout.
 """
 
 from __future__ import annotations
 
-import textwrap
 import unicodedata
 
 from ..models import Finding, Report, SourceHealth
 
-WIDTH = 72
 INDENT = "  "
 
 #: Characters that mojibake through unknown mail gateways, and their ASCII forms.
 _TRANSLITERATE = {
     "—": "-", "–": "-", "‘": "'", "’": "'",
-    "“": '"', "”": '"', "…": "...", " ": " ",
+    "“": '"', "”": '"', "…": "...", " ": " ",
     "→": "->", "←": "<-", "°": " degrees", "•": "*",
     "✓": "[ok]", "✗": "[x]", "×": "x", "±": "+/-",
 }
@@ -37,30 +42,29 @@ def to_ascii(text: str) -> str:
     return text.encode("ascii", "replace").decode("ascii")
 
 
-def wrap(text: str, indent: str = "", width: int = WIDTH) -> list[str]:
+def format_block(text: str, indent: str = "") -> list[str]:
+    """ASCII-safe lines for a block of text, indented, not column-wrapped.
+
+    Paragraph breaks (blank lines in the source) are preserved; each
+    paragraph becomes a single line prefixed with ``indent``, however long,
+    and the reader's own mail client wraps it for display.
+    """
     text = to_ascii(text).strip()
     if not text:
         return []
     out: list[str] = []
     for paragraph in text.split("\n"):
-        if not paragraph.strip():
-            out.append("")
-            continue
-        out.extend(textwrap.wrap(
-            paragraph, width=width, initial_indent=indent,
-            subsequent_indent=indent, break_long_words=True,
-            break_on_hyphens=False,
-        ) or [indent.rstrip()])
+        out.append(f"{indent}{paragraph}" if paragraph.strip() else "")
     return out
 
 
 def kv(label: str, value: object, indent: str = INDENT) -> str:
-    return to_ascii(f"{indent}{label}: {value}")[:WIDTH]
+    return to_ascii(f"{indent}{label}: {value}")
 
 
 def heading(number: int, title: str) -> list[str]:
     text = to_ascii(f"{number}. {title.upper()}")
-    return ["", text, "=" * min(len(text), WIDTH)]
+    return ["", text, "=" * len(text)]
 
 
 def render(report: Report) -> str:
@@ -69,7 +73,7 @@ def render(report: Report) -> str:
 
     title = f"DAWNPATROL REPORT - {report.site_name.upper()}"
     a(to_ascii(title))
-    a("=" * min(len(title), WIDTH))
+    a("=" * len(title))
     a("")
     a(kv("Report date", report.generated_at.strftime("%Y-%m-%d %H:%M:%S UTC"), ""))
     a(kv("Window", f"{report.window.start_str} to {report.window.end_str} UTC", ""))
@@ -87,7 +91,7 @@ def render(report: Report) -> str:
     summary = report.executive_summary or (
         "No analysis narrative was produced for this run."
     )
-    lines += wrap(summary)
+    lines += format_block(summary)
 
     # 2
     lines += heading(2, "Key statistics")
@@ -96,21 +100,21 @@ def render(report: Report) -> str:
     # 3
     lines += heading(3, "Findings")
     if not report.findings:
-        lines += wrap("No findings this period. Baseline activity only.", INDENT)
+        lines += format_block("No findings this period. Baseline activity only.", INDENT)
     else:
         for finding in report.findings_sorted():
             lines += _finding_block(finding)
     if report.suppressed_findings:
         a("")
-        lines += wrap(
+        lines += format_block(
             f"{len(report.suppressed_findings)} finding(s) matched an active "
             f"suppression and were withheld:", INDENT
         )
         for f in report.suppressed_findings:
-            # Reason on its own line: wrapping title and reason together splits
-            # the reason across the break and makes the appendix hard to scan.
-            lines += wrap(f"- [{f.severity.label()}] {f.title}", INDENT * 2)
-            lines += wrap(f"reason: {f.suppressed_reason}", INDENT * 3)
+            # Reason on its own line: combining title and reason makes the
+            # appendix harder to scan.
+            lines += format_block(f"- [{f.severity.label()}] {f.title}", INDENT * 2)
+            lines += format_block(f"reason: {f.suppressed_reason}", INDENT * 3)
 
     # 4-7
     lines += heading(4, "Perimeter activity")
@@ -129,31 +133,36 @@ def render(report: Report) -> str:
     lines += heading(8, "Trend watch")
     if report.trend_notes:
         for note in report.trend_notes:
-            lines += wrap(f"{note.kind}: {note.text}", INDENT)
+            lines += format_block(f"{note.kind}: {note.text}", INDENT)
     elif report.metric_value("trend.baseline_available") == 0:
-        lines += wrap("No prior run. Trend analysis begins once a baseline exists.", INDENT)
+        lines += format_block("No prior run. Trend analysis begins once a baseline exists.", INDENT)
     else:
-        lines += wrap("No notable trend changes this period.", INDENT)
+        lines += format_block("No notable trend changes this period.", INDENT)
 
     # 9
     lines += heading(9, "Recommended actions")
     if report.actions:
         for i, action in enumerate(sorted(report.actions, key=lambda x: x.priority), 1):
-            lines += wrap(f"{i}) {action.text}", INDENT)
+            lines += format_block(f"{i}) {action.text}", INDENT)
             if action.command:
-                lines += wrap(action.command, INDENT * 2)
+                lines += format_block(action.command, INDENT * 2)
     else:
-        lines += wrap("No action required. Baseline activity only.", INDENT)
+        lines += format_block("No action required. Baseline activity only.", INDENT)
 
     # 10
     lines += heading(10, "Data quality and caveats")
     lines += _data_quality(report)
 
+    footer = [
+        to_ascii(f"DawnPatrol automated report. Run {report.run_id}."),
+        "Generated without human review. Do not reply to this message.",
+    ]
+    sep = "=" * max(len(line) for line in footer)
     a("")
-    a("=" * WIDTH)
-    a(to_ascii(f"DawnPatrol automated report. Run {report.run_id}."))
-    a("Generated without human review. Do not reply to this message.")
-    a("=" * WIDTH)
+    a(sep)
+    a(footer[0])
+    a(footer[1])
+    a(sep)
 
     return "\n".join(_enforce(line) for line in lines).rstrip() + "\n"
 
@@ -164,8 +173,8 @@ def render(report: Report) -> str:
 
 
 def _enforce(line: str) -> str:
-    """Final guarantee: ASCII, no trailing whitespace, never over WIDTH."""
-    return to_ascii(line).rstrip()[:WIDTH]
+    """Final guarantee: ASCII, no trailing whitespace."""
+    return to_ascii(line).rstrip()
 
 
 def _health_summary(health: list[SourceHealth]) -> str:
@@ -197,13 +206,13 @@ def _statistics(report: Report) -> list[str]:
                 text += f"  (prior {_num(metric.prior)}, {delta:+.0f}%)"
             lines.append(kv(metric.display_label(), text, INDENT * 2))
     if not lines:
-        lines += wrap("No statistics were produced for this run.", INDENT)
+        lines += format_block("No statistics were produced for this run.", INDENT)
     return lines
 
 
 def _finding_block(finding: Finding) -> list[str]:
     lines = [""]
-    lines += wrap(f"[{finding.severity.label()}] {finding.id} - {finding.title}", INDENT)
+    lines += format_block(f"[{finding.severity.label()}] {finding.id} - {finding.title}", INDENT)
     body = [
         ("Zone", finding.zone),
         ("Confidence", str(finding.confidence)),
@@ -215,15 +224,14 @@ def _finding_block(finding: Finding) -> list[str]:
     for label, value in body:
         if not value:
             continue
-        wrapped = wrap(f"{label}: {value}", INDENT * 2)
-        lines += wrapped
+        lines += format_block(f"{label}: {value}", INDENT * 2)
     if finding.enrichment:
         for ref in finding.enrichment[:3]:
-            lines += wrap(f"Reputation: {ref.summary}", INDENT * 2)
+            lines += format_block(f"Reputation: {ref.summary}", INDENT * 2)
     if finding.attribution_caveat:
-        lines += wrap(f"Attribution: {finding.attribution_caveat}", INDENT * 2)
+        lines += format_block(f"Attribution: {finding.attribution_caveat}", INDENT * 2)
     for adjustment in finding.adjustments:
-        lines += wrap(f"Adjusted: {adjustment}", INDENT * 2)
+        lines += format_block(f"Adjusted: {adjustment}", INDENT * 2)
     return lines
 
 
@@ -231,7 +239,7 @@ def _section_body(report: Report, narrative_key: str, metric_sections: list[str]
     lines: list[str] = []
     narrative = (report.section_narratives or {}).get(narrative_key)
     if isinstance(narrative, str) and narrative.strip():
-        lines += wrap(narrative, INDENT)
+        lines += format_block(narrative, INDENT)
         lines.append("")
     shown = 0
     for section in metric_sections:
@@ -243,37 +251,37 @@ def _section_body(report: Report, narrative_key: str, metric_sections: list[str]
             lines.append(kv(metric.display_label(), f"{metric.value}{unit}", INDENT))
             shown += 1
     if not lines:
-        lines += wrap("No data for this section.", INDENT)
+        lines += format_block("No data for this section.", INDENT)
     elif shown == 0:
-        lines += wrap("No statistics for this section.", INDENT)
+        lines += format_block("No statistics for this section.", INDENT)
     return lines
 
 
 def _data_quality(report: Report) -> list[str]:
     lines: list[str] = []
     for health in report.health:
-        lines += wrap(
+        lines += format_block(
             f"{health.source}: {health.state.value}, {health.records} records over "
             f"{health.span_hours:.2f}h of a {health.requested_hours:.2f}h window",
             INDENT,
         )
         for note in health.notes[:6]:
-            lines += wrap(f"- {note}", INDENT * 2)
+            lines += format_block(f"- {note}", INDENT * 2)
         if health.probes:
-            lines += wrap("probe results:", INDENT * 2)
+            lines += format_block("probe results:", INDENT * 2)
             for probe in health.probes:
-                lines += wrap(
+                lines += format_block(
                     f"{probe.name}: {'ok' if probe.ok else 'FAILED'} "
                     f"status={probe.status} records={probe.records}",
                     INDENT * 3,
                 )
     for canary in report.canaries:
         state = "detected" if canary.detected else "NOT DETECTED"
-        lines += wrap(f"canary {canary.name}: {state} - {canary.detail}", INDENT)
+        lines += format_block(f"canary {canary.name}: {state} - {canary.detail}", INDENT)
     for note in report.data_quality:
-        lines += wrap(f"- {note}", INDENT)
+        lines += format_block(f"- {note}", INDENT)
     if report.usage.calls:
-        lines += wrap(
+        lines += format_block(
             f"analysis: {report.usage.calls} model call(s), "
             f"{report.usage.input_tokens} in / {report.usage.output_tokens} out, "
             f"{report.usage.cache_read_tokens} cached, "
@@ -281,7 +289,7 @@ def _data_quality(report: Report) -> list[str]:
             INDENT,
         )
     if not lines:
-        lines += wrap("No data quality concerns recorded.", INDENT)
+        lines += format_block("No data quality concerns recorded.", INDENT)
     return lines
 
 

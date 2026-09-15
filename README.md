@@ -105,7 +105,7 @@ run.
  6. ANALYZE     analyzers -> metrics and signals
  7. INVESTIGATE the agent loop: evidence bundle in, structured findings out
  8. ADJUDICATE  validate findings, enforce guardrails, roll up status
- 9. RENDER      plaintext / markdown / json
+ 9. RENDER      plaintext / markdown / html / html_email / json
 10. DELIVER     every enabled output
 11. CHECKPOINT  persist metrics, findings, watchlist; purge by retention
 ```
@@ -341,7 +341,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-220 tests, fully offline — no network, no API key, no spend — including an
+233 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract

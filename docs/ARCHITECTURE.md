@@ -1,7 +1,7 @@
 # DawnPatrol Architecture
 
 **Status:** Implemented and in production (Phases 1-4.5 complete; see §15)
-**Last updated:** 2026-09-13
+**Last updated:** 2026-09-15
 
 This document describes the system as it is actually built, not as it was originally
 proposed. Where an earlier draft described an open design question, this revision
@@ -70,10 +70,14 @@ what matters.
 Two consequences worth naming up front:
 
 - **The formatting rules stop being a prompt problem.** The model never emits the report
-  body. It emits structured findings; a renderer produces the 72-column ASCII. The
-  "ABSOLUTELY FORBIDDEN: em-dashes, emoji, pipe tables" section disappears entirely,
-  replaced by a unit test that asserts the rendered output is 7-bit ASCII with no line
-  over 72 characters.
+  body. It emits structured findings; a renderer produces the ASCII text (or, for email,
+  formatted HTML - see §8.6). The "ABSOLUTELY FORBIDDEN: em-dashes, emoji, pipe tables"
+  section disappears entirely, replaced by a unit test that asserts the plaintext output
+  is 7-bit ASCII. An early revision of the plaintext renderer also hard-wrapped every
+  line to 72 columns; that was dropped once real mail clients turned out to already
+  soft-wrap text/plain bodies, so the two wraps fought each other and produced ragged
+  paragraphs. The renderer's job is ASCII safety and a stable section structure, not
+  column layout - the reader's client decides that now.
 - **The guardrails stop being requests.** "Never enrich more than 25 IPs" becomes a tool
   that returns an error on the 26th call. "Reputation may not create a finding" becomes a
   validator that rejects a finding whose only evidence is a reputation score.
@@ -159,9 +163,10 @@ dawnpatrol/
 │   │       ├── system.md
 │   │       └── task.md
 │   ├── render/
-│   │   ├── plaintext.py            # 72-col 7-bit ASCII (the email contract)
+│   │   ├── plaintext.py            # 7-bit ASCII, client-wrapped (the plaintext contract)
 │   │   ├── markdown.py
-│   │   ├── html.py
+│   │   ├── html.py                 # full-page HTML: files, webhooks
+│   │   ├── html_email.py           # inline-styled HTML: the email body
 │   │   └── json_report.py
 │   ├── sources/                    # ── PLUGIN FOLDER ──
 │   │   ├── librenms_syslog.py
@@ -436,7 +441,7 @@ adding a new reputation source.
 ```python
 class Output(ABC):
     name: str
-    renderer: str                      # "plaintext" | "markdown" | "html" | "json"
+    renderer: str                      # "plaintext" | "markdown" | "html" | "html_email" | "json"
     requires_env: set[str]
     run_when: set[Status] = {GREEN, AMBER, RED}   # env-overridable
 
@@ -453,9 +458,11 @@ test it once, and `smtp_email`, `file_report`, and a future `s3_upload` all get 
 setting rather than prompt logic.
 
 Shipped outputs: `file_report` (writes `${OUTPUT_DIR}/YYYY-MM-DD/report.{txt,json}`, plus
-`html` if configured, and a `latest.*` copy of each), `smtp_email`, and `webhook`
-(generic JSON POST — ntfy, Slack, Discord, Home Assistant). A future `healthchecks_ping`
-for dead-man's-switch monitoring remains a natural next output, not yet built.
+`html` if configured, and a `latest.*` copy of each), `smtp_email` (a multipart message:
+`html_email` as the formatted body a normal client shows, `plaintext` underneath as the
+fallback), and `webhook` (generic JSON POST — ntfy, Slack, Discord, Home Assistant). A
+future `healthchecks_ping` for dead-man's-switch monitoring remains a natural next
+output, not yet built.
 
 See `docs/components/outputs.md` for the full contract, `run_when` policy in detail, and
 a worked example of adding a new delivery destination.
@@ -975,7 +982,7 @@ be firewalled to an allowlist.
 
 ## 14. Testing
 
-220 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
+233 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
 includes an end-to-end pipeline exercise against a stubbed provider. CI
 (`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
 request, across Python 3.11-3.13.
@@ -991,10 +998,12 @@ request, across Python 3.11-3.13.
 - **Analyzers** against synthetic event sets with known-correct expected signals: a
   textbook persistent prober, a /24 sweep, conntrack return traffic, a stepped-TTL probe,
   a DGA burst.
-- **Renderers** - property tests asserting 7-bit ASCII, no line over 72 columns, all ten
-  sections present in order, no unsubstituted tokens, every empty section carrying its
-  documented empty-state line - plus, for the HTML renderer, that attacker-influenced
-  finding text is escaped rather than passed through as markup.
+- **Renderers** - property tests asserting 7-bit ASCII (plaintext) and long paragraphs
+  staying on one line rather than being hard-wrapped, all ten sections present in order,
+  no unsubstituted tokens, every empty section carrying its documented empty-state line -
+  plus, for both HTML renderers, that attacker-influenced finding text is escaped rather
+  than passed through as markup, and, for `html_email` specifically, that no `<style>`
+  block is present (every rule must be inline for a mail client to honor it).
 - **Adjudication** - each guardrail gets a test feeding it a deliberately non-compliant
   agent response and asserting the clamp or rejection.
 - **The MCP surface** (`tests/test_mcpserver.py`) - every tool's logic against a real
