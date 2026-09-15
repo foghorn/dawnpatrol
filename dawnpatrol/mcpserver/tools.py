@@ -97,6 +97,39 @@ class ToolContext:
     def get_network_profile(self) -> str:
         return self.profile.as_context()
 
+    # ----- agent notebook -------------------------------------------------------- #
+    # Only registered when DAWNPATROL_MCP_NOTEBOOK_ENABLED=true - see server.py.
+
+    def read_notebook(self, limit: int = 500) -> dict[str, Any]:
+        limit = max(1, min(limit, 2000))
+        entries = self.store.list_notebook_entries(limit=limit)
+        return {"entries": entries, "count": len(entries),
+                "injected_into_future_runs": min(len(entries),
+                                                 self.settings.mcp.notebook_max_injected)}
+
+    def add_notebook_entry(self, text: str, author: str = "") -> dict[str, Any]:
+        text = (text or "").strip()
+        if not text:
+            return {"error": "text is required"}
+        max_chars = self.settings.mcp.notebook_max_entry_chars
+        if len(text) > max_chars:
+            return {"error": f"entry is {len(text)} characters, over the "
+                             f"{max_chars}-character limit "
+                             f"(DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS). "
+                             f"Split it into more than one entry."}
+        entry_id = self.store.add_notebook_entry(text, author=(author or "").strip()[:255])
+        return {"id": entry_id, "stored": True,
+                "note": "Included in the context of every future run until the "
+                        f"entry count exceeds the most recent "
+                        f"{self.settings.mcp.notebook_max_injected} - see read_notebook."}
+
+    def delete_notebook_entry(self, entry_id: int) -> dict[str, Any]:
+        deleted = self.store.delete_notebook_entry(entry_id)
+        if not deleted:
+            return {"error": f"no notebook entry with id {entry_id}. "
+                             f"Use read_notebook to see current ids."}
+        return {"id": entry_id, "deleted": True}
+
     # ----- discovery ----------------------------------------------------------- #
 
     def list_source_plugins(self) -> dict[str, Any]:

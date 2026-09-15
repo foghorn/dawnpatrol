@@ -229,6 +229,88 @@ def test_watchlist_expiry(store):
     assert len(items) == 1 and items[0]["reason"] == "updated"
 
 
+def test_notebook_entries_round_trip_in_order(store):
+    store.add_notebook_entry("first note", author="alice")
+    store.add_notebook_entry("second note", author="bob")
+    entries = store.list_notebook_entries()
+    assert [e["text"] for e in entries] == ["first note", "second note"]
+    assert entries[0]["author"] == "alice"
+
+
+def test_recent_notebook_entries_caps_and_keeps_chronological_order(store):
+    for i in range(5):
+        store.add_notebook_entry(f"note {i}")
+    recent = store.recent_notebook_entries(2)
+    assert [e["text"] for e in recent] == ["note 3", "note 4"]
+
+
+def test_notebook_entry_delete_lifecycle(store):
+    entry_id = store.add_notebook_entry("stale note")
+    assert any(e["id"] == entry_id for e in store.list_notebook_entries())
+    assert store.delete_notebook_entry(entry_id)
+    assert not any(e["id"] == entry_id for e in store.list_notebook_entries())
+    assert not store.delete_notebook_entry(entry_id)
+
+
+def test_busy_timeout_applies_to_every_pooled_connection_not_just_the_first(store):
+    """Regression test for a real "database is locked" hit in production: the
+    MCP server and the scheduler pull connections from the same engine's pool
+    concurrently, from different threads, so a PRAGMA applied once at Store
+    construction (to whichever single connection happened to be open then)
+    left every other pooled connection at SQLite's default busy_timeout=0 -
+    an ordinary write held during a large batch insert made a concurrent
+    writer fail immediately instead of waiting a bounded, harmless amount."""
+    seen_timeouts = []
+    for _ in range(3):
+        with store.engine.connect() as conn:
+            # Force the pool to hand back a *new* underlying DBAPI connection
+            # each time, rather than reusing one already configured by
+            # Store.__init__ - invalidate() drops it from the pool entirely.
+            conn.connection.invalidate()
+        with store.engine.connect() as conn:
+            value = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+            seen_timeouts.append(value)
+
+    assert all(t == 30000 for t in seen_timeouts), (
+        f"expected every fresh connection to report busy_timeout=30000, got {seen_timeouts}"
+    )
+
+
+def test_a_write_waits_out_a_concurrent_long_transaction_instead_of_failing(store):
+    """The same fix, exercised as an actual lock: a write held open in one
+    thread must not fail a concurrent write in another, it must wait for it."""
+    import threading
+    import time
+
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+
+    def hold_a_write_transaction() -> None:
+        with store.engine.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO notebook (created_at, author, text) "
+                "VALUES (datetime('now'), 'holder', 'in-transaction')"
+            )
+            holder_ready.set()
+            release_holder.wait(timeout=5)
+
+    holder = threading.Thread(target=hold_a_write_transaction)
+    holder.start()
+    assert holder_ready.wait(timeout=5), "holder thread never started its transaction"
+
+    threading.Timer(0.5, release_holder.set).start()
+
+    start = time.monotonic()
+    try:
+        entry_id = store.add_notebook_entry("competing write")
+    finally:
+        holder.join(timeout=5)
+
+    elapsed = time.monotonic() - start
+    assert entry_id  # succeeded rather than raising "database is locked"
+    assert elapsed > 0.2, "the write returned suspiciously fast for one that had to wait"
+
+
 def test_readonly_sql_executes(store, window):
     store.start_run("r1", 1, window.start, window)
     cols, rows = store.readonly_sql("SELECT 1 AS n")

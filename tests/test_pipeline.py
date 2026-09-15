@@ -190,6 +190,34 @@ def test_profile_context_is_stable_across_runs(runner):
         assert token not in first
 
 
+def test_notebook_is_absent_from_context_when_disabled(runner, settings):
+    settings.mcp.notebook_enabled = False
+    runner.store.add_notebook_entry("a note that should never be seen")
+    runner.run()
+    assert "a note that should never be seen" not in StubProvider.last_context
+
+
+def test_notebook_entries_are_injected_alongside_the_profile_when_enabled(runner, settings):
+    settings.mcp.notebook_enabled = True
+    runner.store.add_notebook_entry("New camera installed on the IoT segment today.",
+                                    author="ops-agent")
+    runner.run()
+    assert "New camera installed on the IoT segment today." in StubProvider.last_context
+    assert "ops-agent" in StubProvider.last_context
+    # It supplements the profile block; it must not replace it.
+    assert "NETWORK ZONES" in StubProvider.last_context
+
+
+def test_notebook_injection_is_capped_to_the_most_recent_entries(runner, settings):
+    settings.mcp.notebook_enabled = True
+    settings.mcp.notebook_max_injected = 1
+    runner.store.add_notebook_entry("older note")
+    runner.store.add_notebook_entry("newer note")
+    runner.run()
+    assert "newer note" in StubProvider.last_context
+    assert "older note" not in StubProvider.last_context
+
+
 def test_the_model_has_no_dangerous_tools(runner):
     runner.run()
     names = set(StubProvider.last_tools)

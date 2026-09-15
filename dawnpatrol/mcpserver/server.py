@@ -96,6 +96,35 @@ def build_app(settings: Settings, profile: Profile, store: Store,
         real API spend and takes a couple of minutes, same as a scheduled run."""
         return await ctx.trigger_analysis(sources, window_hours)
 
+    # A second, separate opt-in from DAWNPATROL_MCP_ENABLED: these are the only
+    # tools that write something an external agent submits into the context of
+    # every future run, which is a different trust boundary than read-only
+    # access or a run the operator could already trigger by hand.
+    if settings.mcp.notebook_enabled:
+
+        @mcp.tool()
+        def read_notebook(limit: int = 500) -> dict:
+            """Read every note submitted so far, oldest first. Notes supplement
+            profile.yml as context for future analysis; they never replace it."""
+            return ctx.read_notebook(limit)
+
+        @mcp.tool()
+        def add_notebook_entry(text: str, author: str = "") -> dict:
+            """Submit a note that will be included alongside profile.yml in every
+            future run's context, until it ages out of the most recent N entries
+            (see read_notebook's injected_into_future_runs count). Use this for
+            context that changes faster than the network profile should - a
+            newly installed device, a temporary change in expected behavior, an
+            explanation for something the last report flagged."""
+            return ctx.add_notebook_entry(text, author)
+
+        @mcp.tool()
+        def delete_notebook_entry(entry_id: int) -> dict:
+            """Delete a note that is no longer relevant, by id (see read_notebook).
+            Permanent - there is no undo. Use this to retract a note that turned
+            out to be wrong, or clean up one that no longer applies."""
+            return ctx.delete_notebook_entry(entry_id)
+
     token = resolve_token(settings)
     app = mcp.streamable_http_app(host=settings.mcp.host,
                                   streamable_http_path=settings.mcp.path)

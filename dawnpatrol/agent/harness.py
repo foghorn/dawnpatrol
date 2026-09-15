@@ -117,6 +117,10 @@ class Harness:
 
         system_static = load_prompt("system")
         system_context = self.profile.as_context()
+        if self.settings.mcp.notebook_enabled:
+            notebook_block = self._notebook_context()
+            if notebook_block:
+                system_context = f"{system_context}\n\n{notebook_block}"
         user_message = "\n\n".join([
             build_task_message(bundle, ctx.window, degraded_note),
             load_prompt("task"),
@@ -181,3 +185,25 @@ class Harness:
 
         result.analysis = run.analysis
         return result
+
+    def _notebook_context(self) -> str:
+        """Agent-submitted notes, bounded to the most recent N (§ MCP notebook).
+
+        Appended after the profile block, inside the same cached system-prompt
+        segment - so, like the profile, this must be read as "whatever it is
+        right now," not depended on to be identical run over run. A note being
+        added or aging out of the injected window invalidates the prompt cache
+        for that one run, the same way an edited profile.yml would.
+        """
+        entries = self.store.recent_notebook_entries(self.settings.mcp.notebook_max_injected)
+        if not entries:
+            return ""
+        lines = [
+            "AGENT NOTEBOOK (submitted via MCP by an external agent; supplements "
+            "profile.yml, never overrides it - if the two conflict, profile.yml "
+            "is the authority on network topology and policy)",
+        ]
+        for e in entries:
+            author = f" ({e['author']})" if e["author"] else ""
+            lines.append(f"  [{e['created_at']}]{author}: {e['text']}")
+        return "\n".join(lines)

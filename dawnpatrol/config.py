@@ -189,6 +189,15 @@ class MCPSettings:
     port: int = 8420
     token: SecretStr = field(default_factory=lambda: SecretStr(""))
     path: str = "/mcp"
+    #: A second, separate opt-in: writing agent-submitted context into every
+    #: future run's prompt is a different trust boundary than read-only tools,
+    #: so it does not turn on just because DAWNPATROL_MCP_ENABLED did.
+    notebook_enabled: bool = False
+    #: Bounds cost/context growth on the read side of that boundary - the
+    #: harness injects at most this many of the most recent entries; the full
+    #: history remains readable in full via the read_notebook tool.
+    notebook_max_injected: int = 50
+    notebook_max_entry_chars: int = 4000
 
     @classmethod
     def from_env(cls, registry: SecretRegistry) -> MCPSettings:
@@ -200,6 +209,11 @@ class MCPSettings:
             port=read_int(f"{ENV_PREFIX}MCP_PORT", 8420),
             token=token,
             path=read_env(f"{ENV_PREFIX}MCP_PATH", "/mcp") or "/mcp",
+            notebook_enabled=read_bool(f"{ENV_PREFIX}MCP_NOTEBOOK_ENABLED", False),
+            notebook_max_injected=read_int(f"{ENV_PREFIX}MCP_NOTEBOOK_MAX_INJECTED", 50),
+            notebook_max_entry_chars=read_int(
+                f"{ENV_PREFIX}MCP_NOTEBOOK_MAX_ENTRY_CHARS", 4000
+            ),
         )
 
 
@@ -320,4 +334,6 @@ class Settings:
             "retention_ioc_days": self.retention.ioc_days,
             "mcp": (f"enabled on {self.mcp.host}:{self.mcp.port}{self.mcp.path}"
                     if self.mcp.enabled else "disabled"),
+            "mcp_notebook": ("enabled" if self.mcp.notebook_enabled
+                             else "disabled"),
         }

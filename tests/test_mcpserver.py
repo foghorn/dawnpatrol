@@ -131,6 +131,56 @@ def test_get_network_profile_contains_configured_zones(toolctx):
 
 
 # --------------------------------------------------------------------------- #
+# Agent notebook
+# --------------------------------------------------------------------------- #
+
+
+def test_add_and_read_notebook_entry(toolctx):
+    result = toolctx.add_notebook_entry("New IoT device installed today.", author="ops-agent")
+    assert result["stored"] is True
+
+    out = toolctx.read_notebook()
+    assert out["count"] == 1
+    assert out["entries"][0]["text"] == "New IoT device installed today."
+    assert out["entries"][0]["author"] == "ops-agent"
+
+
+def test_add_notebook_entry_rejects_empty_text(toolctx):
+    result = toolctx.add_notebook_entry("   ")
+    assert "error" in result
+    assert toolctx.read_notebook()["count"] == 0
+
+
+def test_add_notebook_entry_rejects_over_length_text(toolctx):
+    toolctx.settings.mcp.notebook_max_entry_chars = 20
+    result = toolctx.add_notebook_entry("x" * 21)
+    assert "error" in result
+    assert "20-character limit" in result["error"]
+    assert toolctx.read_notebook()["count"] == 0
+
+
+def test_delete_notebook_entry_removes_it(toolctx):
+    added = toolctx.add_notebook_entry("no longer relevant")
+    result = toolctx.delete_notebook_entry(added["id"])
+    assert result == {"id": added["id"], "deleted": True}
+    assert toolctx.read_notebook()["count"] == 0
+
+
+def test_delete_notebook_entry_unknown_id_is_a_clear_error(toolctx):
+    result = toolctx.delete_notebook_entry(999999)
+    assert "error" in result
+
+
+def test_read_notebook_reports_how_many_are_injected(toolctx):
+    toolctx.settings.mcp.notebook_max_injected = 2
+    for i in range(3):
+        toolctx.add_notebook_entry(f"note {i}")
+    out = toolctx.read_notebook()
+    assert out["count"] == 3
+    assert out["injected_into_future_runs"] == 2
+
+
+# --------------------------------------------------------------------------- #
 # Discovery and trigger
 # --------------------------------------------------------------------------- #
 
