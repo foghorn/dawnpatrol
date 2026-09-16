@@ -90,6 +90,7 @@ class Harness:
             signals=signals,
             run_id=ctx.run_id,
             max_calls=self.settings.ai.max_tool_calls,
+            devices=ctx.devices,
         )
 
         bundle = build_bundle(
@@ -103,6 +104,7 @@ class Harness:
             enrichment_budgets=self.broker.budget_report(),
             baseline_available=baseline.has_baseline(),
             run_id=ctx.run_id,
+            devices=ctx.devices,
         )
 
         degraded_note = ""

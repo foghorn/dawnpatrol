@@ -148,6 +148,7 @@ dawnpatrol/
 │   ├── registry.py                 # plugin discovery
 │   ├── models.py                   # Event, Metric, Signal, Finding, Report
 │   ├── window.py                   # run-window arithmetic
+│   ├── devices.py                  # cross-source device directory, keyed by IP
 │   ├── store.py                    # run.db (events) + state.db (history)
 │   ├── verify.py                   # source health classification
 │   ├── adjudicate.py               # guardrail enforcement, status rollup
@@ -574,6 +575,7 @@ is visible rather than silently expensive.
 | `get_metric_history(key, days)` | trend series from `state.db` | — |
 | `get_entity_history(entity)` | first_seen, occurrences, prior findings | — |
 | `get_watchlist()` | items carried forward | — |
+| `get_device_directory(ip=None)` | full per-device detail (hostname/hardware/OS/uptime/location/sources/roles), one IP or every device known this run | only registered when at least one source contributed a device this run |
 
 `query_events` as read-only SQL rather than a fixed set of canned queries is a deliberate
 choice: it lets the model chase a hypothesis it forms mid-run ("which clients queried
@@ -586,6 +588,32 @@ Note what is *not* a tool: there is no shell, no filesystem access, no network f
 no send-email tool. The model's only outbound effects are enrichment lookups against two
 specific APIs. Delivery happens after adjudication, in code. This is a meaningful
 reduction in blast radius compared to an agent that could email arbitrary recipients.
+
+#### The device directory (`dawnpatrol/devices.py`)
+
+A per-run, cross-source registry of network devices, keyed by IP address - built fresh
+every run in memory, no config file to maintain. Any `Source.collect()` can call
+`ctx.devices.update(ip, source=self.name, role=..., hostname=..., ...)` to contribute
+whatever it happens to know about a device: `librenms_syslog` registers hostname,
+hardware, OS, uptime and status for everything LibreNMS manages; `pihole_dns` registers
+every distinct client IP it sees making a query (tagged `dns-client`, with a name if one
+was resolved) - including client-only devices, like a phone or a smart plug, that never
+appear in LibreNMS's own device list at all.
+
+Contributions merge, they never overwrite: the first non-empty value for a field wins,
+and every contributing source and role is recorded, so a sparse later contribution can
+never clobber a richer earlier one. `build_bundle` gets a one-line-per-device
+`DEVICE DIRECTORY` summary automatically, every run, in the evidence bundle itself - not
+buried in a per-source `SourceHealth.notes` list that only shows its first four or six
+entries. `get_device_directory` (the tool above) is how the model gets the full record
+for one IP, or every IP, on demand, live, from the run in progress.
+
+No bespoke persistence of its own: `ctx.devices.to_bundle()` becomes `Report.devices`, a
+plain field on the same `Report` every run already produces, written to `latest.json`
+(and `report-<run_id>.json`) by `file_report.py` exactly like everything else in the
+report. That is what the *external* MCP tool of the identical name (§12) reads - the most
+recently *completed* run's directory, off disk, not a live one - deliberately the only
+device-related MCP tool, not one bespoke tool per plugin.
 
 ### 8.4 Structured output
 
@@ -746,7 +774,8 @@ DAWNPATROL_AI_MAX_TOOL_CALLS=25
 # Sources — presence of required vars auto-enables the plugin
 DAWNPATROL_SOURCE_LIBRENMS_URL=http://librenms.example/api/v0
 DAWNPATROL_SOURCE_LIBRENMS_TOKEN=...
-DAWNPATROL_SOURCE_LIBRENMS_DEVICES=3,4,7
+# Optional - unset pulls every device LibreNMS reports, auto-discovered each run.
+#DAWNPATROL_SOURCE_LIBRENMS_DEVICES=3,4,7
 DAWNPATROL_SOURCE_PIHOLE_URL=http://pihole.example/api
 DAWNPATROL_SOURCE_PIHOLE_PASSWORD=...
 
@@ -889,6 +918,7 @@ tool it exposes is a thin wrapper over something stages 1-10 already do:
 | `get_metric_history` | `Store.metric_history` |
 | `get_network_profile` | `Profile.as_context()` — the same text block cached into the harness system prompt |
 | `list_source_plugins` | `registry.discover` + `env_satisfied`, the same introspection `list-plugins` uses |
+| `get_device_directory` | `Report.devices` in `latest.json` — the same field `outputs/file_report.py` already writes, not a plugin-specific lookup |
 | `trigger_analysis` | `Runner.run()` — the identical pipeline a scheduled run executes |
 
 Two design decisions carry the actual safety weight:
@@ -982,7 +1012,7 @@ be firewalled to an allowlist.
 
 ## 14. Testing
 
-233 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
+255 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
 includes an end-to-end pipeline exercise against a stubbed provider. CI
 (`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
 request, across Python 3.11-3.13.

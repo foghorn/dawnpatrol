@@ -16,6 +16,11 @@ encoded here so they cannot recur:
 Retention is typically ~24h from FTL's in-memory log regardless of the window
 requested. That is a known limit, reported as a clamped window rather than as a
 collection shortfall.
+
+Every distinct client IP seen making a query is also registered in
+``ctx.devices`` (see ``dawnpatrol/devices.py``), tagged with a ``dns-client``
+role and a name if Pi-hole resolved one - the cross-source device table the
+internal investigation agent sees a summary of every run.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from typing import Any
 import httpx
 
 from ..context import RunContext
+from ..devices import DeviceDirectory
 from ..models import UTC, CollectionResult, Event, EventKind, Probe, Window
 from ..secrets import read_bool, read_env, read_int, read_secret
 from .base import Source
@@ -179,6 +185,8 @@ class PiholeDNSSource(Source):
                 result.reported_total = total
                 result.events = [self._normalize(q) for q in seen.values()]
                 result.events = [e for e in result.events if e is not None]
+                if ctx is not None:
+                    self._populate_device_directory(ctx.devices, seen.values())
             except Exception as exc:  # noqa: BLE001
                 result.errors.append(f"{type(exc).__name__}: {exc}")
                 result.complete = False
@@ -186,6 +194,31 @@ class PiholeDNSSource(Source):
                 self._logout(client, sid)
 
         return result
+
+    def _populate_device_directory(self, devices: DeviceDirectory,
+                                   queries: Any) -> None:
+        """Feed the cross-source device table (see ``devices.py``).
+
+        Pi-hole never reports hardware/OS - only a client IP and, sometimes,
+        a name it resolved by reverse DNS or DHCP lease. That is still a
+        legitimate, if sparse, contribution: it is the only source that ever
+        observes some client-only devices (a phone, a smart-plug) that never
+        appear in LibreNMS's own managed-device list.
+        """
+        seen_ips: set[str] = set()
+        for q in queries:
+            client_field = q.get("client")
+            ip: str | None = None
+            name: str | None = None
+            if isinstance(client_field, dict):
+                ip = client_field.get("ip") or None
+                name = client_field.get("name") or None
+            elif client_field:
+                ip = str(client_field)
+            if not ip or ip in seen_ips:
+                continue
+            seen_ips.add(ip)
+            devices.update(ip, source=self.name, role="dns-client", hostname=name)
 
     # ----- normalization -------------------------------------------------------- #
 

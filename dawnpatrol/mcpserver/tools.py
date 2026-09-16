@@ -147,6 +147,35 @@ class ToolContext:
             result.append({"name": cls.name, "state": state})
         return {"sources": result}
 
+    # ----- cross-source device directory ------------------------------------------ #
+    # Generic, core functionality - not tied to any one source plugin. The data
+    # already exists: every run's Report carries `devices` (dawnpatrol/devices.py,
+    # merged across whichever collectors contributed one), and file_report.py
+    # already writes it to latest.json like the rest of the report. No separate
+    # persistence of our own - just read the same file get_latest_report reads.
+
+    def get_device_directory(self, ip: str = "") -> dict[str, Any]:
+        path = self.settings.output_dir / "latest.json"
+        if not path.is_file():
+            return {"error": "no report has been generated yet"}
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return {"error": f"latest.json is not valid JSON: {exc}"}
+        devices = report.get("devices") or []
+        if not devices:
+            return {"error": "the most recent report recorded no device information - "
+                             "populated by whichever source plugins are enabled and "
+                             "report device-level data (see list_source_plugins)"}
+        ip = ip.strip()
+        if ip:
+            match = next((d for d in devices if d.get("ip") == ip), None)
+            if match is None:
+                known = ", ".join(d.get("ip", "") for d in devices[:50])
+                return {"error": f"no directory entry for {ip!r}. Known IPs: {known}"}
+            return match
+        return {"devices": devices, "run_id": report.get("run_id")}
+
     # ----- trigger --------------------------------------------------------------- #
 
     async def trigger_analysis(self, sources: list[str] | None = None,

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from .devices import DeviceDirectory
 from .models import UTC, Window
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ class RunContext:
     notes: list[str] = field(default_factory=list)
     stage_timings: dict[str, float] = field(default_factory=dict)
     canary_entities: set[str] = field(default_factory=set)
+    devices: DeviceDirectory = field(default_factory=DeviceDirectory)
 
     def note(self, text: str) -> None:
         if text and text not in self.notes:

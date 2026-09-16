@@ -14,11 +14,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from ..devices import DeviceDirectory
 from ..models import Metric, Signal, SourceHealth, Window
 from ..profile import Profile
 
 MAX_SIGNALS = 60
 MAX_METRICS_PER_SECTION = 25
+MAX_DEVICES_SHOWN = 200
 
 
 def build_bundle(
@@ -33,6 +35,7 @@ def build_bundle(
     enrichment_budgets: dict[str, dict[str, int]],
     baseline_available: bool,
     run_id: str,
+    devices: DeviceDirectory | None = None,
 ) -> str:
     """Render the bundle as fenced, labelled text."""
     sections: list[str] = []
@@ -46,6 +49,9 @@ def build_bundle(
     }))
 
     sections.append("SOURCE HEALTH\n" + _health_block(health))
+
+    if devices:
+        sections.append(_device_directory_block(devices))
 
     ranked = _rank_signals(signals)
     sections.append(
@@ -104,6 +110,22 @@ def _health_block(health: list[SourceHealth]) -> str:
                     f"status={p.status} records={p.records} {p.detail}".rstrip()
                 )
     return "\n".join(lines)
+
+
+def _device_directory_block(devices: DeviceDirectory) -> str:
+    """One line per known device, built fresh this run from every source that
+    contributed - never the truncated ``health.notes[:4]`` a single source's
+    own metadata used to be squeezed into. Call ``get_device_directory`` for
+    full per-field detail on any one IP."""
+    lines = devices.summary_lines(limit=MAX_DEVICES_SHOWN)
+    shown = (f"showing all {len(devices)}" if len(devices) <= MAX_DEVICES_SHOWN
+             else f"showing first {MAX_DEVICES_SHOWN} of {len(devices)}")
+    header = (
+        f"DEVICE DIRECTORY ({shown}, keyed by IP address)\n"
+        "Merged across every source that reported device-level information this "
+        "run. Use get_device_directory for full detail on one IP.\n"
+    )
+    return header + "\n".join(f"  {line}" for line in lines)
 
 
 def _metrics_block(metrics: list[Metric]) -> str:

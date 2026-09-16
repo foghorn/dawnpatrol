@@ -115,6 +115,234 @@ def test_windowed_urls_use_string_dates_never_epoch(librenms, window):
 
 
 # --------------------------------------------------------------------------- #
+# LibreNMS device selection and directory
+# --------------------------------------------------------------------------- #
+
+
+def _mock_client(handler):
+    import httpx
+    return httpx.Client(transport=httpx.MockTransport(handler),
+                        headers={"X-Auth-Token": "t"})
+
+
+def test_device_directory_parses_the_devices_endpoint(librenms, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+
+    def handler(request):
+        assert request.url.path.endswith("/devices")
+        return httpx.Response(200, json={"devices": [
+            {"device_id": 3, "hostname": "edge", "ip": "10.10.0.1",
+             "hardware": "ASUS RT-AX88U Pro", "os": "asuswrt-merlin",
+             "status": 1, "uptime": 123456},
+            {"device_id": 8, "hostname": "dmz-windows", "status": 0},
+        ]})
+
+    with _mock_client(handler) as client:
+        directory = librenms._device_directory(client)
+    assert directory["3"]["hostname"] == "edge"
+    assert directory["3"]["hardware"] == "ASUS RT-AX88U Pro"
+    assert directory["3"]["status"] == "up"
+    assert directory["8"]["status"] == "down"
+
+
+def test_resolve_devices_prefers_an_explicit_list(librenms, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", "3,4")
+
+    def handler(request):
+        return httpx.Response(200, json={"devices": [
+            {"device_id": i, "hostname": f"h{i}"} for i in range(1, 13)
+        ]})
+
+    with _mock_client(handler) as client:
+        devices, directory = librenms._resolve_devices(client)
+    assert devices == ["3", "4"]
+    # The directory is still fetched for metadata even when it isn't used to
+    # pick which devices to collect from.
+    assert len(directory) == 12
+
+
+def test_resolve_devices_discovers_every_device_when_unset(librenms, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+    monkeypatch.delenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", raising=False)
+
+    def handler(request):
+        return httpx.Response(200, json={"devices": [
+            {"device_id": i, "hostname": f"h{i}"} for i in (3, 1, 12, 7)
+        ]})
+
+    with _mock_client(handler) as client:
+        devices, directory = librenms._resolve_devices(client)
+    assert devices == ["1", "3", "7", "12"]  # numeric order, not string order
+    assert len(directory) == 4
+
+
+def test_resolve_devices_directory_failure_is_not_fatal_with_an_explicit_list(librenms, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", "3")
+
+    def handler(request):
+        return httpx.Response(500)
+
+    with _mock_client(handler) as client:
+        devices, directory = librenms._resolve_devices(client)
+    assert devices == ["3"]
+    assert directory == {}
+
+
+def test_collect_health_notes_carry_device_metadata_when_available(librenms, monkeypatch, window):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_TOKEN", "tok")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", "3")
+
+    def handler(request):
+        if request.url.path.endswith("/devices"):
+            return httpx.Response(200, json={"devices": [
+                {"device_id": 3, "hostname": "edge", "hardware": "ASUS RT-AX88U Pro",
+                 "os": "asuswrt-merlin", "status": 1},
+            ]})
+        return httpx.Response(200, json={"total": 1, "logs": [
+            {"timestamp": "2026-06-01 03:14:15", "program": "KERNEL", "seq": 1,
+             "msg": "DROP IN=eth0 SRC=1.2.3.4 DST=5.6.7.8 LEN=60 TTL=51 PROTO=TCP DPT=22"},
+        ]})
+
+    monkeypatch.setattr(librenms, "_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler),
+                                            headers=librenms._headers()))
+    result = librenms.collect(window, ctx=None)
+    assert any("edge" in n and "ASUS RT-AX88U Pro" in n for n in result.notes)
+
+
+def test_no_devices_configured_or_discovered_is_a_clear_error(librenms, monkeypatch, window):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_TOKEN", "tok")
+    monkeypatch.delenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", raising=False)
+
+    def handler(request):
+        return httpx.Response(200, json={"devices": []})
+
+    monkeypatch.setattr(librenms, "_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler),
+                                            headers=librenms._headers()))
+    result = librenms.collect(window, ctx=None)
+    assert not result.events
+    assert any("no devices configured" in e for e in result.errors)
+
+
+# --------------------------------------------------------------------------- #
+# Cross-source device directory (dawnpatrol/devices.py)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeCtx:
+    """Minimal stand-in for RunContext - collect() only touches ctx.devices."""
+
+    def __init__(self):
+        from dawnpatrol.devices import DeviceDirectory
+        self.devices = DeviceDirectory()
+
+
+def test_librenms_collect_registers_devices_by_ip(librenms, monkeypatch, window):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_TOKEN", "tok")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", "3")
+
+    def handler(request):
+        if request.url.path.endswith("/devices"):
+            return httpx.Response(200, json={"devices": [
+                {"device_id": 3, "hostname": "edge", "ip": "10.10.0.1",
+                 "hardware": "ASUS RT-AX88U Pro", "os": "asuswrt-merlin", "status": 1},
+                {"device_id": 8, "hostname": "no-ip-device"},
+            ]})
+        return httpx.Response(200, json={"total": 0, "logs": []})
+
+    monkeypatch.setattr(librenms, "_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler),
+                                            headers=librenms._headers()))
+    ctx = _FakeCtx()
+    librenms.collect(window, ctx=ctx)
+
+    device = ctx.devices.get("10.10.0.1")
+    assert device is not None
+    assert device.hostname == "edge"
+    assert device.hardware == "ASUS RT-AX88U Pro"
+    assert device.status == "up"
+    assert "librenms_syslog" in device.sources
+    assert "librenms-managed" in device.roles
+    # The device with no IP has nothing to key an entry on - it is skipped.
+    assert len(ctx.devices) == 1
+
+
+def test_pihole_collect_registers_dns_clients_by_ip(pihole, monkeypatch, window):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_PIHOLE_URL", "http://pihole.example/api")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_PIHOLE_PASSWORD", "pw")
+
+    def handler(request):
+        if request.url.path.endswith("/auth"):
+            return httpx.Response(200, json={"session": {"sid": "s1"}})
+        if request.url.path.endswith("/queries"):
+            return httpx.Response(200, json={
+                "recordsFiltered": 1,
+                "queries": [{"id": 1, "time": 1780000000.0, "domain": "example.com",
+                            "status": "FORWARDED",
+                            "client": {"ip": "10.10.0.55", "name": "kids-ipad"}}],
+            })
+        return httpx.Response(200, json={})
+
+    monkeypatch.setattr(pihole, "_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler)))
+    ctx = _FakeCtx()
+    pihole.collect(window, ctx=ctx)
+
+    device = ctx.devices.get("10.10.0.55")
+    assert device is not None
+    assert device.hostname == "kids-ipad"
+    assert "pihole_dns" in device.sources
+    assert "dns-client" in device.roles
+
+
+def test_device_directory_merges_across_sources_without_clobbering():
+    from dawnpatrol.devices import DeviceDirectory
+
+    devices = DeviceDirectory()
+    devices.update("10.10.0.1", source="pihole_dns", role="dns-client")
+    devices.update("10.10.0.1", source="librenms_syslog", role="librenms-managed",
+                  hostname="edge", hardware="ASUS RT-AX88U Pro")
+    # A later, sparser contribution never overwrites a field already filled in.
+    devices.update("10.10.0.1", source="librenms_syslog", hostname="should-not-win")
+
+    device = devices.get("10.10.0.1")
+    assert device.hostname == "edge"
+    assert device.hardware == "ASUS RT-AX88U Pro"
+    assert device.sources == {"pihole_dns", "librenms_syslog"}
+    assert device.roles == {"dns-client", "librenms-managed"}
+
+
+def test_device_directory_sorts_numerically_by_ip():
+    from dawnpatrol.devices import DeviceDirectory
+
+    devices = DeviceDirectory()
+    for ip in ("10.10.0.20", "10.10.0.3", "10.10.0.100"):
+        devices.update(ip, source="test")
+    assert [d.ip for d in devices.all()] == ["10.10.0.3", "10.10.0.20", "10.10.0.100"]
+
+
+# --------------------------------------------------------------------------- #
 # Pi-hole parsing
 # --------------------------------------------------------------------------- #
 

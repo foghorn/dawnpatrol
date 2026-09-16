@@ -192,6 +192,52 @@ def test_list_source_plugins_reports_real_plugins(toolctx):
     assert "pihole_dns" in names
 
 
+def _write_latest_report(settings, devices: list[dict], run_id: str = "run-1") -> None:
+    import json as _json
+
+    body = {"run_id": run_id, "devices": devices}
+    (settings.output_dir / "latest.json").write_text(_json.dumps(body), encoding="utf-8")
+
+
+def test_get_device_directory_missing_report_is_a_clear_error(toolctx):
+    out = toolctx.get_device_directory()
+    assert "error" in out
+
+
+def test_get_device_directory_lists_devices_from_the_latest_report(toolctx, settings):
+    _write_latest_report(settings, [
+        {"ip": "10.10.0.1", "hostname": "edge", "hardware": "ASUS RT-AX88U Pro",
+         "roles": ["librenms-managed"], "sources": ["librenms_syslog"]},
+        {"ip": "10.10.0.55", "hostname": "", "roles": ["dns-client"],
+         "sources": ["pihole_dns"]},
+    ])
+
+    out = toolctx.get_device_directory()
+    assert out["run_id"] == "run-1"
+    by_ip = {d["ip"]: d for d in out["devices"]}
+    assert by_ip["10.10.0.1"]["hostname"] == "edge"
+    assert by_ip["10.10.0.1"]["hardware"] == "ASUS RT-AX88U Pro"
+    assert "librenms-managed" in by_ip["10.10.0.1"]["roles"]
+    assert "dns-client" in by_ip["10.10.0.55"]["roles"]
+
+
+def test_get_device_directory_detail_for_one_ip(toolctx, settings):
+    _write_latest_report(settings, [{"ip": "10.10.0.1", "hostname": "edge"}])
+
+    out = toolctx.get_device_directory("10.10.0.1")
+    assert out["hostname"] == "edge"
+
+    out = toolctx.get_device_directory("10.10.0.99")
+    assert "error" in out
+    assert "10.10.0.1" in out["error"]
+
+
+def test_get_device_directory_empty_devices_is_a_clear_error(toolctx, settings):
+    _write_latest_report(settings, [])
+    out = toolctx.get_device_directory()
+    assert "error" in out
+
+
 def test_trigger_analysis_never_requests_email(toolctx):
     result = asyncio.run(toolctx.trigger_analysis(sources=["pihole_dns"]))
     assert result["status"] == "GREEN"
