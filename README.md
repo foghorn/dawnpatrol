@@ -1,6 +1,11 @@
 # DawnPatrol
 
-<img src="docs/dawnpatrol_logo.svg" alt="DawnPatrol logo" width="200">
+<p align="center">
+  <img src="docs/dawnpatrol_logo.svg" alt="DawnPatrol logo" width="200">
+</p>
+
+[dawnpatrolsoc.com](https://dawnpatrolsoc.com) ·
+[Read the announcement post](https://blog.nickleghorn.com/2026/09/13/dawnpatrol-open-source-ai-agentic-soc-for-your-home-or-office/)
 
 **An AI SOC analyst for your home or office network — one that reads every log,
 every morning, and never gets bored, never gets tired, and never stops
