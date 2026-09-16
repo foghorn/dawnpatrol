@@ -14,6 +14,7 @@ import logging
 from typing import Any
 
 from ..analyzers.baseline import Baseline
+from ..devices import DeviceDirectory
 from ..enrichment.broker import EnrichmentBroker
 from ..models import Signal
 from ..profile import Profile
@@ -42,6 +43,7 @@ class ToolBox:
         signals: list[Signal],
         run_id: str,
         max_calls: int = 25,
+        devices: DeviceDirectory | None = None,
     ) -> None:
         self.store = store
         self.query = query
@@ -51,6 +53,7 @@ class ToolBox:
         self.signals = {s.id: s for s in signals}
         self.run_id = run_id
         self.max_calls = max_calls
+        self.devices = devices if devices is not None else DeviceDirectory()
         self.calls_made = 0
         self.call_log: list[str] = []
 
@@ -171,6 +174,18 @@ class ToolBox:
             return f"no history for metric {key!r} in the last {days} days"
         return json.dumps({"key": key, "days": days, "series": series}, default=str)[:10000]
 
+    def get_device_directory(self, args: dict[str, Any]) -> str:
+        if over := self._spend("get_device_directory"):
+            return over
+        ip = str(args.get("ip") or "").strip()
+        if ip:
+            device = self.devices.get(ip)
+            if device is None:
+                known = ", ".join(d.ip for d in self.devices.all()[:50])
+                return f"no directory entry for {ip!r}. Known IPs: {known or '(none)'}"
+            return json.dumps(device.to_dict(), default=str)
+        return json.dumps({"devices": self.devices.to_bundle()}, default=str)[:20000]
+
     def hunt_history(self, args: dict[str, Any]) -> str:
         if over := self._spend("hunt_history"):
             return over
@@ -285,6 +300,27 @@ class ToolBox:
                 handler=self.hunt_history,
             ),
         ]
+
+        if self.devices:
+            tools.append(ToolSpec(
+                name="get_device_directory",
+                description=(
+                    "Full detail for one network device by IP, or every device "
+                    "known this run if no IP is given: hostname, hardware, OS, "
+                    "uptime, location, which sources reported it and in what role. "
+                    "The evidence bundle only shows a one-line summary per device - "
+                    "use this when you need the full record."
+                ),
+                parameters={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "ip": {"type": "string",
+                              "description": "Omit to list every known device."},
+                    },
+                },
+                handler=self.get_device_directory,
+            ))
 
         if self.broker.available_for("ip"):
             tools.append(ToolSpec(

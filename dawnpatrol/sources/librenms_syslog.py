@@ -11,6 +11,22 @@ prompt warnings, because both produce silent, confident data loss:
 When a device returns zero rows, :meth:`self_test` runs the differential probes
 that separate "my query was malformed" from "the feed stopped". That decision is
 never left to a model.
+
+Device selection: ``DAWNPATROL_SOURCE_LIBRENMS_DEVICES`` pins an explicit list
+when set. Unset, every device LibreNMS reports is collected - discovered fresh
+each run from ``/devices``, so a device added on the LibreNMS side is picked up
+without a config change here. That same call is also where hostname/hardware/OS/
+status context comes from, attached to the health record.
+
+Every device with an IP is also registered in ``ctx.devices`` (see
+``dawnpatrol/devices.py``) - the cross-source, IP-keyed device table the
+internal investigation agent sees a summary of every run and can query in
+full through its own ``get_device_directory`` tool. This plugin has no
+dedicated MCP tool of its own: metadata this source contributes reaches an
+external agent only through that same generic, cross-source
+``get_device_directory`` MCP tool (``mcpserver/tools.py``), never through
+anything LibreNMS-specific - the MCP surface exposes core functionality, not
+per-plugin ones.
 """
 
 from __future__ import annotations
@@ -24,6 +40,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ..context import RunContext
+from ..devices import DeviceDirectory
 from ..models import UTC, CollectionResult, Event, EventKind, Probe, Window
 from ..secrets import read_env, read_int, read_list, read_secret
 from .base import Source
@@ -80,6 +97,70 @@ class LibreNMSSyslogSource(Source):
         return httpx.Client(timeout=self.timeout, verify=self.verify_tls,
                             headers=self._headers())
 
+    # ----- device directory --------------------------------------------------- #
+
+    def _device_directory(self, client: httpx.Client) -> dict[str, dict[str, Any]]:
+        """Every device LibreNMS reports, keyed by device_id (as a string).
+
+        One unpaginated call - LibreNMS returns its full device list in a
+        single response, unlike the syslog endpoint. Used both to auto-discover
+        which devices to collect from and to attach hostname/hardware/OS/status
+        context wherever a device id would otherwise be a bare number.
+        """
+        resp = client.get(f"{self.base_url}/devices")
+        resp.raise_for_status()
+        payload = resp.json()
+        directory: dict[str, dict[str, Any]] = {}
+        for d in payload.get("devices") or []:
+            device_id = d.get("device_id")
+            if device_id is None:
+                continue
+            directory[str(device_id)] = {
+                "hostname": d.get("hostname") or d.get("sysName") or "",
+                "ip": d.get("ip") or "",
+                "hardware": d.get("hardware") or "",
+                "os": d.get("os") or "",
+                "version": d.get("version") or "",
+                "status": "up" if str(d.get("status")) == "1" else "down",
+                "uptime_seconds": _as_int(d.get("uptime")),
+                "location": d.get("location") or "",
+            }
+        return directory
+
+    def _resolve_devices(self, client: httpx.Client) -> tuple[list[str], dict[str, dict[str, Any]]]:
+        """Explicit config wins; otherwise every device LibreNMS reports.
+
+        Directory-fetch failure is never fatal here - it only costs the
+        hostname/hardware enrichment, and (when no explicit list is set) is
+        surfaced through the empty device list that follows, not swallowed.
+        """
+        directory: dict[str, dict[str, Any]] = {}
+        try:
+            directory = self._device_directory(client)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("could not fetch LibreNMS device directory: %s", exc)
+        devices = self.devices or sorted(directory, key=int)
+        return devices, directory
+
+    def _populate_device_directory(self, devices: DeviceDirectory,
+                                   directory: dict[str, dict[str, Any]]) -> None:
+        """Feed the cross-source device table (see ``devices.py``).
+
+        Keyed by IP, not device_id - a device LibreNMS reports with no IP
+        address has nothing to key an entry on and is simply skipped here.
+        """
+        for meta in directory.values():
+            ip = meta.get("ip")
+            if not ip:
+                continue
+            devices.update(
+                ip, source=self.name, role="librenms-managed",
+                hostname=meta.get("hostname"), hardware=meta.get("hardware"),
+                os=meta.get("os"), version=meta.get("version"),
+                status=meta.get("status"), uptime_seconds=meta.get("uptime_seconds"),
+                location=meta.get("location"),
+            )
+
     # ----- collection -------------------------------------------------------- #
 
     def collect(self, window: Window, ctx: RunContext) -> CollectionResult:
@@ -90,17 +171,21 @@ class LibreNMSSyslogSource(Source):
             result.errors.append("LibreNMS URL or token not configured")
             return result
 
-        devices = self.devices
-        if not devices:
-            result.errors.append(
-                "no device ids configured (DAWNPATROL_SOURCE_LIBRENMS_DEVICES); "
-                "refusing to guess - a wrong device id yields a silently wrong report"
-            )
-            return result
-
         seen: dict[str, Event] = {}
         totals: dict[str, int] = {}
+        directory: dict[str, dict[str, Any]] = {}
         with self._client() as client:
+            devices, directory = self._resolve_devices(client)
+            if not devices:
+                result.errors.append(
+                    "no devices configured (DAWNPATROL_SOURCE_LIBRENMS_DEVICES) and none "
+                    "discovered from LibreNMS's own /devices endpoint"
+                )
+                return result
+
+            if ctx is not None:
+                self._populate_device_directory(ctx.devices, directory)
+
             for device in devices:
                 try:
                     events, reported, pages = self._collect_device(client, device, effective)
@@ -120,9 +205,14 @@ class LibreNMSSyslogSource(Source):
 
         result.events = list(seen.values())
         result.reported_total = sum(totals.values()) if totals else None
-        for device, reported in sorted(totals.items()):
+        for device, reported in sorted(totals.items(), key=lambda kv: int(kv[0])):
             got = sum(1 for e in result.events if e.device == str(device))
-            result.notes.append(f"device {device}: {got} records (API reported {reported})")
+            meta = directory.get(device) or {}
+            label = meta.get("hostname") or meta.get("ip") or ""
+            descriptor = f" ({label})" if label else ""
+            extra = ", ".join(x for x in (meta.get("hardware"), meta.get("os")) if x)
+            line = f"device {device}{descriptor}: {got} records (API reported {reported})"
+            result.notes.append(f"{line} - {extra}" if extra else line)
         return result
 
     def _collect_device(self, client: httpx.Client, device: str,
@@ -215,12 +305,12 @@ class LibreNMSSyslogSource(Source):
             return [Probe(name="config", request="(none)", ok=False,
                           detail="URL or token missing")]
 
-        devices = self.devices
-        primary = devices[0] if devices else None
-        controls = devices[1:3]
         window = ctx.window
 
         with self._client() as client:
+            devices, _directory = self._resolve_devices(client)
+            primary = devices[0] if devices else None
+            controls = devices[1:3]
             if primary:
                 probes.append(self._probe(client, "no-time-filter",
                                           f"/logs/syslog/{primary}?limit=1"))

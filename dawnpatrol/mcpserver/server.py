@@ -87,6 +87,16 @@ def build_app(settings: Settings, profile: Profile, store: Store,
         return ctx.list_source_plugins()
 
     @mcp.tool()
+    def get_device_directory(ip: str = "") -> dict:
+        """Every network device DawnPatrol's enabled sources have identified,
+        keyed by IP address, as of the most recently completed run - hostname,
+        hardware, OS, status, uptime, location, and which source(s) reported it.
+        Not tied to any one source plugin: built by merging whatever every
+        enabled collector contributed. Pass an IP for full detail on one
+        device; omit to list every device known."""
+        return ctx.get_device_directory(ip)
+
+    @mcp.tool()
     async def trigger_analysis(sources: list[str] | None = None,
                                 window_hours: int | None = None) -> dict:
         """Collect fresh data and run a full analysis now, without emailing the

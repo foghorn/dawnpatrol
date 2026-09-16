@@ -275,6 +275,7 @@ to connect to directly:
 | `get_metric_history` | A metric's time series, for trend questions. |
 | `get_network_profile` | The zones/hosts/policy/quirks documentation from `profile.yml`. |
 | `list_source_plugins` | Which sources are enabled - the valid names for the next tool. |
+| `get_device_directory` | Every device known from the most recently completed run (hostname, hardware, OS, status, uptime, location, reporting source) - merged across whichever collectors contributed one, not tied to any single source plugin. |
 | `trigger_analysis` | Collect fresh data and run a full analysis now, optionally scoped to specific sources, **without emailing the result**. Real API spend, same pipeline a scheduled run would use. |
 | `read_notebook` / `add_notebook_entry` / `delete_notebook_entry` | Read, submit, and retract free-text notes that future runs see alongside `profile.yml` — a separate opt-in, see below. |
 
@@ -341,7 +342,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-233 tests, fully offline — no network, no API key, no spend — including an
+255 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract

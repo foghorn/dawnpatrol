@@ -555,6 +555,7 @@ class Report:
     metrics: list[Metric] = field(default_factory=list)
     signals: list[Signal] = field(default_factory=list)
     health: list[SourceHealth] = field(default_factory=list)
+    devices: list[dict[str, Any]] = field(default_factory=list)
     executive_summary: str = ""
     section_narratives: dict[str, Any] = field(default_factory=dict)
     trend_notes: list[TrendNote] = field(default_factory=list)
@@ -675,6 +676,7 @@ class Report:
                 }
                 for h in self.health
             ],
+            "devices": self.devices,
             "trends": [
                 {"kind": t.kind, "text": t.text, "signal_ids": t.signal_ids}
                 for t in self.trend_notes

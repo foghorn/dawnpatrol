@@ -467,6 +467,7 @@ class Runner:
             metrics=metrics,
             signals=[s for s in signals if not s.is_canary],
             health=health,
+            devices=ctx.devices.to_bundle(),
             executive_summary=str(data.get("executive_summary") or ""),
             section_narratives=data.get("section_narratives") or {},
             trend_notes=parse_trends(data.get("trend_notes")),
@@ -508,8 +509,8 @@ class Runner:
             run_id=ctx.run_id, generated_at=ctx.started_at, window=ctx.window,
             status=Status.GREEN, metrics=metrics,
             signals=[s for s in signals if not s.is_canary],
-            health=health, canaries=canary_results, data_quality=list(notes),
-            degraded=True, site_name=self.profile.site_name,
+            health=health, devices=ctx.devices.to_bundle(), canaries=canary_results,
+            data_quality=list(notes), degraded=True, site_name=self.profile.site_name,
             executive_summary="Pipeline stopped before analysis (--stop-after analyze).",
         )
 

@@ -70,6 +70,24 @@ never recur:
 - **Non-KERNEL lines become `SYSTEM` or `AUTH` events** (VPN session lines in particular
   become `AUTH`, since they're the only evidence of remote-access sessions in this
   dataset) rather than being discarded.
+- **Device selection defaults to every device, auto-discovered fresh each run.**
+  `DAWNPATROL_SOURCE_LIBRENMS_DEVICES` pins an explicit list when you want to exclude
+  something; unset, `_device_directory()` calls `/devices` (one unpaginated call - unlike
+  the syslog endpoint, LibreNMS returns its whole device list in one response) and
+  collects from every id it reports. The same call doubles as enrichment: hostname,
+  hardware, OS, and up/down status get attached to each device's line in the health
+  record. A directory-fetch failure only costs that enrichment, never the run:
+  collection still proceeds from an explicit list if one is set, or is reported as a
+  clear "nothing configured and nothing discovered" error if not.
+- **Every device with an IP is registered in the cross-source device directory**
+  (`dawnpatrol/devices.py`, `ARCHITECTURE.md` §8.3) - a per-run registry keyed by IP
+  address, not by LibreNMS's own `device_id`, so any other source can contribute to the
+  same entry. That directory reaches both the internal stage-7 investigation agent
+  (a summary every run, full detail through its own `get_device_directory` tool) and, via
+  the finished report, an external MCP agent through the identically-named
+  `get_device_directory` MCP tool (`docs/components/mcp-server.md`) - deliberately the
+  *only* device-related MCP tool: no LibreNMS-specific tool exists, so the surface stays
+  core functionality rather than growing one bespoke tool per plugin.
 
 ## Walkthrough: `pihole_dns.py`
 
@@ -91,6 +109,12 @@ encoded here:
 overridable via `DAWNPATROL_SOURCE_PIHOLE_MAX_WINDOW_HOURS` for a deployment that retains
 more.
 
+- **Every distinct client IP also feeds the cross-source device directory**, tagged with
+  a `dns-client` role and a name if Pi-hole resolved one. Pi-hole never reports
+  hardware or OS - only a client IP, occasionally with a name - but that is still a
+  real contribution: it is the only source that ever sees some client-only devices (a
+  phone, a smart plug) that never appear in LibreNMS's own managed-device list at all.
+
 ## Build your own
 
 Copy `dawnpatrol/sources/TEMPLATE.py` (skipped by the plugin registry, so it's a safe
@@ -108,6 +132,11 @@ starting point, never accidentally loaded) to a new file and work through its ch
 5. **Write `self_test()`** if you can cheaply distinguish "empty and that's correct" from
    "empty and something's wrong" - an unfiltered probe, a narrower time window, an auth
    check against a known-good endpoint.
+6. **Contribute to the device directory if you know anything device-shaped.** Call
+   `ctx.devices.update(ip, source=self.name, role="...", hostname=..., ...)` from inside
+   `collect()` for any IP you can identify - even just a bare IP with no other field
+   filled in is a legitimate contribution. See `dawnpatrol/devices.py` and the LibreNMS/
+   Pi-hole walkthroughs above for what "partial" looks like in practice.
 
 A realistic example: adding a NetFlow/IPFIX source. `EventKind.FLOW` is already reserved
 for exactly this. Your `collect()` would map flow records into `Event(kind=FLOW, src_ip=,
