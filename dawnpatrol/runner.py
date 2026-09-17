@@ -23,6 +23,7 @@ from .adjudicate import (
     parse_actions,
     parse_trends,
     parse_watchlist,
+    parse_watchlist_removals,
     scan_for_secrets,
 )
 from .agent.harness import Harness
@@ -251,6 +252,10 @@ class Runner:
                 for update in parse_watchlist((analysis or {}).get("watchlist_updates")):
                     self.store.add_watch(update.entity_type, update.entity_value,
                                          update.reason, run_id, update.expires_days)
+                for removal in parse_watchlist_removals(
+                    (analysis or {}).get("watchlist_removals")
+                ):
+                    self.store.remove_watch(removal.entity_type, removal.entity_value)
 
             if stop_after == "adjudicate":
                 return self._stop(outcome, "adjudicate", timings, run_id)

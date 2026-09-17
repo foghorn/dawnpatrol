@@ -163,7 +163,30 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
                     "expires_days": {"type": "integer", "minimum": 1, "maximum": 365},
                 },
             },
-            "description": "Things to carry into tomorrow's run for follow-up.",
+            "description": (
+                "Things to carry into tomorrow's run for follow-up. Re-adding an "
+                "entity already on the watchlist refreshes its expiry rather than "
+                "duplicating it."
+            ),
+        },
+        "watchlist_removals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["entity_type", "entity_value"],
+                "properties": {
+                    "entity_type": {"type": "string", "enum": ["ip", "domain", "host"]},
+                    "entity_value": {"type": "string"},
+                    "reason": {"type": "string",
+                               "description": "Why this is resolved, e.g. explained, expected, or stale."},
+                },
+            },
+            "description": (
+                "Watchlist entries to close now because they were resolved this run - "
+                "explained, expected, or no longer relevant. Prefer closing an item "
+                "explicitly over letting it recur silently until it expires."
+            ),
         },
         "data_quality_notes": {
             "type": "array", "items": {"type": "string"},

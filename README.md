@@ -306,14 +306,19 @@ credential in `.env`.
 
 **The agent notebook** (`DAWNPATROL_MCP_NOTEBOOK_ENABLED`, default off even
 when MCP itself is on) is the one write path that shapes future automated
-judgment rather than just reading data or running the existing pipeline: an
-agent can leave a note — "a new device went on the IoT segment today," "this
+judgment rather than just reading data or running the existing pipeline: a
+note can be left — "a new device went on the IoT segment today," "this
 finding was confirmed benign" — and every future run reads it alongside
 `profile.yml`, capped to the most recent entries so it can't grow the context
-(or the bill) forever. It supplements the profile; it can never make the model
-report a finding that isn't backed by a real analyzer signal. It's a
-materially bigger blast radius than the rest of the MCP surface if the token
-leaks, which is exactly why it needs its own opt-in.
+(or the bill) forever. There are two independent ways a note gets written:
+this MCP tool, for a human or an external agent, and a second copy of
+`add_notebook_entry` exposed directly to the scheduled run's own analysis
+model, so it can persist something it learns mid-run without a human relaying
+it through MCP first. Both write the same table and share the same opt-in and
+caps. It supplements the profile; it can never make the model report a
+finding that isn't backed by a real analyzer signal. It's a materially bigger
+blast radius than the rest of the MCP surface if the token leaks, which is
+exactly why it needs its own opt-in.
 
 See [docs/components/mcp-server.md](docs/components/mcp-server.md) for the
 full tool reference, the notebook's full design rationale, deployment

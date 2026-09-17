@@ -440,6 +440,49 @@ def test_correlation_runs_clean_on_synthetic_data(q, profile, baseline):
     assert result.error is None
 
 
+def test_watchlist_hit_recognizes_host_entity_type_by_ip(store, profile, window):
+    """In real use the model watchlists a 'host' by its internal IP, not a
+    named hostname (verified against production data: Event.device holds a
+    syslog facility code for this source, never a name) - so a host-typed
+    watch entry must still match on src_ip/dst_ip like an 'ip' entry does."""
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "watch-host-ip"
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="h1", action="reject", src_ip="10.128.15.135",
+              dst_ip="10.128.10.30"),
+    ])
+    store.add_watch("host", "10.128.15.135", "flagged for follow-up", "priorrun")
+    q = EventQuery(store, run_id)
+    baseline = Baseline(store, run_id)
+    result = CorrelationAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.id == "corr.watchlist.host.10.128.15.135")
+    assert signal.entities[0].type == EntityType.HOST
+    assert signal.evidence["events_this_period"] == 1
+
+
+def test_watchlist_hit_recognizes_host_entity_type_by_device_label(store, profile, window):
+    """Also matches Event.device directly, for any source that does populate
+    it with a real hostname rather than a facility code."""
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "watch-host-device"
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.SYSTEM,
+              dedup_key="h1", device="gw-office", message="reauth"),
+    ])
+    store.add_watch("host", "gw-office", "flagged for follow-up", "priorrun")
+    q = EventQuery(store, run_id)
+    baseline = Baseline(store, run_id)
+    result = CorrelationAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.id == "corr.watchlist.host.gw-office")
+    assert signal.entities[0].type == EntityType.HOST
+    assert signal.evidence["events_this_period"] == 1
+
+
 def test_analyzers_tolerate_an_empty_store(store, profile, window):
     """No source data must never crash an analyzer - it is a normal state."""
     store.start_run("empty", 1, window.start, window)

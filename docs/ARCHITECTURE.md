@@ -504,10 +504,11 @@ touched it. Detection is usually retroactive; the store should assume that.
 | `findings` | every finding ever emitted; enables "day 4 of this pattern" and dedup |
 | `entities` | first_seen / last_seen / occurrence counts for IPs, domains, hosts |
 | `enrichment_cache` | `(enricher, subject)` -> normalized verdict + TTL |
-| `watchlist` | items carried forward with an expiry, set by the agent or by a human |
+| `watchlist` | items the agent carries forward with an expiry; the agent can also close one early when resolved, otherwise it drops out at expiry |
 | `suppressions` | tuned-out patterns: matcher, reason, author, expiry |
 | `canaries` | per-run synthetic-signal injections and whether each was detected |
 | `deliveries` | per-output success/failure, for "was the report actually sent" |
+| `notebook` | free-text notes read back into every future run's context (§ 12), off by default |
 
 The `entities` table is what makes novel-domain and novel-IP detection deterministic and
 genuinely reliable. `findings` history is what makes trend language honest — "RECURRING
@@ -582,6 +583,7 @@ is visible rather than silently expensive.
 | `get_entity_history(entity)` | first_seen, occurrences, prior findings | — |
 | `hunt_history(domain=None, ip=None, days=180)` | long-term retained history for a domain or IP, beyond this run's raw events | exactly one of `domain`/`ip` |
 | `get_device_directory(ip=None)` | full per-device detail (hostname/hardware/OS/uptime/location/sources/roles), one IP or every device known this run | only registered when at least one source contributed a device this run |
+| `add_notebook_entry(text)` | write a note the *next* run's system context will carry, alongside `profile.yml` (§ 12) | only registered when `DAWNPATROL_MCP_NOTEBOOK_ENABLED=true`; text capped at `DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS`; the tool call itself still counts against the shared per-run tool-call budget |
 
 `query_events` as read-only SQL rather than a fixed set of canned queries is a deliberate
 choice: it lets the model chase a hypothesis it forms mid-run ("which clients queried
@@ -591,9 +593,12 @@ anticipate the question. The safety comes from the connection being genuinely re
 from asking the model to behave.
 
 Note what is *not* a tool: there is no shell, no filesystem access, no network fetch, and
-no send-email tool. The model's only outbound effects are enrichment lookups against two
-specific APIs. Delivery happens after adjudication, in code. This is a meaningful
-reduction in blast radius compared to an agent that could email arbitrary recipients.
+no send-email tool. Delivery happens after adjudication, in code, so nothing here can
+redirect a report. Two tools have effects that outlast this run's own output rather than
+just spending its budget: `enrich_ip`/`enrich_domain` (reputation lookups against two
+specific APIs) and, when enabled, `add_notebook_entry` — the one tool that writes state a
+future run reads back as context. See § 12 for why that one is treated as a materially
+different trust boundary from everything else here.
 
 #### The device directory (`dawnpatrol/devices.py`)
 
@@ -683,10 +688,20 @@ The agent returns JSON conforming to a schema (`output_config.format`), not pros
                           "segments": {"lan": "...", "iot": "...", "dmz": "..."} },
   "trend_notes": [ {"kind": "ESCALATING", "text": "...", "signal_ids": [...]} ],
   "recommended_actions": [ {"priority": 1, "text": "...", "command": "..."} ],
-  "watchlist_updates": [ {"entity": "...", "reason": "...", "expires_days": 7} ],
+  "watchlist_updates": [ {"entity_type": "ip", "entity_value": "...",
+                          "reason": "...", "expires_days": 7} ],
+  "watchlist_removals": [ {"entity_type": "ip", "entity_value": "...", "reason": "..."} ],
   "data_quality_notes": [ "..." ]
 }
 ```
+
+`watchlist_updates`/`watchlist_removals`' `entity_type` is `ip`, `domain`, or `host`. In
+practice the model uses `host` for an internal endpoint it wants to track by address, not
+a named hostname string - `Event.device` is not a hostname field for every source (for
+`librenms_syslog` it holds a syslog facility code), so `correlation.py`'s
+`_watchlist_hits()` matches `host` the same way it matches `ip` (`src_ip`/`dst_ip`/DNS
+`client_ip`), checking `Event.device` too only as an additional, harmless path for a
+source that does log real hostnames there.
 
 The model writes judgment and prose fragments. It never writes headings, never writes
 numbers that belong to a metric, and never writes the report envelope. All the statistics
@@ -1017,12 +1032,17 @@ SMTP plugin. File output still happens, so the result is retrievable afterward t
 
 **The agent notebook is a second, narrower door, gated separately.** Every tool above is
 read-only except `trigger_analysis`, and even that only runs the existing pipeline - it
-doesn't change what a *future* run believes. `add_notebook_entry` does: text an external
-agent submits is stored in a new `notebook` table (`schema.py`) and read back by
-`agent/harness.py`, appended to `system_context` immediately after
-`profile.as_context()` - alongside the network documentation, never in place of it. That
-is a materially different trust boundary (shaping future judgment, not just reading data
-or spending API budget), so it does not turn on with `DAWNPATROL_MCP_ENABLED` - it needs
+doesn't change what a *future* run believes. `add_notebook_entry` does: text is stored in
+a `notebook` table (`schema.py`) and read back by `agent/harness.py`, appended to
+`system_context` immediately after `profile.as_context()` - alongside the network
+documentation, never in place of it. There are two independent ways a note gets written:
+this MCP tool, called by an external agent, and a *second*, separate `add_notebook_entry`
+tool on the investigate stage's own `ToolBox` (`agent/tools.py`) that lets the
+run-in-progress write to the same table directly, without a human relaying it through
+MCP. Both share the same gate, the same table, and the same injection limits - only the
+caller differs. That is a materially different trust boundary (shaping future judgment,
+not just reading data or spending API budget), so it does not turn on with
+`DAWNPATROL_MCP_ENABLED` - it needs
 its own `DAWNPATROL_MCP_NOTEBOOK_ENABLED`, off by default even when the rest of the MCP
 surface is on. Two bounds keep it from becoming an unbounded cost or context-injection
 surface: `DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS` rejects an over-long single note

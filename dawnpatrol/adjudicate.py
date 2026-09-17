@@ -23,6 +23,7 @@ from .models import (
     Signal,
     Status,
     TrendNote,
+    WatchlistRemoval,
     WatchlistUpdate,
 )
 from .profile import Profile
@@ -277,6 +278,20 @@ def parse_watchlist(raw: list[dict[str, Any]] | None) -> list[WatchlistUpdate]:
             entity_value=value,
             reason=str(item.get("reason", "")),
             expires_days=max(1, min(365, days)),
+        ))
+    return out
+
+
+def parse_watchlist_removals(raw: list[dict[str, Any]] | None) -> list[WatchlistRemoval]:
+    out = []
+    for item in raw or []:
+        value = str(item.get("entity_value", "")).strip()
+        if not value:
+            continue
+        out.append(WatchlistRemoval(
+            entity_type=str(item.get("entity_type", "ip")),
+            entity_value=value,
+            reason=str(item.get("reason", "")),
         ))
     return out
 

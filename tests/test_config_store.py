@@ -249,6 +249,14 @@ def test_watchlist_expiry(store):
     assert len(items) == 1 and items[0]["reason"] == "updated"
 
 
+def test_remove_watch_closes_a_resolved_entry(store):
+    store.add_watch("ip", "1.2.3.4", "watch me", "run1", expires_days=7)
+    assert store.remove_watch("ip", "1.2.3.4") is True
+    assert store.active_watchlist() == []
+    # removing again (already gone) is a no-op, not an error
+    assert store.remove_watch("ip", "1.2.3.4") is False
+
+
 def test_notebook_entries_round_trip_in_order(store):
     store.add_notebook_entry("first note", author="alice")
     store.add_notebook_entry("second note", author="bob")

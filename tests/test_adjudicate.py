@@ -14,6 +14,7 @@ from dawnpatrol.adjudicate import (
     parse_actions,
     parse_trends,
     parse_watchlist,
+    parse_watchlist_removals,
 )
 from dawnpatrol.models import Entity, EntityType, Severity, Signal, Status
 
@@ -259,3 +260,13 @@ def test_watchlist_expiry_is_bounded():
     out = parse_watchlist([{"entity_type": "ip", "entity_value": "1.2.3.4",
                             "reason": "r", "expires_days": 99999}])
     assert out[0].expires_days == 365
+
+
+def test_watchlist_removals_discard_malformed_entries():
+    out = parse_watchlist_removals([
+        {"entity_type": "host", "entity_value": "gw-office", "reason": "resolved"},
+        {"entity_type": "ip", "entity_value": ""},
+    ])
+    assert len(out) == 1
+    assert out[0].entity_type == "host"
+    assert out[0].entity_value == "gw-office"

@@ -458,6 +458,14 @@ class Store:
                 expires_at=now + timedelta(days=max(1, expires_days)),
             ))
 
+    def remove_watch(self, entity_type: str, entity_value: str) -> bool:
+        with self.engine.begin() as conn:
+            res = conn.execute(delete(S.watchlist).where(
+                S.watchlist.c.entity_type == entity_type,
+                S.watchlist.c.entity_value == entity_value,
+            ))
+        return res.rowcount > 0
+
     def active_watchlist(self) -> list[dict[str, Any]]:
         now = datetime.now(UTC)
         with self.engine.connect() as conn:
@@ -519,8 +527,10 @@ class Store:
         return result.rowcount > 0
 
     # ----- agent notebook ---------------------------------------------------- #
-    # Off by default (DAWNPATROL_MCP_NOTEBOOK_ENABLED); written only by an
-    # external agent over MCP, read back by the harness alongside profile.yml.
+    # Off by default (DAWNPATROL_MCP_NOTEBOOK_ENABLED). Written either by an
+    # external agent over MCP, or by the investigate-stage model itself via its
+    # own add_notebook_entry tool (agent/tools.py); read back by the harness
+    # alongside profile.yml either way.
 
     def add_notebook_entry(self, text: str, author: str = "") -> int:
         with self.engine.begin() as conn:
@@ -542,6 +552,12 @@ class Store:
              "author": r["author"] or "", "text": r["text"]}
             for r in rows
         ]
+
+    def count_notebook_entries(self) -> int:
+        with self.engine.connect() as conn:
+            return int(conn.execute(
+                select(func.count()).select_from(S.notebook)
+            ).scalar_one())
 
     def recent_notebook_entries(self, limit: int) -> list[dict[str, Any]]:
         """The most recent ``limit`` entries, oldest of that set first.

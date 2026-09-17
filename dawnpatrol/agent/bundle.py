@@ -66,6 +66,8 @@ def build_bundle(
     if watchlist:
         sections.append(
             "WATCHLIST CARRIED FORWARD\n"
+            "Close resolved items with watchlist_removals rather than letting them\n"
+            "recur silently.\n"
             + _fence(json.dumps(watchlist, indent=1, default=str))
         )
 

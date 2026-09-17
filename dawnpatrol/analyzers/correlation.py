@@ -61,6 +61,11 @@ class CorrelationAnalyzer(Analyzer):
         watch = baseline.watchlist()
         if not watch:
             return
+        entity_types = {
+            "domain": EntityType.DOMAIN,
+            "ip": EntityType.IP,
+            "host": EntityType.HOST,
+        }
         for item in watch:
             value, etype = item["value"], item["type"]
             hits = 0
@@ -69,6 +74,15 @@ class CorrelationAnalyzer(Analyzer):
             elif etype == "ip":
                 hits = q.count(src_ip=value) + q.count(dst_ip=value) + \
                        q.count(kind=EventKind.DNS, client_ip=value)
+            elif etype == "host":
+                # In practice the model uses "host" for an internal device
+                # identified by its IP (matched the same way as "ip"), not a
+                # named hostname - Event.device holds a syslog facility code
+                # for this source, never a name, so it is checked too but
+                # only ever adds coverage, never replaces the IP match.
+                hits = q.count(src_ip=value) + q.count(dst_ip=value) + \
+                       q.count(kind=EventKind.DNS, client_ip=value) + \
+                       q.count(device=value)
             if hits <= 0:
                 continue
             r.signals.append(Signal(
@@ -78,10 +92,7 @@ class CorrelationAnalyzer(Analyzer):
                 taxonomy="watchlist.hit",
                 severity_hint=Severity.MEDIUM,
                 confidence=0.7,
-                entities=[Entity(
-                    type=EntityType.DOMAIN if etype == "domain" else EntityType.IP,
-                    value=value,
-                )],
+                entities=[Entity(type=entity_types.get(etype, EntityType.IP), value=value)],
                 evidence={
                     "entity": value,
                     "entity_type": etype,

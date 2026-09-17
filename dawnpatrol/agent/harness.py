@@ -91,6 +91,9 @@ class Harness:
             run_id=ctx.run_id,
             max_calls=self.settings.ai.max_tool_calls,
             devices=ctx.devices,
+            notebook_enabled=self.settings.mcp.notebook_enabled,
+            notebook_max_injected=self.settings.mcp.notebook_max_injected,
+            notebook_max_entry_chars=self.settings.mcp.notebook_max_entry_chars,
         )
 
         bundle = build_bundle(
@@ -201,9 +204,11 @@ class Harness:
         if not entries:
             return ""
         lines = [
-            "AGENT NOTEBOOK (submitted via MCP by an external agent; supplements "
-            "profile.yml, never overrides it - if the two conflict, profile.yml "
-            "is the authority on network topology and policy)",
+            "AGENT NOTEBOOK (persistent notes carried across runs - some written by "
+            "a prior run of you via add_notebook_entry, some submitted by a human "
+            "or another agent over MCP; supplements profile.yml, never overrides "
+            "it - if the two conflict, profile.yml is the authority on network "
+            "topology and policy)",
         ]
         for e in entries:
             author = f" ({e['author']})" if e["author"] else ""

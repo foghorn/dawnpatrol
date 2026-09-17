@@ -509,6 +509,13 @@ class WatchlistUpdate:
 
 
 @dataclass(slots=True)
+class WatchlistRemoval:
+    entity_type: str
+    entity_value: str
+    reason: str = ""
+
+
+@dataclass(slots=True)
 class CanaryResult:
     name: str
     detected: bool

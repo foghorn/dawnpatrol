@@ -110,6 +110,16 @@ here's why." An agent investigating something over `trigger_analysis` can leave 
 for tomorrow's scheduled run to pick up, instead of that context living only in a chat
 transcript that the next run never sees.
 
+**Two callers, one table.** This MCP `add_notebook_entry` is for a human or an external
+agent writing in. The investigate stage's own `ToolBox` (`agent/tools.py`) exposes a
+second, separate `add_notebook_entry` tool that lets a run write to the same `notebook`
+table itself, mid-analysis - "I confirmed this device's identity, save it for next time"
+- without a human relaying it through MCP first. Both tools write the same table, share
+`DAWNPATROL_MCP_NOTEBOOK_ENABLED` as their single on/off switch, and are bounded by the
+same two caps below. The system prompt tells the run-time agent explicitly that most runs
+should write nothing, and gives it the live injection limit so it can judge whether an
+entry is worth the cost of possibly evicting the oldest one.
+
 **How it reaches the model.** `agent/harness.py` appends the notebook block to
 `system_context` immediately after `profile.as_context()`, in the same cached
 system-prompt segment - literally "alongside the core documentation," never replacing

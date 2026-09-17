@@ -1,10 +1,13 @@
 """The agent's tool surface.
 
 Note what is absent: no shell, no filesystem, no arbitrary fetch, and no
-delivery tool. The model's only outbound effects are reputation lookups against
-configured providers. Delivery happens after adjudication, in code, to
-recipients that come from environment variables - so no amount of injected text
-in a log line can redirect a report.
+delivery tool. Delivery happens after adjudication, in code, to recipients that
+come from environment variables - so no amount of injected text in a log line
+can redirect a report. Two things outlast this run's own output: reputation
+lookups against configured providers (spend, not state) and, when
+DAWNPATROL_MCP_NOTEBOOK_ENABLED is set, add_notebook_entry - the one tool here
+that writes state a future run will read back as context, not just this run's
+budget.
 """
 
 from __future__ import annotations
@@ -44,6 +47,9 @@ class ToolBox:
         run_id: str,
         max_calls: int = 25,
         devices: DeviceDirectory | None = None,
+        notebook_enabled: bool = False,
+        notebook_max_injected: int = 50,
+        notebook_max_entry_chars: int = 4000,
     ) -> None:
         self.store = store
         self.query = query
@@ -54,6 +60,9 @@ class ToolBox:
         self.run_id = run_id
         self.max_calls = max_calls
         self.devices = devices if devices is not None else DeviceDirectory()
+        self.notebook_enabled = notebook_enabled
+        self.notebook_max_injected = notebook_max_injected
+        self.notebook_max_entry_chars = notebook_max_entry_chars
         self.calls_made = 0
         self.call_log: list[str] = []
 
@@ -185,6 +194,36 @@ class ToolBox:
                 return f"no directory entry for {ip!r}. Known IPs: {known or '(none)'}"
             return json.dumps(device.to_dict(), default=str)
         return json.dumps({"devices": self.devices.to_bundle()}, default=str)[:20000]
+
+    def add_notebook_entry(self, args: dict[str, Any]) -> str:
+        if over := self._spend("add_notebook_entry"):
+            return over
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return "text is required"
+        if len(text) > self.notebook_max_entry_chars:
+            return (f"entry is {len(text)} characters, over the "
+                    f"{self.notebook_max_entry_chars}-character limit "
+                    f"(DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS). Split it into "
+                    f"more than one entry.")
+        self.store.add_notebook_entry(text, author="analysis-agent")
+        total = self.store.count_notebook_entries()
+        injected = min(total, self.notebook_max_injected)
+        result: dict[str, Any] = {
+            "stored": True,
+            "total_entries": total,
+            "injected_into_future_runs": injected,
+        }
+        if total > self.notebook_max_injected:
+            result["note"] = (
+                f"There are now {total} notebook entries, but only the most "
+                f"recent {self.notebook_max_injected} are injected into any run's "
+                f"context (DAWNPATROL_MCP_NOTEBOOK_MAX_INJECTED). The oldest "
+                f"{total - self.notebook_max_injected} will not be seen by a "
+                f"future run unless that limit is raised or older entries are "
+                f"removed via the MCP notebook tools."
+            )
+        return json.dumps(result, default=str)
 
     def hunt_history(self, args: dict[str, Any]) -> str:
         if over := self._spend("hunt_history"):
@@ -320,6 +359,36 @@ class ToolBox:
                     },
                 },
                 handler=self.get_device_directory,
+            ))
+
+        if self.notebook_enabled:
+            tools.append(ToolSpec(
+                name="add_notebook_entry",
+                description=(
+                    "Leave a short note for a future run - something you learned "
+                    "this run that profile.yml doesn't capture and that would "
+                    "otherwise be lost when this run ends: a device's real "
+                    "identity, a source's quirky logging behaviour, context that "
+                    "explains a finding so it isn't re-flagged from scratch. "
+                    f"Only the most recent {self.notebook_max_injected} entries "
+                    "across the WHOLE notebook (not just yours) are shown to any "
+                    "run - adding one past that limit pushes the single oldest "
+                    "entry out of every future run's context, silently. Do not "
+                    "use this to restate something already in profile.yml or in "
+                    "this run's findings; write to it sparingly. You can add, but "
+                    "not delete - removing a stale note requires the MCP "
+                    "notebook tools."
+                ),
+                parameters={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["text"],
+                    "properties": {
+                        "text": {"type": "string",
+                                "maxLength": self.notebook_max_entry_chars},
+                    },
+                },
+                handler=self.add_notebook_entry,
             ))
 
         if self.broker.available_for("ip"):
