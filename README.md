@@ -56,11 +56,12 @@ questions in real SQL, and kick off a fresh, targeted investigation the moment
 something looks worth a second opinion — the same judgment loop, available on
 demand instead of only at 6 a.m.
 
-In production against a real home network — LibreNMS firewall syslog (~28,000
-syslog records, of which ~23,000 are firewall drop/accept lines) plus Pi-hole
-DNS (~140,000 queries) per 24-hour window — a full run (collection through a
-live Claude Opus 5 investigation, adjudication, and delivery) completes in
-under three minutes and costs **$0.50-$1.00**, depending on effort level.
+In production against a real home network — LibreNMS firewall syslog
+(auto-discovered across every managed device, ~190,000 syslog records) plus
+Pi-hole DNS (~150,000-160,000 queries) per 24-hour window — a full run
+(collection through a live Claude Opus 5 investigation, adjudication, and
+delivery) completes in under five minutes and costs **$0.80-$1.80**,
+depending on effort level and how much the model needs to investigate.
 That's not a projection; that's what it actually costs to run this every day.
 
 ---
@@ -135,7 +136,9 @@ is what makes the repo publishable.
 The profile is more than documentation. Zones drive per-segment analysis,
 `approved_resolvers` turns DNS bypass into a HIGH signal, and
 `nat_attribution_limited_behind` makes DawnPatrol say "from behind the gateway"
-instead of naming a device it cannot actually see.
+instead of naming a device it genuinely cannot see — genuinely being the
+operative word: check a gateway's own forwarded logs for a real client IP
+before assuming NAT hides it, not every NAT gateway belongs on this list.
 
 ### Database
 
@@ -187,11 +190,12 @@ disabled one is waiting for.
 
 Analyzers are pure functions over the event store: no network, no model calls.
 That is what makes them testable against fixtures and fast to iterate on.
-Ships today with two sources (LibreNMS syslog, Pi-hole DNS) and seven
+Ships today with two sources (LibreNMS syslog, Pi-hole DNS) and nine
 analyzers (firewall volume, firewall pattern classification, DNS anomalies,
-beaconing, per-segment review, cross-source correlation, and baseline delta) —
-the shape is built for a third source and an eighth analyzer to be a single
-new file, not a rewrite. The detection self-test that proves those analyzers
+new-device detection, beaconing, VPN/Wi-Fi authentication activity,
+per-segment review, cross-source correlation, and baseline delta) — the shape
+is built for a third source and a tenth analyzer to be a single new file, not
+a rewrite. The detection self-test that proves those analyzers
 are actually working (not just running) is its own system — see
 [docs/components/canaries.md](docs/components/canaries.md) — and the network
 documentation that gives every finding its context is `profile.yml` — see
@@ -226,10 +230,10 @@ is unverified. Canary events are analyzed in an isolated pass, so they never
 touch a reported statistic.
 
 None of this is aspirational — it's what a real deployment produces every
-morning: a report that names its own blind spots (a segment behind a NAT
-gateway with no per-device visibility, a DNS source that came back short of
-its own reported total) right alongside its findings, instead of a
-confident-sounding wall of text with no way to check its work.
+morning: a report that names its own blind spots (a DMZ Windows Server that
+forwards no syslog of its own, a DNS source that came back short of its own
+reported total) right alongside its findings, instead of a confident-sounding
+wall of text with no way to check its work.
 
 ---
 
@@ -347,7 +351,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-293 tests, fully offline — no network, no API key, no spend — including an
+305 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract

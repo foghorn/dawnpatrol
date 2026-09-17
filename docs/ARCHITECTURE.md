@@ -1,7 +1,7 @@
 # DawnPatrol Architecture
 
 **Status:** Implemented and in production (Phases 1-4.5 complete; see §15)
-**Last updated:** 2026-09-15
+**Last updated:** 2026-09-17
 
 This document describes the system as it is actually built, not as it was originally
 proposed. Where an earlier draft described an open design question, this revision
@@ -86,7 +86,7 @@ Two consequences worth naming up front:
 
 ## 3. Pipeline
 
-Ten stages. Stages 1-6 and 8-10 are fully deterministic; only stage 7 calls the model.
+Eleven stages. Stages 1-6 and 8-11 are fully deterministic; only stage 7 calls the model.
 
 ```
   1. PLAN        resolve run window, load profile, open state DB, load baseline
@@ -177,7 +177,9 @@ dawnpatrol/
 │   │   ├── firewall_volume.py
 │   │   ├── firewall_patterns.py
 │   │   ├── dns_anomalies.py
+│   │   ├── novel_clients.py        # new-device detection: novel IP and novel MAC
 │   │   ├── beaconing.py
+│   │   ├── auth_activity.py        # VPN lifecycle + Wi-Fi deauthentication
 │   │   ├── segment_review.py
 │   │   ├── correlation.py
 │   │   ├── baseline_delta.py
@@ -186,11 +188,15 @@ dawnpatrol/
 │   │   ├── abuseipdb.py
 │   │   ├── ismalicious.py
 │   │   └── TEMPLATE.py
-│   └── outputs/                    # ── PLUGIN FOLDER ──
-│       ├── file_report.py
-│       ├── smtp_email.py
-│       ├── webhook.py
-│       └── TEMPLATE.py
+│   ├── outputs/                    # ── PLUGIN FOLDER ──
+│   │   ├── file_report.py
+│   │   ├── smtp_email.py
+│   │   ├── webhook.py
+│   │   └── TEMPLATE.py
+│   └── mcpserver/                  # external-agent MCP surface (§12)
+│       ├── server.py               # builds/registers tools, bearer-auth middleware
+│       ├── tools.py                # ToolContext: the tool implementations
+│       └── auth.py
 └── tests/
     ├── fixtures/                   # recorded, scrubbed API responses
     ├── test_sources/
@@ -574,7 +580,7 @@ is visible rather than silently expensive.
 | `enrich_ip(ips)` / `enrich_domain(domains)` | reputation lookups | budget + cache + prefilter enforced here |
 | `get_metric_history(key, days)` | trend series from `state.db` | — |
 | `get_entity_history(entity)` | first_seen, occurrences, prior findings | — |
-| `get_watchlist()` | items carried forward | — |
+| `hunt_history(domain=None, ip=None, days=180)` | long-term retained history for a domain or IP, beyond this run's raw events | exactly one of `domain`/`ip` |
 | `get_device_directory(ip=None)` | full per-device detail (hostname/hardware/OS/uptime/location/sources/roles), one IP or every device known this run | only registered when at least one source contributed a device this run |
 
 `query_events` as read-only SQL rather than a fixed set of canned queries is a deliberate
@@ -627,15 +633,22 @@ device-related MCP tool, not one bespoke tool per plugin.
 earlier revision of this section rendered the full device list under "Data quality and
 caveats" - itself a fix for `SourceHealth.notes[:5-6]` silently capping a per-device
 listing `librenms_syslog` used to put there. That was still the wrong data source: the
-device directory is a curated inventory (LibreNMS's SNMP-managed hosts, Pi-hole's DNS
-clients), not a census of every client on the network. A NAT-gated segment with no SNMP
-presence and no local DNS resolver behind it - the IoT and DMZ gateways here, each
-running their own `dnsmasq` rather than forwarding queries to the central Pi-hole - can
-have real, active client traffic (confirmed: `10.128.50.0/24` cameras and automation
-gear behind `10.128.10.8`) while contributing zero entries to `ctx.devices`, because
-nothing currently registers "every distinct IP seen in firewall traffic" as a device.
-The full device list, rendered, made that gap invisible rather than visible: it looked
-complete while quietly excluding an entire segment's population.
+device directory was, at the time, a curated inventory (LibreNMS's SNMP-managed hosts,
+Pi-hole's DNS clients), not a census of every client on the network. A NAT-gated segment
+with no SNMP presence and no local DNS resolver behind it - the IoT and DMZ gateways
+here, each running their own `dnsmasq` rather than forwarding queries to the central
+Pi-hole - had real, active client traffic (confirmed: `10.128.50.0/24` cameras and
+automation gear behind `10.128.10.8`) while contributing zero entries to `ctx.devices`,
+because nothing registered "every distinct IP seen in firewall traffic" as a device. The
+full device list, rendered, made that gap invisible rather than visible: it looked
+complete while quietly excluding an entire segment's population. (DHCP lease parsing,
+added after this decision, has since closed part of that gap - a device that renews its
+lease *within this run's own window* now registers via the `dhcp-client` role, real
+hostname included. It does not close all of it: a device that doesn't happen to renew
+its lease during this specific 24h window is still absent from `ctx.devices`, which is
+exactly why segment population - reading every firewall/DNS event directly, not
+whichever leases happened to renew - remains the reliable, complete-every-run answer to
+"how many clients are actually out there.")
 
 The fix is `SegmentReviewAnalyzer` (`analyzers/segment_review.py`) computing
 `zone.<name>.dns_clients` / `zone.<name>.fw_clients` straight from the events themselves.
@@ -819,7 +832,7 @@ DAWNPATROL_SOURCE_LIBRENMS_TOKEN=...
 DAWNPATROL_SOURCE_PIHOLE_URL=http://pihole.example/api
 DAWNPATROL_SOURCE_PIHOLE_PASSWORD=...
 
-# Device directory - excludes public IPs by default; see 8.3.1
+# Device directory - excludes public IPs by default; see §8.3, "The device directory"
 DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=false
 
 # Enrichment
@@ -880,9 +893,15 @@ known_quirks:
 ```
 
 `nat_attribution_limited_behind` is how the attribution-limit caveat stops being a prompt
-rule: the renderer emits the "originating from behind the IoT gateway; per-device
-attribution requires OpenWRT-side logging" language automatically for any finding whose
-subject is one of those gateways.
+rule: the renderer emits the "originating from behind the gateway; per-device
+attribution is not possible" language automatically for any finding whose subject is one
+of those gateways. **List a gateway here only if its own logs genuinely cannot reveal
+the originating client - verify against the actual log format first, not every NAT
+gateway qualifies.** A real deployment listed two OpenWrt gateways here on the assumption
+that NAT meant the client was unknowable, then found - once the gateways' own
+kernel/iptables logs were actually inspected - that `SRC=`/`DST=` carried the real
+pre-NAT client IP the whole time. Both entries were removed once that was confirmed; the
+mechanism stayed, the assumption didn't.
 
 `known_quirks` gives you a place to record environment truths without editing a prompt —
 the entries are injected into the cached profile block.
@@ -1055,7 +1074,7 @@ be firewalled to an allowlist.
 
 ## 14. Testing
 
-293 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
+305 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
 includes an end-to-end pipeline exercise against a stubbed provider. CI
 (`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
 request, across Python 3.11-3.13.
@@ -1098,15 +1117,13 @@ aspirational; each row names the actual files that satisfy it.
 | 2 | Analyzers: volume, patterns, DNS anomalies, segments, correlation, baseline delta | **Done.** All seven ship (`dawnpatrol/analyzers/`); zero API spend at this stage. |
 | 3 | Agent harness, tools, structured output, adjudication, plaintext renderer, SMTP output | **Done.** Validated against a live network with a real model: real findings, real adjudication, real email delivery. |
 | 3.5 | Canary self-validation, suppression, long-term IOC store and `hunt` | **Done.** Both canaries fire in production; a canary excluded by an ad hoc source restriction was observed correctly reporting NOT DETECTED and escalating status, rather than passing silently. |
-| 4 | Enrichment plugins, caching, budgets; webhook output; markdown/html renderers | **Mostly done.** `abuseipdb.py` and `ismalicious.py` ship with caching and budget enforcement (`enrichment/broker.py`) but are unexercised against live traffic in this deployment - no reputation API keys configured yet. `webhook.py` and `markdown.py`/`html.py` all ship. |
-| 4.5 | MCP server: read-only tools plus `trigger_analysis`, bearer auth, shared run lock | **Done.** Deployed and verified end to end: authentication (accept/reject), all nine tools, the shared-lock rejection of a concurrent trigger, and a real `trigger_analysis` call that surfaced a genuine canary failure and RED status. |
+| 4 | Enrichment plugins, caching, budgets; webhook output; markdown/html renderers | **Done.** `abuseipdb.py` and `ismalicious.py` ship with caching and budget enforcement (`enrichment/broker.py`); both are now configured with real keys and have been exercised against live traffic in this deployment. `webhook.py` and `markdown.py`/`html.py` all ship. |
+| 4.5 | MCP server: read-only tools plus `trigger_analysis`, bearer auth, shared run lock | **Done.** Deployed and verified end to end: authentication (accept/reject), every registered tool, the shared-lock rejection of a concurrent trigger, and a real `trigger_analysis` call that surfaced a genuine canary failure and RED status. |
 | 5 | Scheduler hardening, healthcheck, docs, fixtures, CI, public release prep | **Mostly done.** Healthcheck, `docs/components/*.md`, and CI (`.github/workflows/ci.yml`) all ship. `tests/fixtures/` remains an empty on-ramp - the traps it was meant to guard against are covered by inline synthetic fixtures instead (§14) - and the repo has not yet been pushed to a public remote. |
 
-The two remaining gaps (live enrichment-key testing, on-disk recorded fixtures) are
-both additive: neither blocks anything else in this list, and both are one small,
-well-scoped task away from closing - the first needs an operator to supply a key, the
-second needs someone to decide the inline-synthetic-fixture tradeoff above is worth
-revisiting.
+The one remaining gap (on-disk recorded fixtures, `tests/fixtures/`) is additive: it
+doesn't block anything else in this list, and closing it needs someone to decide the
+inline-synthetic-fixture tradeoff above is worth revisiting - not a blocker, a choice.
 
 ---
 

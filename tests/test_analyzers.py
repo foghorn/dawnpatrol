@@ -532,6 +532,45 @@ def test_a_previously_seen_ip_is_not_flagged_again(store, profile, window):
     assert not any(s.taxonomy == "net.novel_client" for s in result.signals)
 
 
+def test_a_new_mac_is_flagged_even_without_a_new_ip(store, profile, window):
+    """A device whose IP is already known (e.g. it kept its DHCP lease) but
+    whose MAC has never been seen is still a genuinely new device identity."""
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "novel-mac"
+    _with_baseline(store, window, run_id)
+    # The IP is already known - only the MAC is new.
+    store.observe_entities([(EntityType.IP, "10.10.0.202", 1)], window.start - timedelta(days=30))
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.SYSTEM,
+              dedup_key="nc5", action="dhcpack", src_ip="10.10.0.202",
+              user="aa:bb:cc:dd:ee:01", src_zone="lan"),
+    ])
+    result = NovelClientAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "net.novel_device_mac")
+    assert "aa:bb:cc:dd:ee:01" in signal.evidence["macs"]
+
+
+def test_a_previously_seen_mac_is_not_flagged_again(store, profile, window):
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "novel-known-mac"
+    _with_baseline(store, window, run_id)
+    store.observe_entities([(EntityType.DEVICE, "aa:bb:cc:dd:ee:02", 1)],
+                           window.start - timedelta(days=30))
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.SYSTEM,
+              dedup_key="nc6", action="dhcpack", src_ip="10.10.0.203",
+              user="aa:bb:cc:dd:ee:02", src_zone="lan"),
+    ])
+    result = NovelClientAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "net.novel_device_mac" for s in result.signals)
+
+
 # --------------------------------------------------------------------------- #
 # Auth activity: VPN lifecycle + Wi-Fi deauthentication
 # --------------------------------------------------------------------------- #

@@ -5,8 +5,11 @@ no config file to maintain. Any :class:`~dawnpatrol.sources.base.Source` can
 call ``ctx.devices.update(...)`` from inside its own ``collect()`` to
 contribute whatever it happens to know about a device: LibreNMS reports
 hostname/hardware/OS/uptime for everything it manages, Pi-hole only ever
-sees a bare client IP (and sometimes a name) making DNS queries. Both are
-legitimate, partial views of the same key.
+sees a bare client IP (and sometimes a name) making DNS queries, and DHCP
+lease lines (``DHCPACK``, parsed in ``librenms_syslog.py``) give a real
+hostname and MAC address for segments that have neither SNMP inventory nor a
+local DNS resolver - which is most of what the IoT/DMZ gateways can offer.
+All are legitimate, partial views of the same key.
 
 Keyed by IP address, not by any one source's internal identifier (LibreNMS's
 ``device_id`` is only meaningful to LibreNMS) - so contributions from
@@ -31,7 +34,8 @@ from typing import Any
 from .secrets import read_bool
 
 #: Structured fields a source may fill in. First non-empty value wins.
-_FIELDS = ("hostname", "hardware", "os", "version", "status", "location", "uptime_seconds")
+_FIELDS = ("hostname", "hardware", "os", "version", "status", "location",
+          "uptime_seconds", "mac")
 
 INCLUDE_PUBLIC_IPS_ENV = "DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS"
 
@@ -55,6 +59,7 @@ class DeviceInfo:
     status: str = ""
     location: str = ""
     uptime_seconds: int | None = None
+    mac: str = ""
     roles: set[str] = field(default_factory=set)
     sources: set[str] = field(default_factory=set)
     notes: list[str] = field(default_factory=list)
@@ -71,6 +76,8 @@ class DeviceInfo:
             bits.append(f"({descriptor})")
         if self.status:
             bits.append(f"[{self.status}]")
+        if self.mac:
+            bits.append(f"mac={self.mac}")
         if self.roles:
             bits.append("roles=" + "/".join(sorted(self.roles)))
         bits.append("via " + "/".join(sorted(self.sources)))
@@ -86,6 +93,7 @@ class DeviceInfo:
             "status": self.status,
             "location": self.location,
             "uptime_seconds": self.uptime_seconds,
+            "mac": self.mac,
             "roles": sorted(self.roles),
             "sources": sorted(self.sources),
             "notes": list(self.notes),

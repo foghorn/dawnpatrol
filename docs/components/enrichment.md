@@ -86,6 +86,24 @@ input subject regardless of which stage answered it.
 - **A 429 or any request failure becomes an `Enrichment.error`**, never an exception -
   enrichment is advisory and must never be able to fail a run.
 
+## Walkthrough: `ismalicious.py`
+
+- **`classification.primary` is demoted to an unverified hypothesis, never a verdict
+  outright.** The upstream field returns confident-looking labels ("phishing" at 93%
+  confidence) for plainly benign, long-established domains. The real `verdict` is
+  anchored on `malicious`, `riskScore`, and `evidence` instead; `classification.primary`
+  only surfaces in `attributes["classification_hypothesis"]`, and even then it's
+  literally tagged `(UNVERIFIED - provider disagreement or no blocklist corroboration;
+  do not report as fact)` unless provider agreement *and* a real blocklist hit both
+  support it.
+- **`prefilter()` skips domains `profile.is_benign_domain()` already trusts** (plus
+  deduplicating and rejecting anything without a `.`), so a known-good domain never
+  costs a lookup - the same principle `abuseipdb.py` applies to non-routable IPs.
+- **A 429 becomes an `Enrichment.error`, same as `abuseipdb.py`** - rate limits and
+  request failures are advisory-layer facts, never something that can fail a run.
+- **`cache_ttl` is 3 days, not `abuseipdb.py`'s 7** - domain reputation (new
+  registrations, blocklist churn) moves faster than IP reputation does.
+
 ## Build your own
 
 Copy `dawnpatrol/enrichment/TEMPLATE.py`. The whole job is the API call and the mapping

@@ -27,6 +27,13 @@ external agent only through that same generic, cross-source
 ``get_device_directory`` MCP tool (``mcpserver/tools.py``), never through
 anything LibreNMS-specific - the MCP surface exposes core functionality, not
 per-plugin ones.
+
+``DNSMASQ-DHCP`` lease lines are a second, independent contribution to that
+same directory: a ``DHCPACK`` carries a real hostname and MAC address for
+devices that have neither SNMP presence nor a local DNS resolver - which is
+most of what the IoT/DMZ segment gateways can offer at all. Confirmed against
+the real feed on all three devices (main router and both OpenWRT gateways)
+before being encoded here, not assumed from documentation.
 """
 
 from __future__ import annotations
@@ -67,6 +74,44 @@ _PROTO_NUMBERS = {"1": "icmp", "2": "igmp", "6": "tcp", "17": "udp",
 #: Matches both WLCEVENTD's "Deauth_ind AA:BB:..." and HOSTAPD's
 #: "STA aa:bb:... IEEE 802.11: deauthenticated ...".
 _MAC_RE = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
+
+#: DNSMASQ-DHCP lines, format confirmed against the real feed on all three
+#: devices (main router + both OpenWRT segment gateways):
+#:   DHCPDISCOVER(eth0) aa:bb:cc:dd:ee:ff
+#:   DHCPOFFER(eth0) 10.0.0.5 aa:bb:cc:dd:ee:ff
+#:   DHCPREQUEST(eth0) 10.0.0.5 aa:bb:cc:dd:ee:ff
+#:   DHCPACK(eth0) 10.0.0.5 aa:bb:cc:dd:ee:ff optional-hostname
+#:   DHCPRELEASE(eth0) 10.0.0.5 aa:bb:cc:dd:ee:ff
+#: Only DHCPACK ever carries a hostname, and only when the client sent one.
+_DHCP_VERB_RE = re.compile(
+    r"^(DHCPACK|DHCPREQUEST|DHCPOFFER|DHCPDISCOVER|DHCPRELEASE|DHCPINFORM)"
+    r"\([^)]*\)\s*(.*)$"
+)
+_IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+
+def _parse_dhcp(message: str) -> dict[str, Any] | None:
+    """Parse one DNSMASQ-DHCP line into verb/ip/mac/hostname, or None if the
+    line is not a lease-lifecycle line at all (pool-exhaustion errors, domain
+    suffix chatter, etc. - dnsmasq logs plenty of those under the same
+    program tag)."""
+    m = _DHCP_VERB_RE.match(message.strip())
+    if not m:
+        return None
+    verb, rest = m.group(1), m.group(2)
+    tokens = rest.split()
+    ip = mac = hostname = None
+    idx = 0
+    if tokens and _IPV4_RE.match(tokens[0]):
+        ip = tokens[0]
+        idx = 1
+    if len(tokens) > idx and _MAC_RE.fullmatch(tokens[idx]):
+        mac = tokens[idx].lower()
+        idx += 1
+    if len(tokens) > idx:
+        hostname = tokens[idx]
+    return {"verb": verb, "ip": ip, "mac": mac, "hostname": hostname}
+
 
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
@@ -173,6 +218,25 @@ class LibreNMSSyslogSource(Source):
                 location=meta.get("location"),
             )
 
+    def _populate_dhcp_devices(self, devices: DeviceDirectory, events: list[Event]) -> None:
+        """Feed the cross-source device table from DHCP lease grants.
+
+        DHCPACK is the only verb that ever carries a hostname, and it is the
+        authoritative "this MAC now has this IP" moment - DISCOVER/OFFER/
+        REQUEST are the negotiation leading up to it, not a second lease.
+        Real hostnames and a stable MAC identity for IoT/DMZ devices that
+        have neither SNMP presence nor a local DNS resolver to be identified
+        by any other way.
+        """
+        for ev in events:
+            if ev.program != "DNSMASQ-DHCP" or ev.action != "dhcpack" or not ev.src_ip:
+                continue
+            parsed = _parse_dhcp(ev.message or "")
+            if not parsed:
+                continue
+            devices.update(ev.src_ip, source=self.name, role="dhcp-client",
+                          hostname=parsed["hostname"], mac=ev.user)
+
     # ----- collection -------------------------------------------------------- #
 
     def collect(self, window: Window, ctx: RunContext) -> CollectionResult:
@@ -217,6 +281,9 @@ class LibreNMSSyslogSource(Source):
 
         result.events = list(seen.values())
         result.reported_total = sum(totals.values()) if totals else None
+
+        if ctx is not None:
+            self._populate_dhcp_devices(ctx.devices, result.events)
 
         # One summary note, not one per device: a per-device note list is
         # exactly what gets silently capped to the first 5-6 entries by every
@@ -333,6 +400,21 @@ class LibreNMSSyslogSource(Source):
             if mac:
                 return Event(kind=EventKind.AUTH, action="deauth",
                             user=mac.group(1).lower(), **common)
+
+        # DHCP lease lines: real device identity (MAC, sometimes a hostname)
+        # for segments with no SNMP presence and no local DNS resolver - see
+        # _populate_dhcp_devices(), which reads these back out of collect()'s
+        # own result.events to feed the device directory.
+        if program == "DNSMASQ-DHCP":
+            parsed = _parse_dhcp(message)
+            if parsed and parsed["mac"]:
+                return Event(
+                    kind=EventKind.SYSTEM,
+                    action=parsed["verb"].lower(),
+                    user=parsed["mac"],
+                    **self.assign_zones(src_ip=parsed["ip"]),
+                    **common,
+                )
 
         return Event(kind=EventKind.SYSTEM, **common)
 

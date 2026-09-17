@@ -202,6 +202,26 @@ def test_novelty_detection(store):
     assert novel == ["brand-new.example"]
 
 
+def test_entity_pairs_from_events_tracks_device_by_mac():
+    """A MAC in Event.user (DHCP leases, Wi-Fi deauth) becomes an
+    EntityType.DEVICE entity - a device identity that survives DHCP lease
+    renewal, unlike its IP."""
+    from dawnpatrol.models import Event, EventKind
+    from dawnpatrol.store import entity_pairs_from_events
+
+    events = [
+        Event(ts=datetime.now(UTC), source="librenms_syslog", kind=EventKind.SYSTEM,
+              dedup_key="e1", action="dhcpack", src_ip="10.10.0.5",
+              user="aa:bb:cc:dd:ee:ff"),
+        Event(ts=datetime.now(UTC), source="librenms_syslog", kind=EventKind.SYSTEM,
+              dedup_key="e2", action="dhcpack", src_ip="10.10.0.6",
+              user="aa:bb:cc:dd:ee:ff"),
+    ]
+    pairs = entity_pairs_from_events(events)
+    device_pairs = {(t, v): c for t, v, c in pairs if t == EntityType.DEVICE}
+    assert device_pairs[(EntityType.DEVICE, "aa:bb:cc:dd:ee:ff")] == 2
+
+
 def test_enrichment_cache_respects_ttl(store):
     store.cache_put("x", "1.2.3.4", {"score": 10}, timedelta(seconds=60))
     assert store.cache_get("x", "1.2.3.4") == {"score": 10}

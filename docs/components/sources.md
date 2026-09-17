@@ -86,6 +86,22 @@ never recur:
   `WLCEVENTD`/`HOSTAPD` deauthentication lines *do* carry real device-authentication
   evidence - a client MAC and a reason - and become `AUTH` too, with the MAC in
   `Event.user`.
+- **`DNSMASQ-DHCP` lease lines are parsed for device identity.** Confirmed against
+  the real feed on all three devices (main router and both OpenWRT segment gateways)
+  before being encoded: `DHCPACK(iface) ip mac [hostname]` is the authoritative lease
+  grant, and the only verb that ever carries a hostname (only when the client sent
+  one). `_parse_dhcp()` recognizes every DHCP verb (`DISCOVER`/`OFFER`/`REQUEST`/
+  `ACK`/`RELEASE`/`INFORM`) and ignores dnsmasq's considerable non-lease chatter under
+  the same program tag (domain-suffix noise, rebind-attack warnings, and - on the real
+  IoT/DMZ gateways - "no address range available for DHCP request" pool-exhaustion
+  errors at a genuinely notable ~2,000/day *each*, worth investigating in its own
+  right) - these stay generic `SYSTEM` events, unchanged. A parsed line still
+  becomes `SYSTEM` (not a new kind), with `action` set to the lowercased verb and the
+  MAC in `Event.user` - the same field Wi-Fi deauthentication uses, so both feed
+  `EntityType.DEVICE` novelty tracking (`analyzers/novel_clients.py`) identically. Only
+  `DHCPACK` feeds the device directory (`devices.py`, role `dhcp-client`) with a real
+  hostname and MAC - exactly what IoT/DMZ devices otherwise have neither SNMP
+  inventory nor a local DNS resolver to be identified by any other way.
 - **Device selection defaults to every device, auto-discovered fresh each run.**
   `DAWNPATROL_SOURCE_LIBRENMS_DEVICES` pins an explicit list when you want to exclude
   something; unset, `_device_directory()` calls `/devices` (one unpaginated call - unlike
@@ -104,9 +120,9 @@ never recur:
 - **Every device with a private IP is registered in the cross-source device directory**
   (`dawnpatrol/devices.py`, `ARCHITECTURE.md` §8.3) - a per-run registry keyed by IP
   address, not by LibreNMS's own `device_id`, so any other source can contribute to the
-  same entry. Public IPs are excluded by default (a personal domain monitored over ping
-  is a real example that showed up here) - set `DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=true`
-  to include them. That directory reaches both the internal stage-7 investigation agent
+  same entry. Public (globally routable) IPs are excluded by default - a personal
+  domain monitored over ping is a real example that showed up in this device list -
+  set `DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=true` to include those too. That directory reaches both the internal stage-7 investigation agent
   (a summary every run, full detail through its own `get_device_directory` tool) and, via
   the finished report, an external MCP agent through the identically-named
   `get_device_directory` MCP tool (`docs/components/mcp-server.md`) - deliberately the
@@ -138,6 +154,14 @@ more.
   hardware or OS - only a client IP, occasionally with a name - but that is still a
   real contribution: it is the only source that ever sees some client-only devices (a
   phone, a smart plug) that never appear in LibreNMS's own managed-device list at all.
+- **`block_reason` carries the raw resolution status for every query, not only blocked
+  ones.** It used to be populated only when `blocked=True` (`GRAVITY`/`DENYLIST`/etc.);
+  it is now always set to Pi-hole's own status string - `NXDOMAIN`/`FORWARDED`/`CACHE`/
+  etc. for everything else. `blocked` remains the sole authority on whether a query was
+  actually blocked; `block_reason` on an unblocked query is what
+  `dns_anomalies.py`'s NXDOMAIN-rate-outlier check reads to spot a client resolving far
+  more nonexistent domains than its peers - a DGA-shaped pattern the block rate alone
+  cannot see, since a nonexistent domain is never something Pi-hole blocks.
 
 ## Build your own
 

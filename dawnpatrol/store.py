@@ -656,6 +656,10 @@ def entity_pairs_from_events(events: Iterable[Event]) -> list[tuple[EntityType, 
             bump(EntityType.IP, ev.client_ip)
         else:
             bump(EntityType.IP, ev.src_ip)
+        # `user` carries a MAC address on DHCP lease lines and Wi-Fi
+        # deauthentication events (see librenms_syslog.py) - a device
+        # identity that survives DHCP lease renewal, unlike its IP.
+        bump(EntityType.DEVICE, ev.user)
     return [(t, v, c) for (t, v), c in counts.items()]
 
 

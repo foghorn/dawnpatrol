@@ -1,20 +1,26 @@
-"""New-device detection: an internal IP making its first-ever appearance.
+"""New-device detection: an internal IP - or a MAC address - making its
+first-ever appearance.
 
 Reuses the same novelty mechanism `dns_anomalies.py` already applies to
-domains - `Baseline.novel()` against the entities table - but for internal
-client/source IPs instead of domains. Deliberately the cheapest possible way
-to surface "something new joined the network": no MAC/DHCP parsing, no new
-persistence of its own. Every event already feeds the entities table via
-`store.entity_pairs_from_events()` (bumping `EntityType.IP` for every
-`src_ip`/`client_ip`), so a device making its first-ever appearance is
-already recorded - this analyzer is the first thing to actually read that
-back and say so.
+domains - `Baseline.novel()` against the entities table - for two different
+identities:
+
+  * `EntityType.IP` - internal client/source IPs. Every event already feeds
+    the entities table via `store.entity_pairs_from_events()` (bumping
+    `EntityType.IP` for every `src_ip`/`client_ip`), so a device's first-ever
+    appearance is already recorded before this analyzer ever runs.
+  * `EntityType.DEVICE` - MAC addresses, sourced from DHCP lease lines and
+    Wi-Fi deauthentication events (`Event.user`, set in `librenms_syslog.py`).
+    A MAC survives DHCP lease renewal where an IP does not, so it catches
+    "genuinely new device" without re-flagging an existing device every time
+    its lease renews to a fresh address - and without needing any dedicated
+    persistence of its own.
 
 This is why a device behind a NAT-gated segment (no SNMP inventory, no local
 DNS resolver) still gets caught here even though it never appears in the
 curated device directory (`devices.py`): the entity table is fed straight
-from firewall SRC=/DST= and DNS client_ip fields, not from any per-source
-device list.
+from firewall SRC=/DST=, DNS client_ip, and DHCP/deauth MAC fields, not from
+any per-source device list.
 """
 
 from __future__ import annotations
@@ -36,11 +42,13 @@ from .baseline import Baseline
 UNTRUSTED = {"untrusted", "semi-trusted", "dmz", "guest"}
 MAX_CANDIDATES = 500
 MAX_REPORTED_PER_ZONE = 15
+MAC_MAX_REPORTED = 20
 
 
 class NovelClientAnalyzer(Analyzer):
     name = "novel_clients"
-    requires_kinds = frozenset({EventKind.DNS, EventKind.FIREWALL})
+    requires_kinds = frozenset({EventKind.DNS, EventKind.FIREWALL, EventKind.SYSTEM,
+                               EventKind.AUTH})
     order = 35
 
     def run(self, q: EventQuery, profile: Profile, baseline: Baseline) -> AnalyzerResult:
@@ -52,6 +60,12 @@ class NovelClientAnalyzer(Analyzer):
             )
             return r
 
+        self._novel_ips(q, r, profile, baseline)
+        self._novel_macs(q, r, baseline)
+        return r
+
+    def _novel_ips(self, q: EventQuery, r: AnalyzerResult,
+                   profile: Profile, baseline: Baseline) -> None:
         candidates: set[str] = set()
         for ip, _n in q.top("src_ip", n=MAX_CANDIDATES, kind=EventKind.FIREWALL):
             if ip and profile.is_internal(ip):
@@ -60,11 +74,11 @@ class NovelClientAnalyzer(Analyzer):
             if ip and profile.is_internal(ip):
                 candidates.add(ip)
         if not candidates:
-            return r
+            return
 
         novel = baseline.novel(EntityType.IP, sorted(candidates))
         if not novel:
-            return r
+            return
 
         r.metrics.append(Metric(
             key="net.novel_clients", value=len(novel), section="general",
@@ -101,4 +115,39 @@ class NovelClientAnalyzer(Analyzer):
                     "treating its mere existence as a finding."
                 ),
             ))
-        return r
+
+    def _novel_macs(self, q: EventQuery, r: AnalyzerResult, baseline: Baseline) -> None:
+        """MAC-based novelty, independent of the IP-based check above: a MAC
+        survives DHCP lease renewal, so this catches a genuinely new device
+        without re-flagging an existing one every time its lease renews to a
+        fresh address - the false-positive case the IP-only check cannot
+        avoid on its own.
+        """
+        macs = {
+            m for m, _n in q.top("user", n=MAX_CANDIDATES,
+                                 kind=[str(EventKind.SYSTEM), str(EventKind.AUTH)])
+            if m
+        }
+        if not macs:
+            return
+        novel = baseline.novel(EntityType.DEVICE, sorted(macs))
+        if not novel:
+            return
+
+        shown = sorted(novel)[:MAC_MAX_REPORTED]
+        r.signals.append(Signal(
+            id="net.novel_device_mac",
+            analyzer=self.name,
+            title=f"{len(novel)} new device identity (MAC) seen for the first time",
+            taxonomy="net.novel_device_mac",
+            severity_hint=Severity.LOW,
+            confidence=0.5,
+            entities=[Entity(type=EntityType.HOST, value=mac, role="client") for mac in shown],
+            evidence={"count": len(novel), "macs": shown},
+            narrative_hint=(
+                "Tracked by MAC address, not IP - this will not re-flag a device "
+                "that simply renewed its DHCP lease to a new address. A genuinely "
+                "new MAC is the same 'new device' fact as the IP-based signal "
+                "above, just immune to IP churn."
+            ),
+        ))

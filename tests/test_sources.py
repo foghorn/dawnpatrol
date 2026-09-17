@@ -138,6 +138,94 @@ def test_non_firewall_program_becomes_a_system_event(librenms):
     assert librenms._normalize(entry, "3").kind == EventKind.SYSTEM
 
 
+# --------------------------------------------------------------------------- #
+# DHCP lease parsing
+# --------------------------------------------------------------------------- #
+
+
+def test_dhcpack_captures_ip_mac_and_hostname(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 7,
+             "msg": "DHCPACK(br0) 10.128.10.90 a4:4f:3e:60:12:38 maven-iot"}
+    ev = librenms._normalize(entry, "3")
+    assert ev.kind == EventKind.SYSTEM
+    assert ev.action == "dhcpack"
+    assert ev.src_ip == "10.128.10.90"
+    assert ev.user == "a4:4f:3e:60:12:38"
+
+
+def test_dhcpack_without_a_hostname_still_captures_ip_and_mac(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 8,
+             "msg": "DHCPREQUEST(eth0) 10.128.15.135 1c:69:7a:0b:8e:49"}
+    ev = librenms._normalize(entry, "3")
+    assert ev.action == "dhcprequest"
+    assert ev.src_ip == "10.128.15.135"
+    assert ev.user == "1c:69:7a:0b:8e:49"
+
+
+def test_dhcpdiscover_has_a_mac_but_no_ip_yet(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 9,
+             "msg": "DHCPDISCOVER(eth0) 44:bb:3b:43:26:24"}
+    ev = librenms._normalize(entry, "3")
+    assert ev.action == "dhcpdiscover"
+    assert ev.src_ip is None
+    assert ev.user == "44:bb:3b:43:26:24"
+
+
+def test_dhcp_pool_exhaustion_error_is_not_parsed_as_a_lease(librenms):
+    """dnsmasq logs plenty of non-lease chatter under the same program tag -
+    only recognized DHCP verbs should ever produce a user/action."""
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 10,
+             "msg": "no address range available for DHCP request via eth1"}
+    ev = librenms._normalize(entry, "3")
+    assert ev.kind == EventKind.SYSTEM
+    assert ev.action is None
+    assert ev.user is None
+
+
+def test_dhcpack_feeds_the_device_directory_with_hostname_and_mac(librenms, monkeypatch, window):
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_TOKEN", "tok")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", "7")
+
+    def handler(request):
+        if request.url.path.endswith("/devices"):
+            return httpx.Response(200, json={"devices": []})
+        return httpx.Response(200, json={"total": 1, "logs": [
+            {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 1,
+             "msg": "DHCPACK(eth0) 10.128.50.104 1c:53:f9:2d:33:30 Nest-Cam-indoor"},
+        ]})
+
+    monkeypatch.setattr(librenms, "_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler),
+                                            headers=librenms._headers()))
+    ctx = _FakeCtx()
+    librenms.collect(window, ctx=ctx)
+
+    device = ctx.devices.get("10.128.50.104")
+    assert device is not None
+    assert device.hostname == "Nest-Cam-indoor"
+    assert device.mac == "1c:53:f9:2d:33:30"
+    assert "dhcp-client" in device.roles
+    assert "librenms_syslog" in device.sources
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("DHCPACK(br0) 10.0.0.5 aa:bb:cc:dd:ee:ff hostname",
+     {"verb": "DHCPACK", "ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": "hostname"}),
+    ("DHCPOFFER(br0) 10.0.0.5 aa:bb:cc:dd:ee:ff",
+     {"verb": "DHCPOFFER", "ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:ff", "hostname": None}),
+    ("DHCPDISCOVER(br0) aa:bb:cc:dd:ee:ff",
+     {"verb": "DHCPDISCOVER", "ip": None, "mac": "aa:bb:cc:dd:ee:ff", "hostname": None}),
+    ("not a dhcp line at all", None),
+])
+def test_parse_dhcp(message, expected):
+    from dawnpatrol.sources.librenms_syslog import _parse_dhcp
+
+    assert _parse_dhcp(message) == expected
+
+
 def test_unparseable_timestamp_is_dropped_not_guessed(librenms):
     assert librenms._normalize({"timestamp": "not a date", "msg": "x"}, "3") is None
 

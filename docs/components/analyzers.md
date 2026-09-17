@@ -73,6 +73,11 @@ q.hourly(kind=EventKind.FIREWALL, action="drop")
 q.source_profile(n=60, action="drop")           # per-IP hits/ports/TTL-spread/timing
 q.subnet_spread(n=12, action="drop")            # /24 buckets - the mass-sweep shape
 q.dns_domain_stats(n=25, blocked=True)
+q.dns_client_stats(n=40)                        # (client, total, blocked) per DNS client
+q.distinct_count("src_ip", kind=EventKind.FIREWALL, src_zone="iot")   # a scalar count
+q.distinct_values("dst_ip", kind=EventKind.FIREWALL, dst_zone="iot")  # the actual values
+q.group_pairs("src_ip", "dst_port", n=50, action="accept")      # co-occurring column pairs
+q.timestamps_for(limit=5000, kind=EventKind.DNS, client_ip="10.10.0.99")  # for periodicity
 q.sample(n=20, src_ip="203.0.113.45")           # raw events backing a signal, for drill-down
 ```
 
