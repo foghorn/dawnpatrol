@@ -600,6 +600,14 @@ every distinct client IP it sees making a query (tagged `dns-client`, with a nam
 was resolved) - including client-only devices, like a phone or a smart plug, that never
 appear in LibreNMS's own device list at all.
 
+Public (globally routable) IPs are declined by `update()` unless
+`DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=true` - this directory describes your own
+network's devices, not a remote host a source happens to monitor (LibreNMS checking a
+personal domain over ping produced exactly this: a public IP sitting in the device list
+next to real LAN hardware). The check is a plain `ipaddress.ip_address(ip).is_private`,
+independent of `profile.yml`'s zones, so it costs nothing to add and needs no profile to
+be correct.
+
 Contributions merge, they never overwrite: the first non-empty value for a field wins,
 and every contributing source and role is recorded, so a sparse later contribution can
 never clobber a richer earlier one. `build_bundle` gets a one-line-per-device
@@ -614,6 +622,38 @@ plain field on the same `Report` every run already produces, written to `latest.
 report. That is what the *external* MCP tool of the identical name (§12) reads - the most
 recently *completed* run's directory, off disk, not a live one - deliberately the only
 device-related MCP tool, not one bespoke tool per plugin.
+
+**The human-facing renderers deliberately do not render `report.devices` at all.** An
+earlier revision of this section rendered the full device list under "Data quality and
+caveats" - itself a fix for `SourceHealth.notes[:5-6]` silently capping a per-device
+listing `librenms_syslog` used to put there. That was still the wrong data source: the
+device directory is a curated inventory (LibreNMS's SNMP-managed hosts, Pi-hole's DNS
+clients), not a census of every client on the network. A NAT-gated segment with no SNMP
+presence and no local DNS resolver behind it - the IoT and DMZ gateways here, each
+running their own `dnsmasq` rather than forwarding queries to the central Pi-hole - can
+have real, active client traffic (confirmed: `10.128.50.0/24` cameras and automation
+gear behind `10.128.10.8`) while contributing zero entries to `ctx.devices`, because
+nothing currently registers "every distinct IP seen in firewall traffic" as a device.
+The full device list, rendered, made that gap invisible rather than visible: it looked
+complete while quietly excluding an entire segment's population.
+
+The fix is `SegmentReviewAnalyzer` (`analyzers/segment_review.py`) computing
+`zone.<name>.dns_clients` / `zone.<name>.fw_clients` straight from the events themselves.
+DNS is `EventQuery.distinct_count("client_ip", src_zone=zone)`. Firewall is deliberately
+counted on *both* sides - the union of distinct `src_ip` where `src_zone` matches and
+distinct `dst_ip` where `dst_zone` matches - because the DMZ/IoT gateways in production
+turned out to log only `DROP`/`REJECT` lines, never `ACCEPT`: a device that only ever
+shows up as the target of a rejected inbound session, never as the initiator of an
+outbound one, would otherwise never be counted at all. A NAT gateway's own firewall log
+still carries the client's real private address in `SRC=`/`DST=` even though the gateway
+masks it heading out to the WAN, so this count is accurate regardless of whether the
+client is independently known to any source. Every
+human-facing renderer shows a **segment population** overview built from these metrics
+instead of the device list - one line per zone, distinct client counts by DNS and by
+firewall - which is what actually answers "is anything out there," rather than "what do
+we happen to already have inventoried." `report.devices` itself is untouched and still
+fully available through the JSON export, the internal agent's tool, and the MCP tool of
+the same name - only the *human report* stopped showing it.
 
 ### 8.4 Structured output
 
@@ -778,6 +818,9 @@ DAWNPATROL_SOURCE_LIBRENMS_TOKEN=...
 #DAWNPATROL_SOURCE_LIBRENMS_DEVICES=3,4,7
 DAWNPATROL_SOURCE_PIHOLE_URL=http://pihole.example/api
 DAWNPATROL_SOURCE_PIHOLE_PASSWORD=...
+
+# Device directory - excludes public IPs by default; see 8.3.1
+DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=false
 
 # Enrichment
 DAWNPATROL_ENRICH_ABUSEIPDB_KEY=...
@@ -1012,7 +1055,7 @@ be firewalled to an allowlist.
 
 ## 14. Testing
 
-255 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
+270 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
 includes an end-to-end pipeline exercise against a stubbed provider. CI
 (`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
 request, across Python 3.11-3.13.

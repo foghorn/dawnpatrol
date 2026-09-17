@@ -7,6 +7,22 @@ from ..models import Report
 _BADGE = {"GREEN": "OK", "AMBER": "ATTENTION", "RED": "ACTION REQUIRED"}
 
 
+def _segment_client_counts(report: Report) -> dict[str, dict[str, int]]:
+    """Distinct client population per zone, straight from the traffic itself -
+    see the identical helper in render/plaintext.py for why."""
+    counts: dict[str, dict[str, int]] = {}
+    for m in report.metrics:
+        if m.section != "segments" or not m.key.startswith("zone."):
+            continue
+        if m.key.endswith(".dns_clients"):
+            zone = m.key[len("zone."):-len(".dns_clients")]
+            counts.setdefault(zone, {})["dns"] = int(m.value)
+        elif m.key.endswith(".fw_clients"):
+            zone = m.key[len("zone."):-len(".fw_clients")]
+            counts.setdefault(zone, {})["fw"] = int(m.value)
+    return counts
+
+
 def render(report: Report) -> str:
     out: list[str] = []
     a = out.append
@@ -92,6 +108,14 @@ def render(report: Report) -> str:
           f"{h.span_hours:.2f}h (requested {h.requested_hours:.2f}h)")
         for note in h.notes[:5]:
             a(f"  - {note}")
+    segments = _segment_client_counts(report)
+    if segments:
+        a("- **segment population** (distinct clients this run)")
+        for zone in sorted(segments):
+            c = segments[zone]
+            bits = [f"{c['dns']} via DNS" if "dns" in c else None,
+                   f"{c['fw']} via firewall" if "fw" in c else None]
+            a(f"  - {zone}: " + ", ".join(b for b in bits if b))
     for c in report.canaries:
         a(f"- **canary {c.name}** - {'detected' if c.detected else '**NOT DETECTED**'}: {c.detail}")
     for note in report.data_quality:

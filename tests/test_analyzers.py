@@ -180,6 +180,51 @@ def test_segment_metrics_cover_every_zone(q, profile, baseline):
         assert f"zone.{zone}.dns" in keys
 
 
+def test_segment_firewall_client_count_includes_both_directions(store, profile, window):
+    """Many firewalls only log denied traffic. A device that only ever shows up
+    as the target of a rejected inbound session (dst_zone, never src_zone) must
+    still be counted - otherwise a segment with real, blocked-only traffic
+    would still be undercounted the same way a curated device list is."""
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "seg-bidi"
+    store.start_run(run_id, 1, window.start, window)
+    events = [
+        # 10.128.50.209 initiates traffic out of iot (visible as src_ip).
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="e1", action="reject", src_ip="10.128.50.209",
+              dst_ip="10.128.10.161", src_zone="iot", dst_zone="lan"),
+        # 10.128.50.55 and .56 are only ever the *target* of rejected inbound
+        # sessions - never a src_ip anywhere in this run's events.
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="e2", action="drop", src_ip="10.128.10.1",
+              dst_ip="10.128.50.55", src_zone="lan", dst_zone="iot"),
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="e3", action="drop", src_ip="203.0.113.9",
+              dst_ip="10.128.50.56", src_zone="external", dst_zone="iot"),
+    ]
+    store.insert_events(run_id, events)
+    q = EventQuery(store, run_id)
+    baseline = Baseline(store, run_id)
+    result = SegmentReviewAnalyzer().run(q, profile, baseline)
+    by_key = {m.key: m.value for m in result.metrics}
+    assert by_key["zone.iot.fw_clients"] == 3
+
+
+def test_segment_client_counts_are_distinct_not_event_counts(q, profile, baseline):
+    """A zone with a real client population must show up here even with no
+    curated device inventory behind it - straight from src_ip/client_ip on
+    the events themselves, since a NAT gateway's own log still carries the
+    real internal client address in SRC=, not just the gateway's."""
+    result = SegmentReviewAnalyzer().run(q, profile, baseline)
+    by_key = {m.key: m.value for m in result.metrics}
+    assert "zone.lan.dns_clients" in by_key
+    assert "zone.lan.fw_clients" in by_key
+    # make_events() plants DNS from a handful of distinct 10.10.0.x clients -
+    # the distinct count must be far smaller than the raw DNS event count.
+    assert 0 < by_key["zone.lan.dns_clients"] < by_key["zone.lan.dns"]
+
+
 def test_correlation_runs_clean_on_synthetic_data(q, profile, baseline):
     result = CorrelationAnalyzer().run(q, profile, baseline)
     assert result.error is None

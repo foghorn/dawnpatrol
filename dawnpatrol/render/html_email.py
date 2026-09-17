@@ -157,6 +157,19 @@ def render(report: Report) -> str:
                 "".join(f'<li style="{_LI_STYLE}">{escape(n)}</li>' for n in h.notes[:5]) +
                 '</ul>')
         add('</li>')
+    segments = _segment_client_counts(report)
+    if segments:
+        add(f'<li style="{_LI_STYLE}"><strong>segment population</strong> '
+            f'(distinct clients this run)')
+        rows = []
+        for zone in sorted(segments):
+            c = segments[zone]
+            bits = [f"{c['dns']} via DNS" if "dns" in c else None,
+                   f"{c['fw']} via firewall" if "fw" in c else None]
+            rows.append(f'<li style="{_LI_STYLE}">{escape(zone)}: '
+                        f'{escape(", ".join(b for b in bits if b))}</li>')
+        add(f'<ul style="{_UL_STYLE}">' + "".join(rows) + '</ul>')
+        add('</li>')
     for c in report.canaries:
         state = "detected" if c.detected else "<strong>NOT DETECTED</strong>"
         add(f'<li style="{_LI_STYLE}">canary {escape(c.name)}: {state} &mdash; '
@@ -176,6 +189,22 @@ def _health_summary(report: Report) -> str:
     if not report.health:
         return "none configured"
     return ", ".join(f"{h.source} {h.state.value}" for h in report.health)
+
+
+def _segment_client_counts(report: Report) -> dict[str, dict[str, int]]:
+    """Distinct client population per zone, straight from the traffic itself -
+    see the identical helper in render/plaintext.py for why."""
+    counts: dict[str, dict[str, int]] = {}
+    for m in report.metrics:
+        if m.section != "segments" or not m.key.startswith("zone."):
+            continue
+        if m.key.endswith(".dns_clients"):
+            zone = m.key[len("zone."):-len(".dns_clients")]
+            counts.setdefault(zone, {})["dns"] = int(m.value)
+        elif m.key.endswith(".fw_clients"):
+            zone = m.key[len("zone."):-len(".fw_clients")]
+            counts.setdefault(zone, {})["fw"] = int(m.value)
+    return counts
 
 
 def _finding_html(f: Finding) -> str:

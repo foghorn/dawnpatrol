@@ -197,7 +197,7 @@ def _statistics(report: Report) -> list[str]:
             continue
         lines.append("")
         lines.append(f"{INDENT}{label}:")
-        for metric in metrics[:14]:
+        for metric in metrics[:24]:
             value = metric.value
             unit = f" {metric.unit}" if metric.unit else ""
             text = f"{value}{unit}"
@@ -246,7 +246,7 @@ def _section_body(report: Report, narrative_key: str, metric_sections: list[str]
         metrics = report.metrics_for(section)
         if not metrics:
             continue
-        for metric in metrics[:12]:
+        for metric in metrics[:24]:
             unit = f" {metric.unit}" if metric.unit else ""
             lines.append(kv(metric.display_label(), f"{metric.value}{unit}", INDENT))
             shown += 1
@@ -255,6 +255,26 @@ def _section_body(report: Report, narrative_key: str, metric_sections: list[str]
     elif shown == 0:
         lines += format_block("No statistics for this section.", INDENT)
     return lines
+
+
+def _segment_client_counts(report: Report) -> dict[str, dict[str, int]]:
+    """Distinct client population per zone (segment_review.py), straight from
+    the traffic itself - not from the curated, necessarily incomplete device
+    directory. A NAT-gated segment with no SNMP inventory and no local DNS
+    resolver can still show a real count here, because the firewall log's own
+    SRC= field carries the client's private address even when the gateway
+    masks it heading out to the WAN."""
+    counts: dict[str, dict[str, int]] = {}
+    for m in report.metrics:
+        if m.section != "segments" or not m.key.startswith("zone."):
+            continue
+        if m.key.endswith(".dns_clients"):
+            zone = m.key[len("zone."):-len(".dns_clients")]
+            counts.setdefault(zone, {})["dns"] = int(m.value)
+        elif m.key.endswith(".fw_clients"):
+            zone = m.key[len("zone."):-len(".fw_clients")]
+            counts.setdefault(zone, {})["fw"] = int(m.value)
+    return counts
 
 
 def _data_quality(report: Report) -> list[str]:
@@ -275,6 +295,17 @@ def _data_quality(report: Report) -> list[str]:
                     f"status={probe.status} records={probe.records}",
                     INDENT * 3,
                 )
+    segments = _segment_client_counts(report)
+    if segments:
+        lines += format_block("segment population (distinct clients this run):", INDENT)
+        for zone in sorted(segments):
+            c = segments[zone]
+            bits = []
+            if "dns" in c:
+                bits.append(f"{c['dns']} via DNS")
+            if "fw" in c:
+                bits.append(f"{c['fw']} via firewall")
+            lines += format_block(f"- {zone}: " + ", ".join(bits), INDENT * 2)
     for canary in report.canaries:
         state = "detected" if canary.detected else "NOT DETECTED"
         lines += format_block(f"canary {canary.name}: {state} - {canary.detail}", INDENT)

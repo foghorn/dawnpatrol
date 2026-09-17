@@ -67,6 +67,17 @@ never recur:
 - **iptables lines get parsed by regex** into action/interface/addresses/ports/TTL, and
   numeric protocol codes (`2`, `1`, `6`, `17`) are normalized to names (IGMP, ICMP, TCP,
   UDP) so a protocol breakdown isn't fragmented by accident.
+- **The action match tolerates a leading kernel uptime stamp.** Not every firmware puts
+  `DROP`/`ACCEPT`/`REJECT` at the very start of the message - OpenWrt-based gateways were
+  found in production prefixing it with `"[4081245.82] drop wan out: IN=..."`, lowercase
+  and behind a bracketed uptime. Before `_ACTION_RE` allowed an optional `[...]` prefix,
+  every one of that firmware's lines silently fell through to a bare `SYSTEM` event -
+  correctly collected (it shows up in the per-device record count) but invisible to every
+  firewall-shaped analyzer, indistinguishable from DHCP chatter. If a device's firewall
+  traffic seems to be missing from analysis despite `SourceHealth` showing records for it,
+  check `kind` on its events before assuming a collection problem - this is a
+  classification trap, not a collection one, and it can recur with a firmware this hasn't
+  been tested against yet.
 - **Non-KERNEL lines become `SYSTEM` or `AUTH` events** (VPN session lines in particular
   become `AUTH`, since they're the only evidence of remote-access sessions in this
   dataset) rather than being discarded.
@@ -74,15 +85,23 @@ never recur:
   `DAWNPATROL_SOURCE_LIBRENMS_DEVICES` pins an explicit list when you want to exclude
   something; unset, `_device_directory()` calls `/devices` (one unpaginated call - unlike
   the syslog endpoint, LibreNMS returns its whole device list in one response) and
-  collects from every id it reports. The same call doubles as enrichment: hostname,
-  hardware, OS, and up/down status get attached to each device's line in the health
-  record. A directory-fetch failure only costs that enrichment, never the run:
-  collection still proceeds from an explicit list if one is set, or is reported as a
-  clear "nothing configured and nothing discovered" error if not.
-- **Every device with an IP is registered in the cross-source device directory**
+  collects from every id it reports. A directory-fetch failure only costs the
+  hostname/hardware/OS enrichment described below, never the run: collection still
+  proceeds from an explicit list if one is set, or is reported as a clear "nothing
+  configured and nothing discovered" error if not.
+- **Per-device collection outcome is one summary note, not one note per device.**
+  Early on this listed every device on its own line in `SourceHealth.notes` - which
+  every renderer's `notes[:5-6]` truncation then silently capped, hiding most devices
+  in an actual deployment with more than a handful. Now it's a single line covering
+  every device's record count (`"N device(s) collected from, records per device: h1=120,
+  h2=45, ..."`), plus a second line naming any device that returned zero records - so
+  the full picture survives the same render-time cap that used to hide it.
+- **Every device with a private IP is registered in the cross-source device directory**
   (`dawnpatrol/devices.py`, `ARCHITECTURE.md` §8.3) - a per-run registry keyed by IP
   address, not by LibreNMS's own `device_id`, so any other source can contribute to the
-  same entry. That directory reaches both the internal stage-7 investigation agent
+  same entry. Public IPs are excluded by default (a personal domain monitored over ping
+  is a real example that showed up here) - set `DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=true`
+  to include them. That directory reaches both the internal stage-7 investigation agent
   (a summary every run, full detail through its own `get_device_directory` tool) and, via
   the finished report, an external MCP agent through the identically-named
   `get_device_directory` MCP tool (`docs/components/mcp-server.md`) - deliberately the

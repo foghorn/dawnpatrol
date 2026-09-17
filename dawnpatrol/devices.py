@@ -14,6 +14,11 @@ different sources land on the same entry. Fields accumulate rather than
 overwrite: the first non-empty value for a field wins, and every
 contributing source and role is recorded rather than only the first, so a
 sparse later contribution never clobbers a richer earlier one.
+
+Public (globally routable) IPs are excluded by default - this directory is
+meant to describe your own network's devices, not a remote host you happen
+to monitor (a personal domain checked over ping via LibreNMS, say). Set
+``DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=true`` to include them.
 """
 
 from __future__ import annotations
@@ -23,8 +28,19 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any
 
+from .secrets import read_bool
+
 #: Structured fields a source may fill in. First non-empty value wins.
 _FIELDS = ("hostname", "hardware", "os", "version", "status", "location", "uptime_seconds")
+
+INCLUDE_PUBLIC_IPS_ENV = "DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS"
+
+
+def _is_public(ip: str) -> bool:
+    try:
+        return not ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
 
 
 @dataclass(slots=True)
@@ -96,9 +112,14 @@ class DeviceDirectory:
         Unknown or empty values in ``fields`` are ignored rather than
         clobbering an existing value - a source with partial knowledge can
         never erase a fuller picture another source already contributed.
+
+        Silently declines a public IP unless ``DAWNPATROL_DEVICES_INCLUDE_
+        PUBLIC_IPS`` is set - not an error, just nothing to add.
         """
         ip = (ip or "").strip()
         if not ip:
+            return None
+        if _is_public(ip) and not read_bool(INCLUDE_PUBLIC_IPS_ENV, False):
             return None
         with self._lock:
             info = self._by_ip.setdefault(ip, DeviceInfo(ip=ip))

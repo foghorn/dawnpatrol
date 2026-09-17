@@ -51,6 +51,40 @@ def test_iptables_drop_line_is_parsed(librenms):
     assert ev.iface_in == "eth0"
 
 
+def test_openwrt_kernel_uptime_prefixed_line_is_still_parsed_as_firewall(librenms):
+    """OpenWrt-based gateways (observed on the DMZ/IoT firewalls in production)
+    prefix the action with a bracketed kernel uptime stamp and lowercase it -
+    "[4081245.82] drop wan out: IN=...". Before this was handled, every one of
+    these lines fell through to a bare SYSTEM event, indistinguishable from
+    DHCP chatter and invisible to every firewall-shaped analyzer."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "KERNEL", "seq": 10, "level": 4,
+        "msg": ("[4081245.823274] drop wan out: IN=eth0 OUT=eth1 MAC=d8:3a:dd:6a:6c:2a "
+                "SRC=10.128.15.135 DST=10.128.10.90 LEN=52 TTL=127 PROTO=TCP "
+                "SPT=53056 DPT=7680"),
+    }
+    ev = librenms._normalize(entry, "4")
+    assert ev.kind == EventKind.FIREWALL
+    assert ev.action == "drop"
+    assert ev.src_ip == "10.128.15.135"
+    assert ev.dst_ip == "10.128.10.90"
+    assert ev.dst_port == 7680
+    assert ev.proto == "tcp"
+
+
+def test_openwrt_kernel_uptime_prefixed_reject_is_parsed(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "KERNEL", "seq": 11,
+        "msg": ("[4082607.98] reject wan out: IN=eth0 OUT=eth1 MAC=dc:a6:32:0d:6f:bd "
+                "SRC=10.128.50.209 DST=10.128.10.161 LEN=256 TTL=63 PROTO=UDP "
+                "SPT=62691 DPT=62743"),
+    }
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.FIREWALL
+    assert ev.action == "reject"
+    assert ev.proto == "udp"
+
+
 def test_numeric_protocol_is_normalized(librenms):
     """PROTO arrives as a raw number on some firmware; unified names keep
     protocol breakdowns from fragmenting."""
@@ -219,7 +253,48 @@ def test_collect_health_notes_carry_device_metadata_when_available(librenms, mon
                         lambda: httpx.Client(transport=httpx.MockTransport(handler),
                                             headers=librenms._headers()))
     result = librenms.collect(window, ctx=None)
-    assert any("edge" in n and "ASUS RT-AX88U Pro" in n for n in result.notes)
+    assert any("edge=1" in n for n in result.notes)
+
+
+def test_collect_notes_are_a_single_summary_not_one_per_device(librenms, monkeypatch, window):
+    """Regression test: a per-device note list is exactly what every renderer's
+    SourceHealth.notes[:5-6] truncation silently caps. One summary note must
+    cover every device's record count regardless of how many there are."""
+    import httpx
+
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_URL", "http://librenms.example/api/v0")
+    monkeypatch.setenv("DAWNPATROL_SOURCE_LIBRENMS_TOKEN", "tok")
+    monkeypatch.delenv("DAWNPATROL_SOURCE_LIBRENMS_DEVICES", raising=False)
+
+    device_ids = list(range(1, 10))
+
+    def handler(request):
+        if request.url.path.endswith("/devices"):
+            return httpx.Response(200, json={"devices": [
+                {"device_id": i, "hostname": f"h{i}"} for i in device_ids
+            ]})
+        device_id = int(request.url.path.rsplit("/", 1)[-1])
+        # Every other device returns zero records.
+        if device_id % 2 == 0:
+            return httpx.Response(200, json={"total": 0, "logs": []})
+        return httpx.Response(200, json={"total": 1, "logs": [
+            {"timestamp": "2026-06-01 03:14:15", "program": "KERNEL", "seq": device_id,
+             "msg": "DROP IN=eth0 SRC=1.2.3.4 DST=5.6.7.8 LEN=60 TTL=51 PROTO=TCP DPT=22"},
+        ]})
+
+    monkeypatch.setattr(librenms, "_client",
+                        lambda: httpx.Client(transport=httpx.MockTransport(handler),
+                                            headers=librenms._headers()))
+    result = librenms.collect(window, ctx=None)
+    summary = next(n for n in result.notes if n.startswith(f"{len(device_ids)} device(s)"))
+    for i in device_ids:
+        assert f"h{i}=" in summary
+    zero_note = next(n for n in result.notes if "zero records" in n)
+    for i in device_ids:
+        if i % 2 == 0:
+            assert f"h{i}" in zero_note
+    # Exactly two notes total, no matter how many devices - never one per device.
+    assert len(result.notes) == 2
 
 
 def test_no_devices_configured_or_discovered_is_a_clear_error(librenms, monkeypatch, window):
@@ -340,6 +415,37 @@ def test_device_directory_sorts_numerically_by_ip():
     for ip in ("10.10.0.20", "10.10.0.3", "10.10.0.100"):
         devices.update(ip, source="test")
     assert [d.ip for d in devices.all()] == ["10.10.0.3", "10.10.0.20", "10.10.0.100"]
+
+
+def test_device_directory_excludes_public_ips_by_default(monkeypatch):
+    from dawnpatrol.devices import DeviceDirectory
+
+    monkeypatch.delenv("DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS", raising=False)
+    devices = DeviceDirectory()
+    assert devices.update("75.119.223.77", source="librenms_syslog") is None
+    assert devices.get("75.119.223.77") is None
+    assert len(devices) == 0
+    # Private, loopback, and link-local addresses are never "public".
+    devices.update("10.10.0.1", source="librenms_syslog")
+    devices.update("127.0.0.1", source="pihole_dns")
+    devices.update("169.254.1.1", source="pihole_dns")
+    assert len(devices) == 3
+
+
+def test_device_directory_includes_public_ips_when_opted_in(monkeypatch):
+    from dawnpatrol.devices import DeviceDirectory
+
+    monkeypatch.setenv("DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS", "true")
+    devices = DeviceDirectory()
+    devices.update("75.119.223.77", source="librenms_syslog", hostname="example.com")
+    assert devices.get("75.119.223.77") is not None
+    assert devices.get("75.119.223.77").hostname == "example.com"
+
+
+def test_device_directory_invalid_ip_is_not_public():
+    from dawnpatrol.devices import _is_public
+
+    assert _is_public("not-an-ip") is False
 
 
 # --------------------------------------------------------------------------- #

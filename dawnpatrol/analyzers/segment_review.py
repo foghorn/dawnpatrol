@@ -48,6 +48,29 @@ class SegmentReviewAnalyzer(Analyzer):
                 label=f"{zone.name}: firewall events",
             ))
 
+            # Distinct client population, straight from the traffic itself - not
+            # from any curated device inventory. A segment behind a NAT gateway
+            # (no SNMP device list, no local DNS resolver) can still show a real
+            # client count here, because the firewall log's own SRC=/DST= fields
+            # carry the client's private IP even when the gateway masks it on
+            # the way out to the WAN. Counted on both sides deliberately: many
+            # firewalls only log denied traffic, and a device that only ever
+            # appears as the target of a rejected inbound session (dst_zone)
+            # would otherwise never be counted at all.
+            dns_clients = q.distinct_count("client_ip", kind=EventKind.DNS, src_zone=zone.name)
+            fw_clients = len(
+                set(q.distinct_values("src_ip", kind=EventKind.FIREWALL, src_zone=zone.name))
+                | set(q.distinct_values("dst_ip", kind=EventKind.FIREWALL, dst_zone=zone.name))
+            )
+            r.metrics.append(Metric(
+                key=f"zone.{zone.name}.dns_clients", value=dns_clients, section="segments",
+                label=f"{zone.name}: distinct DNS clients",
+            ))
+            r.metrics.append(Metric(
+                key=f"zone.{zone.name}.fw_clients", value=fw_clients, section="segments",
+                label=f"{zone.name}: distinct firewall sources",
+            ))
+
             if zone.expected_egress_domains and dns_count:
                 self._unexpected_egress(q, r, profile, zone)
             if zone.trust in UNTRUSTED:

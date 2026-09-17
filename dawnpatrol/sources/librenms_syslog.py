@@ -48,8 +48,14 @@ from .base import Source
 log = logging.getLogger(__name__)
 
 #: iptables-style kernel line. Field order varies by firmware, so each field is
-#: matched independently rather than as one positional pattern.
-_ACTION_RE = re.compile(r"^\s*(?P<action>DROP|ACCEPT|REJECT)\b", re.IGNORECASE)
+#: matched independently rather than as one positional pattern. Some firmware
+#: (OpenWrt-based DMZ/IoT gateways observed in production) prefixes the action
+#: with a kernel uptime stamp - "[4081245.823274] drop wan out: IN=..." - so the
+#: optional bracketed group is required, not cosmetic: without it, every one of
+#: that firmware's DROP/ACCEPT/REJECT lines silently falls through to a plain
+#: SYSTEM event instead of FIREWALL, indistinguishable from DHCP chatter and
+#: invisible to every firewall-shaped analyzer.
+_ACTION_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)?(?P<action>DROP|ACCEPT|REJECT)\b", re.IGNORECASE)
 _FIELD_RE = re.compile(r"\b(IN|OUT|SRC|DST|LEN|TTL|PROTO|SPT|DPT|MAC)=([^\s]*)")
 
 #: PROTO sometimes arrives as a raw number; unify so breakdowns do not fragment.
@@ -205,14 +211,33 @@ class LibreNMSSyslogSource(Source):
 
         result.events = list(seen.values())
         result.reported_total = sum(totals.values()) if totals else None
+
+        # One summary note, not one per device: a per-device note list is
+        # exactly what gets silently capped to the first 5-6 entries by every
+        # renderer's SourceHealth.notes truncation. A single line scales to
+        # any device count and still carries every device's own record count -
+        # full detail on any one device is a get_device_directory call away.
+        per_device: list[str] = []
+        zero_record: list[str] = []
         for device, reported in sorted(totals.items(), key=lambda kv: int(kv[0])):
             got = sum(1 for e in result.events if e.device == str(device))
             meta = directory.get(device) or {}
-            label = meta.get("hostname") or meta.get("ip") or ""
-            descriptor = f" ({label})" if label else ""
-            extra = ", ".join(x for x in (meta.get("hardware"), meta.get("os")) if x)
-            line = f"device {device}{descriptor}: {got} records (API reported {reported})"
-            result.notes.append(f"{line} - {extra}" if extra else line)
+            label = meta.get("hostname") or meta.get("ip") or device
+            per_device.append(f"{label}={got}" if got == reported else f"{label}={got}/{reported}")
+            if got == 0:
+                zero_record.append(label)
+        if per_device:
+            result.notes.append(
+                f"{len(totals)} device(s) collected from, records per device: "
+                + ", ".join(per_device)
+            )
+        if zero_record:
+            result.notes.append(
+                f"{len(zero_record)} device(s) returned zero records this run: "
+                + ", ".join(zero_record) + " - consistent with the host being off "
+                "or not configured to forward syslog, not necessarily a collection "
+                "failure."
+            )
         return result
 
     def _collect_device(self, client: httpx.Client, device: str,

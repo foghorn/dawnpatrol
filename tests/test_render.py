@@ -206,6 +206,42 @@ def test_every_renderer_handles_a_populated_report(name):
     assert "steady-checkin.example.net" in body or "F1" in body
 
 
+def _segment_metrics(**zone_counts: tuple[int, int]) -> list[Metric]:
+    """zone_counts: zone_name -> (dns_clients, fw_clients)."""
+    metrics = []
+    for zone, (dns_clients, fw_clients) in zone_counts.items():
+        metrics.append(Metric(key=f"zone.{zone}.dns_clients", value=dns_clients,
+                              section="segments"))
+        metrics.append(Metric(key=f"zone.{zone}.fw_clients", value=fw_clients,
+                              section="segments"))
+    return metrics
+
+
+@pytest.mark.parametrize("name", [n for n in RENDERERS if n != "json"])
+def test_segment_client_counts_are_shown_not_a_device_list(name):
+    """Regression test: a NAT-gated segment with no SNMP inventory and no
+    local DNS resolver behind it (iot, dmz here) must still show a real
+    client count - derived from src_ip/client_ip on the events themselves,
+    not from the sparse, curated device directory."""
+    metrics = _segment_metrics(lan=(45, 12), iot=(0, 8), dmz=(0, 3))
+    body = render_with(name, make_report(metrics=metrics))
+    assert "iot" in body and "8 via firewall" in body
+    assert "dmz" in body and "3 via firewall" in body
+    assert "lan" in body and "45 via DNS" in body
+    assert "known devices" not in body.lower()
+
+
+def test_json_renderer_still_carries_the_full_device_list():
+    """report.devices itself is untouched - only the human-facing renderers'
+    "known devices" listing was replaced by the segment overview above."""
+    import json
+
+    devices = [{"ip": "10.10.0.5", "hostname": "nas", "hardware": "", "os": "",
+               "status": "up", "roles": ["librenms-managed"], "sources": ["librenms_syslog"]}]
+    data = json.loads(render_with("json", make_report(devices=devices)))
+    assert data["devices"] == devices
+
+
 def test_json_renderer_is_valid_json():
     import json
     data = json.loads(render_with("json", make_report(findings=[sample_finding()])))
@@ -237,6 +273,16 @@ def test_html_renderer_escapes_attacker_influenced_text():
     body = render_with("html", make_report(findings=[f]))
     assert "<script>alert" not in body
     assert "&lt;script&gt;" in body
+
+
+@pytest.mark.parametrize("name", ["html", "html_email"])
+def test_segment_names_are_escaped_not_passed_through_as_markup(name):
+    """Zone names come from profile.yml, not from the network - but they still
+    go through the same escaping every other rendered field does."""
+    metrics = [Metric(key="zone.<img src=x onerror=alert(1)>.fw_clients", value=3,
+                      section="segments")]
+    body = render_with(name, make_report(metrics=metrics))
+    assert "<img src=x" not in body
 
 
 # --------------------------------------------------------------------------- #
