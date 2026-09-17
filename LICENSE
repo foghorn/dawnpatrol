@@ -1,21 +1,75 @@
-MIT License
+DawnPatrol Home Use License
+Version 1.0
 
-Copyright (c) 2026 Nick Leghorn
+Copyright (c) 2026 Nick Leghorn ("Licensor")
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+1. Definitions
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+"Software" means the DawnPatrol source code, object code, and accompanying
+documentation made available in this repository, including all modifications
+and derivative works you create.
+
+"Home Use" means use of the Software by an individual, exclusively for that
+individual's own personal, family, or household purposes, on a network that
+the individual personally owns, administers, or resides on - and not on
+behalf of, for the benefit of, or in connection with any business, nonprofit,
+educational institution, government body, or other organization.
+
+"Commercial Use" means any use of the Software that is not Home Use,
+including without limitation:
+
+  (a) use by, for, or on behalf of a business, nonprofit, educational
+      institution, or government entity, including monitoring that entity's
+      own network or infrastructure;
+
+  (b) use to provide a product or service - free or paid - to any third
+      party, including managed security services, consulting, or hosted
+      deployments; and
+
+  (c) incorporating the Software, in whole or in part, into another product
+      or service that is sold, licensed, or otherwise commercially
+      distributed.
+
+2. Home Use Grant
+
+Subject to the terms of this License, Licensor grants you a worldwide,
+royalty-free, non-exclusive, non-transferable license to use, copy, modify,
+and create derivative works of the Software, solely for Home Use.
+
+3. Commercial Use Requires a Separate License
+
+Commercial Use of the Software is not authorized under this License. If you
+wish to put the Software to Commercial Use, you must obtain a separate
+commercial license from Licensor. To inquire about a commercial license,
+contact: sales@dawnpatrolsoc.com.
+
+4. Conditions
+
+You must include a copy of this License, unmodified, with every copy of the
+Software (or a substantial portion of it) that you distribute, along with
+the copyright notice above. You may not remove or alter any licensing
+notices contained in the Software.
+
+5. No Trademark License
+
+This License does not grant permission to use the name "DawnPatrol," the
+DawnPatrol logo, or the names of its contributors to endorse or promote
+products derived from the Software, except as required to comply with
+Section 4.
+
+6. Disclaimer of Warranty
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LICENSOR OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+7. Termination
+
+Your rights under this License terminate automatically if you put the
+Software to Commercial Use without a separate commercial license from
+Licensor, or if you breach any other term of this License. Licensor may
+offer additional or alternative licensing terms at its own discretion.

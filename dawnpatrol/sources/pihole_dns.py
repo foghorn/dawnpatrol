@@ -21,6 +21,11 @@ Every distinct client IP seen making a query is also registered in
 ``ctx.devices`` (see ``dawnpatrol/devices.py``), tagged with a ``dns-client``
 role and a name if Pi-hole resolved one - the cross-source device table the
 internal investigation agent sees a summary of every run.
+
+``block_reason`` carries the raw Pi-hole status for every query, not only
+blocked ones - ``NXDOMAIN``/``FORWARDED``/``CACHE``/etc. otherwise. This is
+what ``dns_anomalies.py``'s NXDOMAIN-rate outlier reads; ``blocked`` remains
+the only authority on whether a query was actually blocked.
 """
 
 from __future__ import annotations
@@ -255,7 +260,12 @@ class PiholeDNSSource(Source):
             domain=domain,
             qtype=(q.get("type") or None),
             blocked=status in BLOCKED_STATUSES,
-            block_reason=status if status in BLOCKED_STATUSES else None,
+            # Carries the raw resolution status regardless of blocked/unblocked
+            # (GRAVITY/DENYLIST/... when blocked; NXDOMAIN/FORWARDED/CACHE/...
+            # otherwise) - dns_anomalies.py's NXDOMAIN-rate outlier reads this
+            # for the non-blocked case. `blocked` remains the sole authority on
+            # whether Pi-hole actually blocked the query.
+            block_reason=status or None,
             upstream=str(upstream) if upstream else None,
             **self.assign_zones(client_ip=str(client_ip) if client_ip else None),
         )

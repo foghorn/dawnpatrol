@@ -62,6 +62,12 @@ _FIELD_RE = re.compile(r"\b(IN|OUT|SRC|DST|LEN|TTL|PROTO|SPT|DPT|MAC)=([^\s]*)")
 _PROTO_NUMBERS = {"1": "icmp", "2": "igmp", "6": "tcp", "17": "udp",
                   "47": "gre", "50": "esp", "58": "icmpv6", "89": "ospf"}
 
+#: 802.11 deauthentication lines carry a client MAC - the closest thing to a
+#: device-authentication event this data actually has (see auth_activity.py).
+#: Matches both WLCEVENTD's "Deauth_ind AA:BB:..." and HOSTAPD's
+#: "STA aa:bb:... IEEE 802.11: deauthenticated ...".
+_MAC_RE = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
+
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -310,9 +316,23 @@ class LibreNMSSyslogSource(Source):
                 **common,
             )
 
-        # VPN daemon output is the only remote-access evidence in this dataset.
+        # VPN daemon output is the only remote-access evidence in this dataset -
+        # and in production it has turned out to be lifecycle noise (startup,
+        # TUN/TAP up/down, SIGTERM), never a per-session "peer X authenticated"
+        # line. Still classified AUTH so a real deployment that does forward
+        # per-session lines is picked up automatically; see auth_activity.py's
+        # docstring for what this means for VPN-specific analysis today.
         if program.startswith("VPNSERVER") or program in {"OPENVPN", "SSHD", "PPTPD"}:
             return Event(kind=EventKind.AUTH, **common)
+
+        # Wi-Fi deauthentication: real device-authentication evidence this
+        # network actually produces. `user` is repurposed to carry the client
+        # MAC address - the only stable identity 802.11 gives us here.
+        if program in {"WLCEVENTD", "HOSTAPD"} and "deauth" in message.lower():
+            mac = _MAC_RE.search(message)
+            if mac:
+                return Event(kind=EventKind.AUTH, action="deauth",
+                            user=mac.group(1).lower(), **common)
 
         return Event(kind=EventKind.SYSTEM, **common)
 

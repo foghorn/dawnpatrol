@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import pytest
 
+from dawnpatrol.analyzers.auth_activity import AuthActivityAnalyzer
 from dawnpatrol.analyzers.baseline import Baseline
 from dawnpatrol.analyzers.beaconing import BeaconingAnalyzer, beacon_score
 from dawnpatrol.analyzers.correlation import CorrelationAnalyzer
 from dawnpatrol.analyzers.dns_anomalies import DNSAnomalyAnalyzer, looks_like_dga
 from dawnpatrol.analyzers.firewall_patterns import FirewallPatternAnalyzer
 from dawnpatrol.analyzers.firewall_volume import FirewallVolumeAnalyzer
+from dawnpatrol.analyzers.novel_clients import NovelClientAnalyzer
 from dawnpatrol.analyzers.segment_review import SegmentReviewAnalyzer
+from dawnpatrol.models import EntityType, Metric
 from dawnpatrol.query import EventQuery
 from tests.conftest import make_events
 
@@ -110,6 +113,51 @@ def test_resolver_bypass_is_high_severity(q, profile, baseline):
     assert "8.8.8.8" in str(bypass[0].evidence)
 
 
+def test_nxdomain_outlier_client_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = []
+    # Outlier: 150 of 250 queries are NXDOMAIN (60%).
+    for i in range(250):
+        events.append(Event(
+            ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+            dedup_key=f"nx-out-{i}", client_ip="10.10.0.150", src_zone="lan",
+            domain=f"candidate{i}.example.net", blocked=False,
+            block_reason="NXDOMAIN" if i < 150 else "FORWARDED",
+        ))
+    # Peer: 35 of 250 are NXDOMAIN (14%) - a real but much lower rate.
+    for i in range(250):
+        events.append(Event(
+            ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+            dedup_key=f"nx-peer-{i}", client_ip="10.10.0.151", src_zone="lan",
+            domain=f"peer{i}.example.net", blocked=False,
+            block_reason="NXDOMAIN" if i < 35 else "FORWARDED",
+        ))
+    q.store.insert_events(q.run_id, events)
+    result = DNSAnomalyAnalyzer().run(q, profile, baseline)
+    outlier = [s for s in result.signals if s.taxonomy == "dns.nxdomain_outlier"]
+    assert any(s.evidence["client"] == "10.10.0.150" for s in outlier)
+    assert not any(s.evidence["client"] == "10.10.0.151" for s in outlier)
+
+
+def test_low_nxdomain_count_is_not_flagged_regardless_of_rate(q, profile, baseline, window):
+    """A handful of NXDOMAIN responses (mDNS probing, a typo) is not a DGA -
+    the absolute floor matters as much as the rate."""
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+              dedup_key=f"nx-low-{i}", client_ip="10.10.0.152", src_zone="lan",
+              domain=f"x{i}.example.net", blocked=False,
+              block_reason="NXDOMAIN" if i < 5 else "FORWARDED")
+        for i in range(250)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = DNSAnomalyAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "dns.nxdomain_outlier"
+                  and s.evidence["client"] == "10.10.0.152" for s in result.signals)
+
+
 @pytest.mark.parametrize("domain,expected", [
     ("kq3xzmv9rwptnb42.example.com", True),
     ("x7f2k9qz1mw8vnp3.badsite.net", True),
@@ -180,6 +228,168 @@ def test_segment_metrics_cover_every_zone(q, profile, baseline):
         assert f"zone.{zone}.dns" in keys
 
 
+# --------------------------------------------------------------------------- #
+# Time-of-day baselining per zone
+# --------------------------------------------------------------------------- #
+
+
+def test_daypart_metrics_are_always_recorded(q, profile, baseline):
+    """The metric is recorded every run regardless of whether enough history
+    exists yet to judge it - that history has to come from somewhere."""
+    result = SegmentReviewAnalyzer().run(q, profile, baseline)
+    keys = {m.key for m in result.metrics}
+    for part in ("night", "morning", "afternoon", "evening"):
+        assert f"zone.iot.daypart.{part}" in keys
+
+
+def test_daypart_anomaly_fires_for_activity_in_a_normally_quiet_window(store, profile, window):
+    from datetime import datetime, timedelta
+
+    from dawnpatrol.models import UTC, Event, EventKind, Metric
+
+    run_id = "daypart-quiet-then-active"
+    # Store.metric_history() filters against real wall-clock time, not the
+    # fictional test `window` - history must be seeded relative to "now".
+    real_now = datetime.now(UTC)
+    for day in range(1, 7):
+        store.save_metrics(run_id, real_now - timedelta(days=day),
+                           [Metric(key="zone.iot.daypart.night", value=0,
+                                  section="segments_time")])
+    store.start_run(run_id, 1, window.start, window)
+
+    night_ts = datetime(window.end.year, window.end.month, window.end.day, 2, 0,
+                        tzinfo=UTC)
+    events = [
+        Event(ts=night_ts, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key=f"night{i}", action="drop", src_ip=f"10.10.50.{i}",
+              dst_ip="203.0.113.10", src_zone="iot", dst_zone="external")
+        for i in range(25)
+    ]
+    store.insert_events(run_id, events)
+    result = SegmentReviewAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert any(s.taxonomy == "segment.time_of_day_anomaly"
+              and s.evidence["zone"] == "iot" and s.evidence["daypart"] == "night"
+              for s in result.signals)
+
+
+def test_daypart_anomaly_does_not_fire_without_enough_history(store, profile, window):
+    from datetime import datetime
+
+    from dawnpatrol.models import UTC, Event, EventKind
+
+    run_id = "daypart-no-history"
+    store.start_run(run_id, 1, window.start, window)
+    night_ts = datetime(window.end.year, window.end.month, window.end.day, 2, 0,
+                        tzinfo=UTC)
+    events = [
+        Event(ts=night_ts, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key=f"nohist{i}", action="drop", src_ip=f"10.10.50.{i}",
+              dst_ip="203.0.113.10", src_zone="iot", dst_zone="external")
+        for i in range(25)
+    ]
+    store.insert_events(run_id, events)
+    result = SegmentReviewAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "segment.time_of_day_anomaly" for s in result.signals)
+
+
+def test_daypart_anomaly_does_not_fire_when_the_hour_is_not_historically_quiet(
+    store, profile, window,
+):
+    """A zone that is genuinely active every night should not be flagged just
+    for continuing to be active - only a real shift from its own history."""
+    from datetime import datetime, timedelta
+
+    from dawnpatrol.models import UTC, Event, EventKind, Metric
+
+    run_id = "daypart-always-busy"
+    real_now = datetime.now(UTC)
+    for day in range(1, 7):
+        store.save_metrics(run_id, real_now - timedelta(days=day),
+                           [Metric(key="zone.iot.daypart.night", value=30,
+                                  section="segments_time")])
+    store.start_run(run_id, 1, window.start, window)
+
+    night_ts = datetime(window.end.year, window.end.month, window.end.day, 2, 0,
+                        tzinfo=UTC)
+    events = [
+        Event(ts=night_ts, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key=f"busy{i}", action="drop", src_ip=f"10.10.50.{i}",
+              dst_ip="203.0.113.10", src_zone="iot", dst_zone="external")
+        for i in range(25)
+    ]
+    store.insert_events(run_id, events)
+    result = SegmentReviewAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "segment.time_of_day_anomaly" for s in result.signals)
+
+
+# --------------------------------------------------------------------------- #
+# Inbound-accepted: blanket for untrusted zones, novelty-gated for trusted ones
+# --------------------------------------------------------------------------- #
+
+
+def test_untrusted_zone_flags_any_accepted_inbound(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind, Severity
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="ib1", action="accept", src_ip="203.0.113.50", dst_port=8080,
+              src_zone="external", dst_zone="iot"),
+    ])
+    result = SegmentReviewAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "segment.inbound_accepted"
+                 and s.evidence["zone"] == "iot")
+    assert signal.severity_hint == Severity.HIGH
+    assert signal.evidence["novel_sources_only"] is False
+
+
+def test_trusted_zone_inbound_accept_needs_a_baseline_first(store, profile, window):
+    """No prior run means everything looks novel - too noisy to report, so the
+    first-ever run must stay silent rather than flag every standing port-forward."""
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "inbound-first-run"
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="ib2", action="accept", src_ip="203.0.113.60", dst_port=25565,
+              src_zone="external", dst_zone="lan"),
+    ])
+    result = SegmentReviewAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "segment.inbound_accepted" and s.evidence["zone"] == "lan"
+                  for s in result.signals)
+
+
+def test_trusted_zone_flags_only_a_novel_external_source(store, profile, window):
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind, Severity
+
+    run_id = "inbound-trusted"
+    _with_baseline(store, window, run_id)
+    # 203.0.113.61 is a known, standing port-forward peer from a prior run.
+    store.observe_entities([(EntityType.IP, "203.0.113.61", 5)], window.start - timedelta(days=30))
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="ib3", action="accept", src_ip="203.0.113.61", dst_port=25565,
+              src_zone="external", dst_zone="lan"),
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="ib4", action="accept", src_ip="203.0.113.70", dst_port=25565,
+              src_zone="external", dst_zone="lan"),
+    ])
+    result = SegmentReviewAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "segment.inbound_accepted"
+                 and s.evidence["zone"] == "lan")
+    assert signal.severity_hint == Severity.MEDIUM
+    assert signal.evidence["novel_sources_only"] is True
+    srcs = {row["src"] for row in signal.evidence["accepted"]}
+    assert srcs == {"203.0.113.70"}
+
+
 def test_segment_firewall_client_count_includes_both_directions(store, profile, window):
     """Many firewalls only log denied traffic. A device that only ever shows up
     as the target of a rejected inbound session (dst_zone, never src_zone) must
@@ -237,6 +447,191 @@ def test_analyzers_tolerate_an_empty_store(store, profile, window):
     b = Baseline(store, "empty")
     for analyzer in (FirewallVolumeAnalyzer(), FirewallPatternAnalyzer(),
                      DNSAnomalyAnalyzer(), BeaconingAnalyzer(),
-                     SegmentReviewAnalyzer(), CorrelationAnalyzer()):
+                     SegmentReviewAnalyzer(), CorrelationAnalyzer(),
+                     AuthActivityAnalyzer(), NovelClientAnalyzer()):
         result = analyzer.run(q, profile, b)
         assert result.error is None
+
+
+# --------------------------------------------------------------------------- #
+# Novel clients: first-ever-seen internal devices
+# --------------------------------------------------------------------------- #
+
+
+def _with_baseline(store, window, run_id: str, run_number: int = 2):
+    """Establish has_baseline() == True via a completed prior run."""
+    prior_run = f"{run_id}-prior"
+    store.start_run(prior_run, run_number - 1, window.start, window)
+    store.finish_run(prior_run, finished_at=window.end, status="GREEN", finding_count=0)
+    store.save_metrics(prior_run, window.end,
+                       [Metric(key="net.novel_clients", value=0, section="general")])
+    store.start_run(run_id, run_number, window.start, window)
+
+
+def test_first_run_reports_no_novel_client_signal(q, profile, baseline, window):
+    """Every device looks novel on a fresh deployment - reported as a note,
+    not a wall of signals, exactly like _novel_domains handles the same case."""
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="nc1", src_ip="10.10.0.201", action="drop",
+              src_zone="lan", dst_zone="external"),
+    ])
+    result = NovelClientAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "net.novel_client" for s in result.signals)
+    assert any("first run" in n for n in result.notes)
+
+
+def test_genuinely_new_internal_ip_is_flagged(store, profile, window):
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "novel-new"
+    _with_baseline(store, window, run_id)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="nc2", src_ip="10.10.0.201", action="drop",
+              src_zone="lan", dst_zone="external"),
+    ])
+    result = NovelClientAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "net.novel_client")
+    assert signal.evidence["zone"] == "lan"
+    assert "10.10.0.201" in signal.evidence["ips"]
+
+
+def test_iot_zone_novel_device_is_escalated_above_lan(store, profile, window):
+    from dawnpatrol.models import Event, EventKind, Severity
+
+    run_id = "novel-iot"
+    _with_baseline(store, window, run_id)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="nc3", src_ip="10.10.50.5", action="drop",
+              src_zone="iot", dst_zone="external"),
+    ])
+    result = NovelClientAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "net.novel_client"
+                 and s.evidence["zone"] == "iot")
+    assert signal.severity_hint == Severity.MEDIUM
+
+
+def test_a_previously_seen_ip_is_not_flagged_again(store, profile, window):
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "novel-known"
+    _with_baseline(store, window, run_id)
+    store.observe_entities([(EntityType.IP, "10.10.0.201", 1)], window.start - timedelta(days=30))
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
+              dedup_key="nc4", src_ip="10.10.0.201", action="drop",
+              src_zone="lan", dst_zone="external"),
+    ])
+    result = NovelClientAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "net.novel_client" for s in result.signals)
+
+
+# --------------------------------------------------------------------------- #
+# Auth activity: VPN lifecycle + Wi-Fi deauthentication
+# --------------------------------------------------------------------------- #
+
+
+def test_vpn_lifecycle_events_produce_a_metric_not_a_login_claim(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"vpn{i}", program="VPNSERVER1")
+        for i in range(5)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    by_key = {m.key: m.value for m in result.metrics}
+    assert by_key["auth.vpn_events"] == 5
+    assert any("per-login VPN analysis is not possible" in n for n in result.notes)
+    # No baseline in this fixture, so no restart-frequency signal is possible.
+    assert not any(s.taxonomy == "auth.vpn_instability" for s in result.signals)
+
+
+def test_vpn_restart_frequency_signal_when_far_above_baseline(store, profile, window):
+    prior_run = "auth-prior-run"
+    store.start_run(prior_run, 1, window.start, window)
+    store.finish_run(prior_run, finished_at=window.end, status="GREEN", finding_count=0)
+    store.save_metrics(prior_run, window.end,
+                       [Metric(key="auth.vpn_events", value=10, section="router")])
+
+    run_id = "auth-current-run"
+    store.start_run(run_id, 2, window.start, window)
+    from dawnpatrol.models import Event, EventKind
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"vpn{i}", program="VPNSERVER1")
+        for i in range(40)
+    ]
+    store.insert_events(run_id, events)
+    result = AuthActivityAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert any(s.taxonomy == "auth.vpn_instability" for s in result.signals)
+
+
+def test_deauth_outlier_device_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              action="deauth", user="aa:aa:aa:aa:aa:aa", dedup_key=f"d{i}")
+        for i in range(30)
+    ] + [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              action="deauth", user="bb:bb:bb:bb:bb:bb", dedup_key=f"e{i}")
+        for i in range(2)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert any(s.taxonomy == "auth.deauth_outlier"
+              and s.evidence["mac"] == "aa:aa:aa:aa:aa:aa" for s in result.signals)
+
+
+def test_evenly_spread_deauths_are_not_flagged_as_an_outlier(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              action="deauth", user=f"aa:aa:aa:aa:aa:{i:02x}", dedup_key=f"d{i}")
+        for i in range(30)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.deauth_outlier" for s in result.signals)
+
+
+def test_mass_deauth_burst_is_flagged(q, profile, baseline, window):
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end - timedelta(seconds=i * 10), source="librenms_syslog",
+              kind=EventKind.AUTH, action="deauth", user=f"cc:cc:cc:cc:cc:{i:02x}",
+              dedup_key=f"burst{i}")
+        for i in range(8)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert any(s.taxonomy == "auth.mass_deauth_burst" for s in result.signals)
+
+
+def test_deauths_spread_across_the_day_are_not_a_mass_burst(q, profile, baseline, window):
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end - timedelta(hours=i), source="librenms_syslog",
+              kind=EventKind.AUTH, action="deauth", user=f"cc:cc:cc:cc:cc:{i:02x}",
+              dedup_key=f"spread{i}")
+        for i in range(8)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.mass_deauth_burst" for s in result.signals)

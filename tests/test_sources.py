@@ -99,6 +99,39 @@ def test_vpn_program_becomes_an_auth_event(librenms):
     assert librenms._normalize(entry, "3").kind == EventKind.AUTH
 
 
+def test_wlceventd_deauth_becomes_an_auth_event_with_the_client_mac(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "WLCEVENTD", "seq": 4,
+        "msg": ("wlceventd_proc_event(645): eth7: Deauth_ind 54:E4:ED:A1:17:BF, "
+                "status: 0, reason: Previous authentication no longer valid (2), rssi:-65"),
+    }
+    ev = librenms._normalize(entry, "3")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "deauth"
+    assert ev.user == "54:e4:ed:a1:17:bf"
+
+
+def test_hostapd_deauth_becomes_an_auth_event_with_the_client_mac(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "HOSTAPD", "seq": 5,
+        "msg": "eth7: STA 64:ff:0a:ba:41:93 IEEE 802.11: deauthenticated due to local deauth request",
+    }
+    ev = librenms._normalize(entry, "3")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "deauth"
+    assert ev.user == "64:ff:0a:ba:41:93"
+
+
+def test_non_deauth_wlceventd_lines_stay_system(librenms):
+    """Association/roam events are not authentication failures - only lines
+    that actually say "deauth" are reclassified."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "WLCEVENTD", "seq": 6,
+        "msg": "wlceventd_proc_event(645): eth7: Assoc_ind 54:E4:ED:A1:17:BF",
+    }
+    assert librenms._normalize(entry, "3").kind == EventKind.SYSTEM
+
+
 def test_non_firewall_program_becomes_a_system_event(librenms):
     entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 4,
              "msg": "DHCPACK(br0) 10.10.0.55"}

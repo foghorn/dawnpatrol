@@ -78,9 +78,14 @@ never recur:
   check `kind` on its events before assuming a collection problem - this is a
   classification trap, not a collection one, and it can recur with a firmware this hasn't
   been tested against yet.
-- **Non-KERNEL lines become `SYSTEM` or `AUTH` events** (VPN session lines in particular
-  become `AUTH`, since they're the only evidence of remote-access sessions in this
-  dataset) rather than being discarded.
+- **Non-KERNEL lines become `SYSTEM` or `AUTH` events** rather than being discarded. VPN
+  daemon lines (`VPNSERVER*`/`OPENVPN`/`SSHD`/`PPTPD`) become `AUTH` - though in
+  production this has turned out to be daemon lifecycle noise (startup, TUN/TAP
+  up/down, `SIGTERM`) only, never a per-session "peer authenticated" line; see
+  `analyzers/auth_activity.py` for what that means for VPN-specific analysis today.
+  `WLCEVENTD`/`HOSTAPD` deauthentication lines *do* carry real device-authentication
+  evidence - a client MAC and a reason - and become `AUTH` too, with the MAC in
+  `Event.user`.
 - **Device selection defaults to every device, auto-discovered fresh each run.**
   `DAWNPATROL_SOURCE_LIBRENMS_DEVICES` pins an explicit list when you want to exclude
   something; unset, `_device_directory()` calls `/devices` (one unpaginated call - unlike

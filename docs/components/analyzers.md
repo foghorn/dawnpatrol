@@ -6,10 +6,10 @@ dozen metrics and signals - the ~25k tokens of dense, numeric evidence the model
 reasons over. They are pure functions: no network, no model calls, which is what makes
 them fast to iterate on and trivial to test against synthetic data.
 
-Seven ship today: `firewall_volume`, `firewall_patterns`, `dns_anomalies`, `beaconing`,
-`segment_review`, `correlation`, `baseline_delta`. This guide walks through
-`firewall_patterns.py` in full, because it exercises every part of the contract, then
-shows you how to add an eighth.
+Nine ship today: `firewall_volume`, `firewall_patterns`, `dns_anomalies`, `novel_clients`,
+`beaconing`, `auth_activity`, `segment_review`, `correlation`, `baseline_delta`. This
+guide walks through `firewall_patterns.py` in full, because it exercises every part of
+the contract, then shows you how to add another.
 
 ## The contract
 

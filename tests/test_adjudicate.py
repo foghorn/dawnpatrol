@@ -71,6 +71,17 @@ def test_unknown_signal_ids_are_dropped_but_valid_ones_kept(adj):
     assert any("ghost" in a for a in out[0].adjustments)
 
 
+def test_adjustment_log_is_prefixed_by_finding_id_not_title(adj):
+    """Regression test: a finding title can itself end in a colon-shaped
+    clause. Prefixing the audit-trail entry with the title made a stripped
+    signal id read as one garbled, doubled-up line - the finding id is
+    unambiguous and matches how findings are already identified elsewhere in
+    the report."""
+    adj.build_findings([raw(title="Nothing accepted: still worth a look",
+                            signal_ids=["s1", "corr.watchlist.ip.example"])])
+    assert any(a.startswith("F1: dropped unknown signal id(s)") for a in adj.adjustments)
+
+
 def test_valid_finding_survives_intact(adj):
     out = adj.build_findings([raw()])
     assert len(out) == 1

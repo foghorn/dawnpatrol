@@ -146,7 +146,11 @@ class Adjudicator:
             if caveat:
                 break
 
-        self.adjustments.extend(f"{title}: {a}" for a in adjustments)
+        # Prefix with the finding id, not its title: a title can itself end in
+        # a colon-shaped clause ("...nothing accepted"), which read next to an
+        # adjustment's own colon ("dropped unknown signal id(s): ...") looked
+        # like one garbled, doubled-up line rather than two distinct facts.
+        self.adjustments.extend(f"F{index}: {a}" for a in adjustments)
 
         return Finding(
             id=f"F{index}",

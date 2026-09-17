@@ -347,7 +347,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-270 tests, fully offline — no network, no API key, no spend — including an
+293 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract
@@ -370,4 +370,8 @@ and pull request, across Python 3.11-3.13.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Free for personal, home-network use — see [LICENSE](LICENSE). Commercial use
+(by or for a business, nonprofit, or other organization, or as part of a
+product or service you provide to others) requires a separate commercial
+license. Contact [sales@dawnpatrolsoc.com](mailto:sales@dawnpatrolsoc.com)
+to inquire.

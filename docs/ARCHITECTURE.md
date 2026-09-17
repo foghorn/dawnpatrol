@@ -1055,7 +1055,7 @@ be firewalled to an allowlist.
 
 ## 14. Testing
 
-270 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
+293 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
 includes an end-to-end pipeline exercise against a stubbed provider. CI
 (`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
 request, across Python 3.11-3.13.

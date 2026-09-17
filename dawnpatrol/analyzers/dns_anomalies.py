@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import re
+import statistics
 
 from ..models import (
     AnalyzerResult,
@@ -28,6 +29,9 @@ _LABEL_RE = re.compile(r"^[a-z0-9-]+$")
 DGA_MIN_LABEL = 12
 DGA_MIN_ENTROPY = 3.6
 NOVEL_REPORT_LIMIT = 25
+NXDOMAIN_MIN_COUNT = 30
+NXDOMAIN_RATE_FLOOR = 15.0
+NXDOMAIN_RATE_MULTIPLE = 4.0
 
 
 def shannon_entropy(text: str) -> float:
@@ -104,6 +108,7 @@ class DNSAnomalyAnalyzer(Analyzer):
         self._dga(q, r, profile, baseline)
         self._resolver_bypass(q, r, profile)
         self._client_outliers(q, r, profile)
+        self._nxdomain_outliers(q, r, profile)
         return r
 
     # ----- novelty --------------------------------------------------------- #
@@ -268,5 +273,72 @@ class DNSAnomalyAnalyzer(Analyzer):
                     "A high block rate usually means ad-heavy apps, not malware. "
                     "It is interesting when the client is a device that should be "
                     "quiet, such as an IoT endpoint."
+                ),
+            ))
+
+    # ----- per-client NXDOMAIN outliers ------------------------------------------ #
+
+    def _nxdomain_outliers(self, q: EventQuery, r: AnalyzerResult, profile: Profile) -> None:
+        """A client resolving far more nonexistent domains than its peers.
+
+        Distinct from the block-rate outlier above: an ad-heavy app blocked by
+        Pi-hole is routine and can legitimately run 20-40%+. A client burning
+        through many NXDOMAIN responses is a different shape - it is what a
+        DGA trying dozens of unregistered candidate domains looks like, or a
+        misconfigured app retrying a dead hostname. Legitimate mDNS/NetBIOS
+        chatter also produces some NXDOMAIN baseline, which is why this
+        compares against the network's own mean rather than an absolute cutoff
+        alone.
+        """
+        stats = q.dns_client_stats(n=40)
+        if len(stats) < 3:
+            return
+        nx_by_client = {
+            client: count for client, _reason, count in
+            q.group_pairs("client_ip", "block_reason", n=200,
+                         kind=EventKind.DNS, block_reason="NXDOMAIN")
+        }
+        rates = []
+        for client, total, _blocked in stats:
+            if total < 200:
+                continue
+            nx = nx_by_client.get(client, 0)
+            if nx < NXDOMAIN_MIN_COUNT:
+                continue
+            rates.append((client, total, nx, 100.0 * nx / total))
+        if not rates:
+            return
+        for i, (client, total, nx, rate) in enumerate(rates):
+            # Compare against peers' mean, excluding this client itself -
+            # otherwise the very outlier being tested for pulls its own
+            # baseline up (the same trap the deauth-outlier check avoids).
+            peers = [x[3] for j, x in enumerate(rates) if j != i]
+            peer_mean = statistics.fmean(peers) if peers else 0.0
+            if rate < max(NXDOMAIN_RATE_FLOOR, peer_mean * NXDOMAIN_RATE_MULTIPLE):
+                continue
+            caveat = profile.attribution_caveat(client)
+            r.signals.append(Signal(
+                id=f"dns.nxdomain_outlier.{client}",
+                analyzer=self.name,
+                title=f"{profile.label_for(client)} has an unusually high NXDOMAIN rate",
+                taxonomy="dns.nxdomain_outlier",
+                severity_hint=Severity.LOW,
+                confidence=0.5,
+                entities=[Entity(type=EntityType.IP, value=client, role="client")],
+                evidence={
+                    "client": client,
+                    "queries": total,
+                    "nxdomain": nx,
+                    "nxdomain_rate_pct": round(rate, 1),
+                    "peer_mean_nxdomain_rate_pct": round(peer_mean, 1),
+                    "attribution_caveat": caveat,
+                },
+                narrative_hint=(
+                    "A high NXDOMAIN rate is what a DGA trying many unregistered "
+                    "candidate domains looks like, or a misconfigured app retrying "
+                    "a dead hostname - it is not itself proof of either. mDNS and "
+                    "NetBIOS chatter produce some baseline NXDOMAIN traffic on any "
+                    "network, which is why this compares against the network mean "
+                    "rather than firing on a bare threshold."
                 ),
             ))

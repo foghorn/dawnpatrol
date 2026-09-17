@@ -104,6 +104,8 @@ events - one row per normalized observation. Scope to run_id = '{run_id}'.
   network : src_ip, dst_ip, src_port, dst_port, proto, action,
             iface_in, iface_out, ttl, pkt_len
   dns     : domain, qtype, blocked (bool), block_reason, upstream, client_ip
+            block_reason is the raw resolver status for every query, not only
+            blocked ones (NXDOMAIN/FORWARDED/CACHE/... when not blocked)
   system  : device, program, severity, message, user
   derived : src_zone, dst_zone  (resolved from the site profile)
 
