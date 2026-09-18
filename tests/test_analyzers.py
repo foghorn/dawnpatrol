@@ -442,9 +442,10 @@ def test_correlation_runs_clean_on_synthetic_data(q, profile, baseline):
 
 def test_watchlist_hit_recognizes_host_entity_type_by_ip(store, profile, window):
     """In real use the model watchlists a 'host' by its internal IP, not a
-    named hostname (verified against production data: Event.device holds a
-    syslog facility code for this source, never a name) - so a host-typed
-    watch entry must still match on src_ip/dst_ip like an 'ip' entry does."""
+    named hostname (verified against production data: Event.device holds
+    LibreNMS's numeric device_id for this source, never a name) - so a
+    host-typed watch entry must still match on src_ip/dst_ip like an 'ip'
+    entry does."""
     from dawnpatrol.models import Event, EventKind
 
     run_id = "watch-host-ip"
@@ -465,7 +466,7 @@ def test_watchlist_hit_recognizes_host_entity_type_by_ip(store, profile, window)
 
 def test_watchlist_hit_recognizes_host_entity_type_by_device_label(store, profile, window):
     """Also matches Event.device directly, for any source that does populate
-    it with a real hostname rather than a facility code."""
+    it with a real hostname rather than a numeric device_id."""
     from dawnpatrol.models import Event, EventKind
 
     run_id = "watch-host-device"
@@ -863,6 +864,25 @@ def test_windows_defender_detection_is_flagged(q, profile, baseline, window):
     signal = next(s for s in result.signals if s.taxonomy == "endpoint.malware_detection")
     assert signal.severity_hint == Severity.HIGH
     assert signal.evidence["count"] == 1
+
+
+def test_windows_defender_detection_entities_are_deduped_by_device(q, profile, baseline, window):
+    """Event.device is a LibreNMS device_id, not a hostname - three detection
+    events from the same device must produce one entity, not three identical
+    ones (a real bug: three duplicate Entity(value="8") objects)."""
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.IDS,
+              dedup_key=f"w9-{i}", action="detection", device="8",
+              message="Windows Defender Antivirus has detected malware.")
+        for i in range(3)
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "endpoint.malware_detection")
+    assert signal.evidence["count"] == 3
+    assert signal.evidence["librenms_device_ids"] == ["8"]
+    assert len(signal.entities) == 1
 
 
 def test_windows_defender_health_heartbeat_produces_no_signal(q, profile, baseline, window):

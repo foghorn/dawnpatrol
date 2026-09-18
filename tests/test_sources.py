@@ -240,6 +240,28 @@ def test_windows_defender_health_report_is_not_a_detection(librenms):
     assert librenms._normalize(entry, "8").kind == EventKind.SYSTEM
 
 
+@pytest.mark.parametrize("msg", [
+    # Verbatim shapes from LibreNMS's real feed for device 8 - a routine
+    # scheduled Quick Scan, and its housekeeping cleanup of OLD history.
+    # Neither names a threat or a file path, unlike a real detection - this
+    # was a real HIGH-severity false positive on the first live data with
+    # any non-heartbeat Defender message.
+    ("Microsoft Defender Antivirus scan has started.   \\011Scan ID: {AEBCC57A}   "
+     "\\011Scan Type: Antimalware   \\011Scan Parameters: Quick Scan   "
+     "\\011Scan Trigger: Scheduled maintenance   \\011Scan Only If Idle: Enabled"),
+    ("Microsoft Defender Antivirus scan has finished.   \\011Scan ID: {AEBCC57A}   "
+     "\\011Scan Type: Antimalware   \\011Scan Parameters: Quick Scan   "
+     "\\011User: NT AUTHORITY\\\\SYSTEM   \\011Scan Time: 0:00:52"),
+    ("Microsoft Defender Antivirus has removed history of malware and other "
+     "potentially unwanted software.   \\011Time: 2026-09-03T15:03:16Z   "
+     "\\011User: NT AUTHORITY\\\\SYSTEM"),
+])
+def test_windows_defender_scan_lifecycle_is_not_a_detection(librenms, msg):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-WINDOWS_DEFEND",
+             "seq": 16, "msg": msg}
+    assert librenms._normalize(entry, "8").kind == EventKind.SYSTEM
+
+
 def test_windows_defender_detection_is_flagged(librenms):
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-WINDOWS_DEFEND",

@@ -168,6 +168,51 @@ Cost is bounded by `DAWNPATROL_AI_MAX_COST_USD`, `..._MAX_TOOL_CALLS`, and
 `..._EFFORT`. Tripping a ceiling degrades the run to a statistics-only report —
 never to no report at all.
 
+### Model choice and report quality
+
+The investigate stage (the only one that calls a model) is provider-agnostic by
+design, so swapping models is a config change, not a code change. One real trial
+against a local, open-weight model is recorded here because the result was
+informative enough to be worth keeping, not because three runs is a rigorous
+benchmark — treat this as one data point per model, on one day, against one
+network's data, not a general ranking.
+
+The trial: a LiteLLM deployment on the local network, proxying `gemma4:e2b`.
+Connection, authentication, and the OpenAI-compatible tool-calling protocol all
+verified working correctly before enabling it — the model returned well-formed
+`tool_calls`, matching schema, when asked to in isolation. Against a real run,
+though, it skipped investigation entirely: one call to the model, straight to
+`submit_analysis`, no use of `query_events`/`get_entity_history`/etc. even
+though the task prompt explicitly instructs investigating before submitting.
+One resulting finding also misread its own cited evidence — it interpreted a
+signal that meant "this host **is** actively forwarding endpoint telemetry" as
+proof monitoring had failed, and used unsupported, alarmist language framing
+("...Persistence") no evidence in the run supported. The anti-fabrication
+guardrail still held throughout — every finding cited a real signal id, nothing
+invented made it past the adjudicator — but a structural guardrail only catches
+"did you cite something real," never "did you correctly interpret what you
+cited." That is model judgment, and there is no code-level substitute for it.
+
+| Model | Provider | Rounds of investigation | Findings | Cost | Investigate stage |
+|---|---|---|---|---|---|
+| `claude-opus-5` | anthropic | 10 model calls | 8, all correctly grounded | $2.83 | ~5.0 min |
+| `claude-sonnet-5` | anthropic | 10 model calls | 2, correctly synthesized (one recurring watchlist item merged into a single finding, not duplicated) | $0.77 | ~3.3 min |
+| `gemma4:e2b` (local, via LiteLLM) | openai_compatible | 1 model call, zero tool use | 4, one materially inaccurate | $0.00 | ~2.4 min |
+
+Sonnet reached fewer findings than Opus on the same kind of window (2 vs. 8,
+on different days' data, so not a like-for-like count) but did so with the same
+number of investigation rounds and at roughly a quarter of the cost — a
+reasonable default for cost-sensitive deployments. The local model's zero cost
+and fast wall-clock time do not offset a report that needs to be read with less
+trust in its own interpretation; if you deploy against a local model, read the
+first several reports it produces closely rather than assuming the guardrails
+alone make it safe to trust unattended, and consider whether the prompt
+(`dawnpatrol/agent/prompts/`) needs strengthening for the specific model you
+chose. No enforcement was added to force tool use before `submit_analysis` -
+a model that has genuinely nothing to investigate should be free to say so;
+the trial above was treated as evidence about this model, not a case for
+adding a structural workaround to compensate for it.
+
 ---
 
 ## Extending it

@@ -384,6 +384,11 @@ class AuthActivityAnalyzer(Analyzer):
         if not total:
             return
         samples = q.sample(n=5, kind=EventKind.IDS, action="detection")
+        # `device` is LibreNMS's numeric device_id (see correlation.py's note on
+        # the same field), not a hostname or IP - dedupe rather than repeat the
+        # same id once per sampled event, and label it for what it actually is
+        # so a reader doesn't mistake "8" for a resolved host identity.
+        device_ids = sorted({row.get("device") for row in samples if row.get("device")})
         r.signals.append(Signal(
             id="endpoint.defender_detection",
             analyzer=self.name,
@@ -391,18 +396,20 @@ class AuthActivityAnalyzer(Analyzer):
             taxonomy="endpoint.malware_detection",
             severity_hint=Severity.HIGH,
             confidence=0.75,
-            entities=[Entity(type=EntityType.HOST, value=row.get("device") or "unknown",
-                            role="host") for row in samples],
+            entities=[Entity(type=EntityType.HOST, value=d, role="host") for d in device_ids],
             evidence={
                 "count": total,
+                "librenms_device_ids": device_ids,
                 "messages": [(row.get("message") or "")[:300] for row in samples],
             },
             narrative_hint=(
                 "Windows Defender does not raise this outside its routine "
-                "health-heartbeat template unless it actually detected "
-                "something. Confirm what was flagged, whether it was removed "
-                "or only quarantined, and whether the same host shows any "
-                "other unusual activity this run."
+                "health-heartbeat and scan-lifecycle templates unless it "
+                "actually detected something. Confirm what was flagged, "
+                "whether it was removed or only quarantined, and whether the "
+                "same host shows any other unusual activity this run. "
+                "librenms_device_ids is a LibreNMS device_id, not a hostname "
+                "or IP - use get_device_directory to resolve it."
             ),
         ))
 

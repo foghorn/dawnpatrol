@@ -77,9 +77,10 @@ class CorrelationAnalyzer(Analyzer):
             elif etype == "host":
                 # In practice the model uses "host" for an internal device
                 # identified by its IP (matched the same way as "ip"), not a
-                # named hostname - Event.device holds a syslog facility code
-                # for this source, never a name, so it is checked too but
-                # only ever adds coverage, never replaces the IP match.
+                # named hostname - Event.device holds LibreNMS's numeric
+                # device_id for this source, never a name, so it is checked
+                # too but only ever adds coverage, never replaces the IP
+                # match.
                 hits = q.count(src_ip=value) + q.count(dst_ip=value) + \
                        q.count(kind=EventKind.DNS, client_ip=value) + \
                        q.count(device=value)

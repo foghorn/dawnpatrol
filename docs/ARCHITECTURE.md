@@ -698,7 +698,7 @@ The agent returns JSON conforming to a schema (`output_config.format`), not pros
 `watchlist_updates`/`watchlist_removals`' `entity_type` is `ip`, `domain`, or `host`. In
 practice the model uses `host` for an internal endpoint it wants to track by address, not
 a named hostname string - `Event.device` is not a hostname field for every source (for
-`librenms_syslog` it holds a syslog facility code), so `correlation.py`'s
+`librenms_syslog` it holds LibreNMS's numeric device_id), so `correlation.py`'s
 `_watchlist_hits()` matches `host` the same way it matches `ip` (`src_ip`/`dst_ip`/DNS
 `client_ip`), checking `Event.device` too only as an additional, harmless path for a
 source that does log real hostnames there.

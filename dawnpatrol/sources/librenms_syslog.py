@@ -133,16 +133,26 @@ _WIN_LOGON_TYPES = {
     "11": "cached",
 }
 
-#: Windows Defender's routine heartbeat templates - "AV is installed and
-#: fine" - as distinct from an actual detection, which uses different wording
-#: entirely. Not observed live (no detection has occurred on this device),
-#: so this is the inverse of a positive match: anything on this program that
-#: is NOT one of these two known-benign templates is treated as a real
-#: detection worth a signal, rather than trying to enumerate every possible
-#: detection wording up front.
+#: Windows Defender's routine templates - health heartbeats and ordinary
+#: scheduled-scan lifecycle - as distinct from an actual detection, which
+#: uses different wording entirely ("...has detected malware...", naming a
+#: specific threat). The scan-lifecycle entries were added after this device
+#: produced its first real ones in production: "scan has started/finished"
+#: (a routine Quick Scan, Scan Trigger: Scheduled maintenance) and "has
+#: removed history of malware and other potentially unwanted software" (a
+#: housekeeping event that clears OLD detection history - notably, none of
+#: these three ever names a specific threat or file path, unlike a real
+#: detection). Initially missing this cost one HIGH-severity false positive
+#: on the very first real (non-heartbeat) data this branch ever saw. This is
+#: the inverse of a positive match: anything NOT matching one of these
+#: known-benign templates is treated as a real detection, rather than trying
+#: to enumerate every possible detection wording up front.
 _DEFENDER_ROUTINE_PREFIXES = (
     "Endpoint Protection client is up and running",
     "Endpoint Protection client health report",
+    "Microsoft Defender Antivirus scan has started",
+    "Microsoft Defender Antivirus scan has finished",
+    "Microsoft Defender Antivirus has removed history of malware",
 )
 
 
