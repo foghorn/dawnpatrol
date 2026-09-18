@@ -658,6 +658,18 @@ def _chunks(items: list[Any], size: int) -> Iterable[list[Any]]:
         yield items[i : i + size]
 
 
+#: Logon actions (Windows or SSH) where `Event.user` is an account name, not
+#: a MAC - see librenms_syslog.py's `_parse_windows_security_audit` and
+#: `_parse_sshd_session`. Tracked as EntityType.USER, separate from the
+#: MAC-shaped EntityType.DEVICE bump below, so novel_clients.py's MAC
+#: novelty and auth_activity.py's new-account novelty never share a bucket.
+#: Windows and SSH accounts share one EntityType.USER namespace, same as
+#: every other entity type in this table is global rather than per-device.
+_ACCOUNT_LOGON_ACTIONS = {"logon_success", "logon_failed", "privileged",
+                          "explicit_creds", "lockout",
+                          "ssh_accepted", "ssh_failed", "ssh_invalid"}
+
+
 def entity_pairs_from_events(events: Iterable[Event]) -> list[tuple[EntityType, str, int]]:
     """Collapse a run's events into entity occurrence counts for the baseline."""
     counts: dict[tuple[EntityType, str], int] = {}
@@ -672,10 +684,13 @@ def entity_pairs_from_events(events: Iterable[Event]) -> list[tuple[EntityType, 
             bump(EntityType.IP, ev.client_ip)
         else:
             bump(EntityType.IP, ev.src_ip)
-        # `user` carries a MAC address on DHCP lease lines and Wi-Fi
-        # deauthentication events (see librenms_syslog.py) - a device
-        # identity that survives DHCP lease renewal, unlike its IP.
-        bump(EntityType.DEVICE, ev.user)
+        if ev.kind == EventKind.AUTH and ev.action in _ACCOUNT_LOGON_ACTIONS:
+            bump(EntityType.USER, ev.user)
+        else:
+            # `user` carries a MAC address on DHCP lease lines and Wi-Fi
+            # deauthentication events (see librenms_syslog.py) - a device
+            # identity that survives DHCP lease renewal, unlike its IP.
+            bump(EntityType.DEVICE, ev.user)
     return [(t, v, c) for (t, v), c in counts.items()]
 
 

@@ -14,7 +14,9 @@ identities:
     A MAC survives DHCP lease renewal where an IP does not, so it catches
     "genuinely new device" without re-flagging an existing device every time
     its lease renews to a fresh address - and without needing any dedicated
-    persistence of its own.
+    persistence of its own. `Event.user` also carries a Windows account name
+    on logon events now (see `auth_activity.py`), so candidates here are
+    shape-validated as MACs before being treated as one.
 
 This is why a device behind a NAT-gated segment (no SNMP inventory, no local
 DNS resolver) still gets caught here even though it never appears in the
@@ -24,6 +26,8 @@ any per-source device list.
 """
 
 from __future__ import annotations
+
+import re
 
 from ..models import (
     AnalyzerResult,
@@ -43,6 +47,12 @@ UNTRUSTED = {"untrusted", "semi-trusted", "dmz", "guest"}
 MAX_CANDIDATES = 500
 MAX_REPORTED_PER_ZONE = 15
 MAC_MAX_REPORTED = 20
+
+#: `Event.user` is overloaded across sources/kinds (a MAC on DHCP/deauth
+#: lines, a Windows account name on logon events - see auth_activity.py) so
+#: the MAC-novelty check below must validate shape before treating a value as
+#: a device identity, not just assume every `user` on these kinds is a MAC.
+_MAC_SHAPE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){5}$")
 
 
 class NovelClientAnalyzer(Analyzer):
@@ -126,7 +136,7 @@ class NovelClientAnalyzer(Analyzer):
         macs = {
             m for m, _n in q.top("user", n=MAX_CANDIDATES,
                                  kind=[str(EventKind.SYSTEM), str(EventKind.AUTH)])
-            if m
+            if m and _MAC_SHAPE.match(m)
         }
         if not macs:
             return

@@ -614,6 +614,22 @@ def test_a_previously_seen_mac_is_not_flagged_again(store, profile, window):
     assert not any(s.taxonomy == "net.novel_device_mac" for s in result.signals)
 
 
+def test_windows_account_name_is_not_treated_as_a_novel_mac(store, profile, window):
+    """Event.user now also carries a Windows account name on AUTH-kind logon
+    events (auth_activity.py) - it must not be swept into MAC-shaped device
+    novelty just because it shares the same column."""
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "novel-not-a-mac"
+    _with_baseline(store, window, run_id)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="nc7", action="logon_success", user="DESKTOP-5K06KTQ$"),
+    ])
+    result = NovelClientAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "net.novel_device_mac" for s in result.signals)
+
+
 # --------------------------------------------------------------------------- #
 # Auth activity: VPN lifecycle + Wi-Fi deauthentication
 # --------------------------------------------------------------------------- #
@@ -717,3 +733,260 @@ def test_deauths_spread_across_the_day_are_not_a_mass_burst(q, profile, baseline
     q.store.insert_events(q.run_id, events)
     result = AuthActivityAnalyzer().run(q, profile, baseline)
     assert not any(s.taxonomy == "auth.mass_deauth_burst" for s in result.signals)
+
+
+# --------------------------------------------------------------------------- #
+# Auth activity: Windows endpoint telemetry (device 8, real production shape)
+# --------------------------------------------------------------------------- #
+
+
+def test_windows_logon_events_produce_a_metric(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="w1", action="logon_success", user="SYSTEM", proto="service"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    by_key = {m.key: m.value for m in result.metrics}
+    assert by_key["auth.windows_logon_events"] == 1
+
+
+def test_windows_new_account_is_flagged(store, profile, window):
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "win-new-account"
+    _with_baseline(store, window, run_id)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="w2", action="logon_success", user="newuser", proto="interactive"),
+    ])
+    result = AuthActivityAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "auth.windows_new_account")
+    assert "newuser" in signal.evidence["accounts"]
+
+
+def test_windows_known_account_is_not_flagged_again(store, profile, window):
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "win-known-account"
+    _with_baseline(store, window, run_id)
+    store.observe_entities([(EntityType.USER, "SYSTEM", 1)], window.start - timedelta(days=30))
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="w3", action="logon_success", user="SYSTEM", proto="service"),
+    ])
+    result = AuthActivityAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "auth.windows_new_account" for s in result.signals)
+
+
+def test_windows_logon_from_external_address_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind, Severity
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="w4", action="logon_success", user="alice", proto="rdp",
+              src_ip="203.0.113.44", src_zone="external"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "auth.windows_external_logon")
+    assert signal.severity_hint == Severity.HIGH
+    assert signal.evidence["src_ip"] == "203.0.113.44"
+
+
+def test_windows_logon_from_internal_address_is_not_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="w5", action="logon_success", user="alice", proto="rdp",
+              src_ip="10.10.0.55", src_zone="lan"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.windows_external_logon" for s in result.signals)
+
+
+def test_windows_service_logon_without_a_source_ip_is_not_flagged_as_external(
+    q, profile, baseline, window
+):
+    """Logon type 5 (service) never carries Source Network Address - it must
+    not be mistaken for a local (and therefore falsely 'internal') remote
+    logon just because src_ip is unset."""
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="w6", action="logon_success", user="SYSTEM", proto="service"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.windows_external_logon" for s in result.signals)
+
+
+def test_windows_logon_failure_burst_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"w7-{i}", action="logon_failed", user="administrator", proto="network")
+        for i in range(6)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "auth.windows_logon_failure_burst")
+    assert signal.evidence["failed_logons"] == 6
+
+
+def test_a_couple_of_windows_logon_failures_is_not_a_burst(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"w8-{i}", action="logon_failed", user="alice", proto="interactive")
+        for i in range(2)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.windows_logon_failure_burst" for s in result.signals)
+
+
+def test_windows_defender_detection_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind, Severity
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.IDS,
+              dedup_key="w9", action="detection", device="8",
+              message="Windows Defender Antivirus has detected malware."),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "endpoint.malware_detection")
+    assert signal.severity_hint == Severity.HIGH
+    assert signal.evidence["count"] == 1
+
+
+def test_windows_defender_health_heartbeat_produces_no_signal(q, profile, baseline, window):
+    """The parser itself already keeps routine health lines out of EventKind.IDS
+    (see test_sources.py) - this confirms the analyzer stays quiet with none."""
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "endpoint.malware_detection" for s in result.signals)
+
+
+# --------------------------------------------------------------------------- #
+# Auth activity: Linux SSH (device 6, real production shape)
+# --------------------------------------------------------------------------- #
+
+
+def test_ssh_events_produce_a_metric_and_do_not_double_count_with_vpn(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="s1", program="SSHD-SESSION", action="ssh_accepted",
+              user="alice", proto="password", src_ip="10.10.0.35"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    by_key = {m.key: m.value for m in result.metrics}
+    assert by_key["auth.ssh_events"] == 1
+    assert "auth.vpn_events" not in by_key
+
+
+def test_ssh_new_account_is_flagged(store, profile, window):
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "ssh-new-account"
+    _with_baseline(store, window, run_id)
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="s2", action="ssh_accepted", user="newuser", proto="password",
+              src_ip="10.10.0.35"),
+    ])
+    result = AuthActivityAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "auth.ssh_new_account")
+    assert "newuser" in signal.evidence["accounts"]
+
+
+def test_ssh_known_account_is_not_flagged_again(store, profile, window):
+    from datetime import timedelta
+
+    from dawnpatrol.models import Event, EventKind
+
+    run_id = "ssh-known-account"
+    _with_baseline(store, window, run_id)
+    store.observe_entities([(EntityType.USER, "alice", 1)], window.start - timedelta(days=30))
+    store.insert_events(run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="s3", action="ssh_accepted", user="alice", proto="password",
+              src_ip="10.10.0.35"),
+    ])
+    result = AuthActivityAnalyzer().run(EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "auth.ssh_new_account" for s in result.signals)
+
+
+def test_ssh_logon_from_external_address_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind, Severity
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="s4", action="ssh_accepted", user="alice", proto="password",
+              src_ip="203.0.113.5", src_zone="external"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "auth.ssh_external_logon")
+    assert signal.severity_hint == Severity.HIGH
+    assert signal.evidence["src_ip"] == "203.0.113.5"
+
+
+def test_ssh_logon_from_internal_address_is_not_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="s5", action="ssh_accepted", user="alice", proto="password",
+              src_ip="10.10.0.35", src_zone="lan"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.ssh_external_logon" for s in result.signals)
+
+
+def test_ssh_failure_burst_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"s6-{i}", action="ssh_failed", user="admin", proto="password",
+              src_ip="203.0.113.5")
+        for i in range(6)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "auth.ssh_failure_burst")
+    assert signal.evidence["failed_attempts"] == 6
+
+
+def test_ssh_failure_burst_mixes_failed_and_invalid_user_counts(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"s7-{i}", action="ssh_invalid", user=f"user{i}", proto=None,
+              src_ip="203.0.113.5")
+        for i in range(5)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert any(s.taxonomy == "auth.ssh_failure_burst" for s in result.signals)
+
+
+def test_a_couple_of_ssh_failures_is_not_a_burst(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"s8-{i}", action="ssh_failed", user="alice", proto="password",
+              src_ip="10.10.0.35")
+        for i in range(2)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.ssh_failure_burst" for s in result.signals)

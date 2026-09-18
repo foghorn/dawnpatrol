@@ -139,6 +139,229 @@ def test_non_firewall_program_becomes_a_system_event(librenms):
 
 
 # --------------------------------------------------------------------------- #
+# Windows Security auditing (device 8, verified against the real feed)
+# --------------------------------------------------------------------------- #
+
+#: Captured verbatim from LibreNMS's /logs/syslog/8 API for a real Windows 11
+#: box's service (SYSTEM) logon - `\011` is literal text in the forwarded
+#: message, not a real tab byte.
+_WIN_SERVICE_LOGON = (
+    "An account was successfully logged on.    Subject:  \\011Security ID:\\011\\011S-1-5-18  "
+    "\\011Account Name:\\011\\011DESKTOP-5K06KTQ$  \\011Account Domain:\\011\\011WORKGROUP  "
+    "\\011Logon ID:\\011\\0110x3E7    Logon Information:  \\011Logon Type:\\011\\0115  "
+    "\\011Restricted Admin Mode:\\011-  \\011Elevated Token:\\011\\011Yes    New Logon:  "
+    "\\011Security ID:\\011\\011S-1-5-18  \\011Account Name:\\011\\011SYSTEM  "
+    "\\011Account Domain:\\011\\011NT AUTHORITY  \\011Logon ID:\\011\\0110x3E7    "
+    "Process Information:  \\011Process ID:\\011\\0110x44c  "
+    "\\011Process Name:\\011\\011C:\\\\Windows\\\\System32\\\\services.exe    "
+    "Network Information:  \\011Workstation Name:\\011-  \\011Source Network Address:\\011-  "
+    "\\011Source Port:\\011\\011-    Detailed Authentication Information:  "
+    "\\011Logon Process:\\011\\011Advapi"
+)
+
+_WIN_PRIVILEGED_LOGON = (
+    "Special privileges assigned to new logon.    Subject:  \\011Security ID:\\011\\011S-1-5-18  "
+    "\\011Account Name:\\011\\011SYSTEM  \\011Account Domain:\\011\\011NT AUTHORITY  "
+    "\\011Logon ID:\\011\\0110x3E7    Privileges:\\011\\011SeDebugPrivilege"
+)
+
+
+def test_windows_security_audit_service_logon(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-SECURITY-AUDIT",
+             "seq": 10, "msg": _WIN_SERVICE_LOGON}
+    ev = librenms._normalize(entry, "8")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "logon_success"
+    assert ev.user == "SYSTEM"          # New Logon's account, not Subject's
+    assert ev.proto == "service"        # logon type 5
+    assert ev.src_ip is None            # "Source Network Address: -"
+
+
+def test_windows_security_audit_privileged_logon(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-SECURITY-AUDIT",
+             "seq": 11, "msg": _WIN_PRIVILEGED_LOGON}
+    ev = librenms._normalize(entry, "8")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "privileged"
+    assert ev.user == "SYSTEM"
+
+
+def test_windows_security_audit_network_logon_captures_source_ip(librenms):
+    """Structurally identical to the real service-logon template above, with
+    a populated Network Information block - the shape a real RDP/network
+    logon takes, not yet observed live but built from the same stable
+    Microsoft template."""
+    msg = (
+        "An account was successfully logged on.    Subject:  \\011Security ID:\\011\\011S-1-5-18  "
+        "\\011Account Name:\\011\\011DESKTOP-5K06KTQ$  \\011Account Domain:\\011\\011WORKGROUP    "
+        "Logon Information:  \\011Logon Type:\\011\\01110    New Logon:  "
+        "\\011Security ID:\\011\\011S-1-5-21  \\011Account Name:\\011\\011alice  "
+        "\\011Account Domain:\\011\\011DESKTOP-5K06KTQ    Network Information:  "
+        "\\011Workstation Name:\\011WORKSTATION1  "
+        "\\011Source Network Address:\\011203.0.113.44  \\011Source Port:\\01151412"
+    )
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-SECURITY-AUDIT",
+             "seq": 12, "msg": msg}
+    ev = librenms._normalize(entry, "8")
+    assert ev.action == "logon_success"
+    assert ev.user == "alice"
+    assert ev.proto == "rdp"            # logon type 10
+    assert ev.src_ip == "203.0.113.44"
+    assert ev.src_zone == "external"
+
+
+def test_windows_security_audit_failed_logon_uses_the_target_account(librenms):
+    """A failure event's Subject is usually SYSTEM too - the account that
+    matters is under "Account For Which Logon Failed:", not the first
+    "Account Name" in the message."""
+    msg = (
+        "An account failed to log on.    Subject:  \\011Security ID:\\011\\011S-1-5-18  "
+        "\\011Account Name:\\011\\011DESKTOP-5K06KTQ$  \\011Account Domain:\\011\\011WORKGROUP    "
+        "Account For Which Logon Failed:  \\011Security ID:\\011\\011S-1-0-0  "
+        "\\011Account Name:\\011\\011administrator  \\011Account Domain:\\011\\011DESKTOP-5K06KTQ    "
+        "Logon Type:\\011\\0113    Network Information:  "
+        "\\011Source Network Address:\\011198.51.100.9  \\011Source Port:\\01133441"
+    )
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-SECURITY-AUDIT",
+             "seq": 13, "msg": msg}
+    ev = librenms._normalize(entry, "8")
+    assert ev.action == "logon_failed"
+    assert ev.user == "administrator"
+    assert ev.proto == "network"
+    assert ev.src_ip == "198.51.100.9"
+
+
+def test_windows_defender_health_report_is_not_a_detection(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-WINDOWS_DEFEND",
+        "seq": 14,
+        "msg": "Endpoint Protection client is up and running in a healthy state.",
+    }
+    assert librenms._normalize(entry, "8").kind == EventKind.SYSTEM
+
+
+def test_windows_defender_detection_is_flagged(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-WINDOWS_DEFEND",
+        "seq": 15,
+        "msg": ("Windows Defender Antivirus has detected malware or other "
+                "potentially unwanted software."),
+    }
+    ev = librenms._normalize(entry, "8")
+    assert ev.kind == EventKind.IDS
+    assert ev.action == "detection"
+
+
+# --------------------------------------------------------------------------- #
+# Linux SSH auth (device 6, verified against the real feed)
+# --------------------------------------------------------------------------- #
+
+
+def test_ssh_accepted_password_captures_account_and_source(librenms):
+    """Verbatim shape from LibreNMS's /logs/syslog/6 for a real login on this
+    session's own Fedora host."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 20,
+        "msg": "Accepted password for alice from 10.10.0.35 port 62404 ssh2",
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "ssh_accepted"
+    assert ev.user == "alice"
+    assert ev.src_ip == "10.10.0.35"
+    assert ev.src_port == 62404
+    assert ev.proto == "password"
+
+
+def test_ssh_accepted_publickey_is_parsed_with_trailing_fingerprint(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 21,
+        "msg": ("Accepted publickey for alice from 10.10.0.35 port 62404 ssh2: "
+                "RSA SHA256:abc123"),
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.action == "ssh_accepted"
+    assert ev.proto == "publickey"
+
+
+def test_ssh_failed_password_captures_account_and_source(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 22,
+        "msg": "Failed password for alice from 203.0.113.5 port 41123 ssh2",
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.action == "ssh_failed"
+    assert ev.user == "alice"
+    assert ev.src_ip == "203.0.113.5"
+
+
+def test_ssh_failed_password_for_invalid_user_still_captures_the_attempted_name(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 23,
+        "msg": "Failed password for invalid user admin from 203.0.113.5 port 41123 ssh2",
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.action == "ssh_failed"
+    assert ev.user == "admin"
+
+
+def test_ssh_invalid_user_without_a_password_attempt_is_captured(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 24,
+        "msg": "Invalid user admin from 203.0.113.5 port 41123",
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "ssh_invalid"
+    assert ev.user == "admin"
+    assert ev.src_ip == "203.0.113.5"
+
+
+def test_ssh_session_opened_strips_the_uid_suffix(librenms):
+    """Verbatim shape from the real feed: no space between the account name
+    and its "(uid=N)" annotation."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 25,
+        "msg": "pam_unix(sshd:session): session opened for user alice(uid=1000) by alice(uid=0)",
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "session_open"
+    assert ev.user == "alice"
+
+
+def test_ssh_session_closed_is_captured(librenms):
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 26,
+        "msg": "pam_unix(sshd:session): session closed for user alice",
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.action == "session_close"
+    assert ev.user == "alice"
+
+
+def test_ssh_disconnect_lines_are_not_parsed_as_a_session_event(librenms):
+    """Deliberately out of scope - see _parse_sshd_session's docstring."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 27,
+        "msg": "Received disconnect from 10.10.0.35 port 62404:11: disconnected by user",
+    }
+    assert librenms._normalize(entry, "6").kind == EventKind.SYSTEM
+
+
+def test_sshd_program_variant_without_the_session_suffix_is_also_parsed(librenms):
+    """Older, non-systemd-managed OpenSSH logs this program tag as plain
+    "SSHD" - it must not be swallowed by the VPN-lifecycle-noise branch."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "SSHD", "seq": 28,
+        "msg": "Accepted password for alice from 10.10.0.35 port 62404 ssh2",
+    }
+    ev = librenms._normalize(entry, "6")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "ssh_accepted"
+
+
+# --------------------------------------------------------------------------- #
 # DHCP lease parsing
 # --------------------------------------------------------------------------- #
 

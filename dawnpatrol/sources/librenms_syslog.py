@@ -113,6 +113,96 @@ def _parse_dhcp(message: str) -> dict[str, Any] | None:
     return {"verb": verb, "ip": ip, "mac": mac, "hostname": hostname}
 
 
+#: Windows Security auditing lines, forwarded as the full rendered event text
+#: (not structured XML) by whatever agent is shipping this device's syslog.
+#: Confirmed against the real feed (device 8, a Windows 11 box): fields are
+#: "Label:" followed by one or two literal `\011` escapes (not real tab
+#: bytes - this forwarder writes the octal escape as text) then the value,
+#: blocks separated by two-or-more spaces. Classification is by the event's
+#: fixed leading sentence - Microsoft's canned templates for these EventIDs
+#: (4624/4625/4672/4648/4740) are stable across Windows versions, so matching
+#: the sentence is as reliable as matching a numeric EventID would be, and
+#: this forwarder does not expose the numeric ID at all.
+_WIN_FIELD_SEP = r"(?:\\011)+\s*"
+
+#: Numeric Windows logon type -> short label. Kept to fit the `proto` column
+#: (see _parse_windows_security_audit for why that column, of all of them).
+_WIN_LOGON_TYPES = {
+    "2": "interactive", "3": "network", "4": "batch", "5": "service",
+    "7": "unlock", "8": "net_clear", "9": "new_cred", "10": "rdp",
+    "11": "cached",
+}
+
+#: Windows Defender's routine heartbeat templates - "AV is installed and
+#: fine" - as distinct from an actual detection, which uses different wording
+#: entirely. Not observed live (no detection has occurred on this device),
+#: so this is the inverse of a positive match: anything on this program that
+#: is NOT one of these two known-benign templates is treated as a real
+#: detection worth a signal, rather than trying to enumerate every possible
+#: detection wording up front.
+_DEFENDER_ROUTINE_PREFIXES = (
+    "Endpoint Protection client is up and running",
+    "Endpoint Protection client health report",
+)
+
+
+def _win_field(section: str, label: str) -> str | None:
+    """One labelled value out of a Windows Security audit message, or None
+    if absent or rendered as "-" (Microsoft's own placeholder for "not
+    applicable to this logon", e.g. Source Network Address on a local
+    service logon)."""
+    m = re.search(rf"{re.escape(label)}:{_WIN_FIELD_SEP}([^\s].*?)(?=\s{{2,}}\S|\Z)", section)
+    if not m:
+        return None
+    value = m.group(1).strip()
+    return value if value and value != "-" else None
+
+
+def _win_account(message: str) -> str | None:
+    """The account the logon is *about*, not the Subject requesting it (for
+    a service logon Subject is almost always SYSTEM/services.exe, which is
+    not useful to track) - so search from the "New Logon" or "Account For
+    Which Logon Failed" marker first, and only fall back to the first
+    "Account Name" in the whole message if neither is present."""
+    for marker in ("Account For Which Logon Failed:", "New Logon:"):
+        idx = message.find(marker)
+        if idx != -1:
+            name = _win_field(message[idx:], "Account Name")
+            if name:
+                return name
+    return _win_field(message, "Account Name")
+
+
+def _parse_windows_defender(message: str, common: dict[str, Any]) -> Event | None:
+    if message.startswith(_DEFENDER_ROUTINE_PREFIXES):
+        return None
+    return Event(kind=EventKind.IDS, action="detection", **common)
+
+
+#: Classic OpenSSH auth-outcome lines, unchanged across decades of versions -
+#: confirmed against the real feed (device 6, this session's own Fedora
+#: host): "Accepted password for alice from 10.128.10.35 port 62404 ssh2"
+#: and the pam_unix session lines. "Failed"/"Invalid user" were not observed
+#: live in this deployment (no brute-force attempt has happened), built from
+#: the same universally-stable format instead. IPv4 only, deliberately -
+#: an IPv6 source simply will not populate src_ip, rather than risk a loose
+#: pattern matching something it should not.
+_SSH_IPV4 = r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3})"
+_SSH_ACCEPTED_RE = re.compile(
+    rf"^Accepted (?P<method>\S+) for (?P<user>\S+) from {_SSH_IPV4} port (?P<port>\d+)")
+_SSH_FAILED_RE = re.compile(
+    rf"^Failed (?P<method>\S+) for (?:invalid user )?(?P<user>\S+) from {_SSH_IPV4} "
+    rf"port (?P<port>\d+)")
+_SSH_INVALID_USER_RE = re.compile(rf"^Invalid user (?P<user>\S+) from {_SSH_IPV4}")
+_SSH_SESSION_OPEN_RE = re.compile(r"session opened for user (?P<user>[^\s(]+)")
+_SSH_SESSION_CLOSE_RE = re.compile(r"session closed for user (?P<user>[^\s(]+)")
+
+#: Auth method -> short label, to fit the `proto` column (same reuse as
+#: Windows logon type - see _parse_windows_security_audit).
+_SSH_METHODS = {"password": "password", "publickey": "publickey", "none": "none",
+                "keyboard-interactive": "kbdint", "keyboard-interactive/pam": "kbdint"}
+
+
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -389,7 +479,9 @@ class LibreNMSSyslogSource(Source):
         # line. Still classified AUTH so a real deployment that does forward
         # per-session lines is picked up automatically; see auth_activity.py's
         # docstring for what this means for VPN-specific analysis today.
-        if program.startswith("VPNSERVER") or program in {"OPENVPN", "SSHD", "PPTPD"}:
+        # SSHD is deliberately not in this set - it gets its own real parser
+        # below (_parse_sshd_session), not blanket lifecycle-noise treatment.
+        if program.startswith("VPNSERVER") or program in {"OPENVPN", "PPTPD"}:
             return Event(kind=EventKind.AUTH, **common)
 
         # Wi-Fi deauthentication: real device-authentication evidence this
@@ -416,7 +508,111 @@ class LibreNMSSyslogSource(Source):
                     **common,
                 )
 
+        # Windows Security auditing: real per-account authentication evidence
+        # for any device with Windows logs forwarded here (see device
+        # directory / profile for which). `.startswith` rather than `==`
+        # because the syslog `program` field is truncated to ~32 chars and
+        # this program name is right at that boundary on some builds.
+        if program.startswith("MICROSOFT-WINDOWS-SECURITY-AUDIT"):
+            ev = self._parse_windows_security_audit(message, common)
+            if ev is not None:
+                return ev
+
+        if program.startswith("MICROSOFT-WINDOWS-WINDOWS_DEFEND"):
+            ev = _parse_windows_defender(message, common)
+            if ev is not None:
+                return ev
+
+        # Classic OpenSSH auth lines - "SSHD-SESSION" on newer systemd-managed
+        # builds (confirmed live, device 6), plain "SSHD" on older ones.
+        if program.startswith("SSHD"):
+            ev = self._parse_sshd_session(message, common)
+            if ev is not None:
+                return ev
+
         return Event(kind=EventKind.SYSTEM, **common)
+
+    def _parse_windows_security_audit(self, message: str,
+                                      common: dict[str, Any]) -> Event | None:
+        """Classify by the event's fixed leading sentence - see _WIN_FIELD_SEP's
+        docstring for why that is reliable here. The lockout/explicit-credential
+        branches are unverified against this deployment's real data (neither has
+        occurred), built from Microsoft's documented, stable event templates
+        instead - if the field markers below ever don't match a real one of
+        these, the generic Account Name fallback still gets *something* rather
+        than nothing."""
+        if message.startswith("An account was successfully logged on"):
+            action, account = "logon_success", _win_account(message)
+        elif message.startswith("An account failed to log on"):
+            action, account = "logon_failed", _win_account(message)
+        elif message.startswith("Special privileges assigned to new logon"):
+            action, account = "privileged", _win_field(message, "Account Name")
+        elif message.startswith("A logon was attempted using explicit credentials"):
+            action = "explicit_creds"
+            idx = message.find("Account Whose Credentials Were Used:")
+            account = _win_field(message[idx:], "Account Name") if idx != -1 else None
+        elif message.startswith("A user account was locked out"):
+            action = "lockout"
+            idx = message.find("Account That Was Locked Out:")
+            account = _win_field(message[idx:], "Account Name") if idx != -1 else None
+        else:
+            return None
+
+        logon_type = _win_field(message, "Logon Type")
+        src_ip = _win_field(message, "Source Network Address")
+        kwargs: dict[str, Any] = {
+            **common,
+            "kind": EventKind.AUTH,
+            "action": action,
+            "user": account,
+            # `proto` has no meaning for an AUTH event; repurposed to carry the
+            # logon type (interactive/network/service/rdp/...) the same way
+            # `user` carries a MAC for Wi-Fi deauth above - both are "the one
+            # extra classifier this event type needs" borrowing a column that
+            # is otherwise always empty for this kind.
+            "proto": _WIN_LOGON_TYPES.get(logon_type) if logon_type else None,
+        }
+        if src_ip:
+            kwargs.update(self.assign_zones(src_ip=src_ip))
+        return Event(**kwargs)
+
+    def _parse_sshd_session(self, message: str, common: dict[str, Any]) -> Event | None:
+        """session_open/close are parsed for structure but excluded from the
+        auth-outcome metric in auth_activity.py - every accepted login also
+        produces a session_open line, and counting both would double the
+        headline number for the same event."""
+        if m := _SSH_ACCEPTED_RE.match(message):
+            action = "ssh_accepted"
+        elif m := _SSH_FAILED_RE.match(message):
+            action = "ssh_failed"
+        else:
+            m = None
+
+        if m:
+            kwargs: dict[str, Any] = {
+                **common, "kind": EventKind.AUTH, "action": action,
+                "user": m.group("user"),
+                "src_port": _as_int(m.group("port")),
+                "proto": _SSH_METHODS.get(m.group("method"), m.group("method")[:16]),
+            }
+            kwargs.update(self.assign_zones(src_ip=m.group("ip")))
+            return Event(**kwargs)
+
+        if m := _SSH_INVALID_USER_RE.match(message):
+            kwargs = {**common, "kind": EventKind.AUTH, "action": "ssh_invalid",
+                     "user": m.group("user")}
+            kwargs.update(self.assign_zones(src_ip=m.group("ip")))
+            return Event(**kwargs)
+
+        if m := _SSH_SESSION_OPEN_RE.search(message):
+            return Event(kind=EventKind.AUTH, action="session_open",
+                        user=m.group("user"), **common)
+
+        if m := _SSH_SESSION_CLOSE_RE.search(message):
+            return Event(kind=EventKind.AUTH, action="session_close",
+                        user=m.group("user"), **common)
+
+        return None
 
     # ----- differential probes -------------------------------------------------- #
 

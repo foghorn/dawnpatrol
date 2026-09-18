@@ -21,6 +21,32 @@ Two checks here: one device deauthenticating far more than its peers
 client), and a mass-deauth burst across many distinct devices in a short
 window (the signature of a deauthentication-flood attack against the AP
 itself, not any one client).
+
+Windows endpoint telemetry: any device forwarding Windows Security auditing
+to this deployment's syslog collector (confirmed live against device 8,
+`10.128.15.135`) gets real per-account logon evidence -
+`librenms_syslog._parse_windows_security_audit` turns the rendered event text
+into `EventKind.AUTH` with `user` as the account and `proto` repurposed to
+carry the logon type (interactive/network/rdp/service/...). Four checks:
+a never-seen-before account authenticating on the host, a successful logon
+whose source address is outside this network, a burst of logon failures
+(structurally ready, unverified against real data - none have occurred on
+device 8 yet), and a Windows Defender detection (`EventKind.IDS`, the first
+consumer of that kind) - which is near-binary in value, since the source only
+emits it outside its routine health-heartbeat template when something was
+actually flagged.
+
+Linux SSH: classic OpenSSH auth lines - "Accepted"/"Failed"/"Invalid user",
+unchanged in format across decades of versions - confirmed live against
+device 6 (this session's own Fedora host), which produces ~150k syslog
+lines/day, 63% of it `AUDIT type=BPF` noise this file deliberately does not
+touch. `librenms_syslog._parse_sshd_session` turns the auth-outcome lines
+into the same `EventKind.AUTH` shape as Windows logons (`user` = account,
+`proto` = auth method). Three checks, symmetric to the Windows ones: a new
+account authenticating over SSH, a successful logon from outside this
+network, and a burst of failed/invalid-user attempts - the single most
+standard brute-force signature there is, though none had occurred on this
+device as of when this was built.
 """
 
 from __future__ import annotations
@@ -35,7 +61,10 @@ from .base import Analyzer
 from .baseline import Baseline
 
 #: Programs whose AUTH events are VPN-daemon lifecycle noise, not sessions.
-_VPN_EXACT = {"OPENVPN", "SSHD", "PPTPD"}
+#: SSHD is deliberately excluded - it has real per-session parsing now (see
+#: librenms_syslog._parse_sshd_session and _ssh_logons below); counting it
+#: here too would double-count the same events under two metrics.
+_VPN_EXACT = {"OPENVPN", "PPTPD"}
 _VPN_RESTART_MULTIPLE = 3.0
 _VPN_RESTART_FLOOR = 30
 
@@ -46,16 +75,36 @@ _MASS_DEAUTH_WINDOW = timedelta(minutes=5)
 _MASS_DEAUTH_MIN_DISTINCT_MACS = 6
 _SAMPLE_LIMIT = 4000
 
+#: Keep in sync with librenms_syslog._parse_windows_security_audit's `action`
+#: values and store.py's _ACCOUNT_LOGON_ACTIONS.
+_WINDOWS_LOGON_ACTIONS = ["logon_success", "logon_failed", "privileged",
+                         "explicit_creds", "lockout"]
+#: Logon types that carry a real source address - see _WIN_LOGON_TYPES in
+#: librenms_syslog.py. "service"/"batch"/"unlock"/"cached" are local, not
+#: remote, and never populate Source Network Address anyway.
+_REMOTE_LOGON_TYPES = {"network", "rdp", "net_clear"}
+_LOGON_FAILURE_BURST_MIN = 5
+_WINDOWS_SAMPLE_LIMIT = 500
+
+#: Keep in sync with librenms_syslog._parse_sshd_session's `action` values.
+_SSH_AUTH_ACTIONS = ["ssh_accepted", "ssh_failed", "ssh_invalid"]
+_SSH_FAILURE_ACTIONS = ["ssh_failed", "ssh_invalid"]
+_SSH_FAILURE_BURST_MIN = 5
+_SSH_SAMPLE_LIMIT = 500
+
 
 class AuthActivityAnalyzer(Analyzer):
     name = "auth_activity"
-    requires_kinds = frozenset({EventKind.AUTH})
+    requires_kinds = frozenset({EventKind.AUTH, EventKind.IDS})
     order = 45
 
     def run(self, q: EventQuery, profile: Profile, baseline: Baseline) -> AnalyzerResult:
         r = AnalyzerResult(analyzer=self.name)
         self._vpn(q, r, baseline)
         self._deauth(q, r)
+        self._windows_logons(q, r, baseline, profile)
+        self._windows_defender(q, r)
+        self._ssh_logons(q, r, baseline, profile)
         return r
 
     # ----- VPN: service-level only, no per-session data available ------------- #
@@ -213,5 +262,257 @@ class AuthActivityAnalyzer(Analyzer):
                 "reboot, a channel change, or a firmware update looks like. "
                 "Correlate with router restarts or config changes before "
                 "treating this as an attack."
+            ),
+        ))
+
+    # ----- Windows endpoint: real per-account logon evidence ------------------ #
+
+    def _windows_logons(self, q: EventQuery, r: AnalyzerResult,
+                        baseline: Baseline, profile: Profile) -> None:
+        total = q.count(kind=EventKind.AUTH, action=_WINDOWS_LOGON_ACTIONS)
+        if not total:
+            return
+        r.metrics.append(Metric(
+            key="auth.windows_logon_events", value=total, section="router",
+            label="Windows logon/audit events",
+        ))
+        self._windows_new_account(q, r, baseline)
+        self._windows_remote_logon(q, r, profile)
+        self._windows_logon_failures(q, r)
+
+    def _windows_new_account(self, q: EventQuery, r: AnalyzerResult,
+                             baseline: Baseline) -> None:
+        if not baseline.has_baseline():
+            return
+        accounts = {a for a in q.distinct_values("user", kind=EventKind.AUTH,
+                                                  action=_WINDOWS_LOGON_ACTIONS) if a}
+        novel = baseline.novel(EntityType.USER, sorted(accounts))
+        if not novel:
+            return
+        r.signals.append(Signal(
+            id="auth.windows_new_account",
+            analyzer=self.name,
+            title=f"{len(novel)} account(s) logged on to a Windows host for the first time",
+            taxonomy="auth.windows_new_account",
+            severity_hint=Severity.MEDIUM,
+            confidence=0.55,
+            entities=[Entity(type=EntityType.USER, value=a, role="account")
+                     for a in sorted(novel)[:10]],
+            evidence={"accounts": sorted(novel)[:20]},
+            narrative_hint=(
+                "A never-seen-before account authenticating is routine the first "
+                "time this analyzer ever runs against a device, and routine "
+                "again for a legitimate new service or user account - but on a "
+                "single-purpose or single-user host it is exactly what an "
+                "unauthorized local account would look like too. Check whether "
+                "this account is expected before dismissing it."
+            ),
+        ))
+
+    def _windows_remote_logon(self, q: EventQuery, r: AnalyzerResult,
+                              profile: Profile) -> None:
+        rows = q.sample(n=_WINDOWS_SAMPLE_LIMIT, kind=EventKind.AUTH, action="logon_success")
+        external: dict[str, dict] = {}
+        for row in rows:
+            src_ip, logon_type = row.get("src_ip"), row.get("proto")
+            if not src_ip or logon_type not in _REMOTE_LOGON_TYPES:
+                continue
+            if profile.is_internal(src_ip):
+                continue
+            external.setdefault(src_ip, row)
+        for src_ip, row in sorted(external.items()):
+            r.signals.append(Signal(
+                id=f"auth.windows_external_logon.{src_ip}",
+                analyzer=self.name,
+                title=f"Windows logon accepted from external address {src_ip}",
+                taxonomy="auth.windows_external_logon",
+                severity_hint=Severity.HIGH,
+                confidence=0.7,
+                entities=[
+                    Entity(type=EntityType.IP, value=src_ip, role="source"),
+                    Entity(type=EntityType.USER, value=row.get("user") or "unknown",
+                          role="account"),
+                ],
+                evidence={
+                    "src_ip": src_ip, "account": row.get("user"),
+                    "logon_type": row.get("proto"), "device": row.get("device"),
+                },
+                narrative_hint=(
+                    "A successful Windows logon whose source address is outside "
+                    "this network is either an authorised remote-access path (a "
+                    "VPN terminating locally before RDP, a jump host) or a "
+                    "genuinely external logon reaching this host directly - "
+                    "confirm which before treating it as routine. Unlike "
+                    "perimeter scanning, this has no innocent default "
+                    "explanation."
+                ),
+            ))
+
+    def _windows_logon_failures(self, q: EventQuery, r: AnalyzerResult) -> None:
+        """Structurally ready, not yet verified against real data - no failed
+        Windows logon has occurred on any forwarding device so far. Reporting
+        that plainly (by simply not firing) is correct; this exists for the
+        day it does."""
+        total = q.count(kind=EventKind.AUTH, action="logon_failed")
+        if total < _LOGON_FAILURE_BURST_MIN:
+            return
+        by_account = q.top("user", n=10, kind=EventKind.AUTH, action="logon_failed")
+        r.signals.append(Signal(
+            id="auth.windows_logon_failure_burst",
+            analyzer=self.name,
+            title=f"{total} failed Windows logon(s) this run",
+            taxonomy="auth.windows_logon_failure_burst",
+            severity_hint=Severity.MEDIUM,
+            confidence=0.5,
+            entities=[Entity(type=EntityType.USER, value=a, role="account")
+                     for a, _n in by_account],
+            evidence={"failed_logons": total, "by_account": by_account},
+            narrative_hint=(
+                "A cluster of failed Windows logons is the shape of a "
+                "brute-force or password-spray attempt, but is also what a "
+                "stale saved credential or a mistyped password produces. Check "
+                "whether failures concentrate on one account (targeted) or "
+                "spread across many (spray), and whether a later logon from "
+                "the same source succeeded."
+            ),
+        ))
+
+    # ----- Windows endpoint: AV detections -------------------------------------- #
+
+    def _windows_defender(self, q: EventQuery, r: AnalyzerResult) -> None:
+        total = q.count(kind=EventKind.IDS, action="detection")
+        if not total:
+            return
+        samples = q.sample(n=5, kind=EventKind.IDS, action="detection")
+        r.signals.append(Signal(
+            id="endpoint.defender_detection",
+            analyzer=self.name,
+            title=f"Windows Defender reported {total} detection event(s)",
+            taxonomy="endpoint.malware_detection",
+            severity_hint=Severity.HIGH,
+            confidence=0.75,
+            entities=[Entity(type=EntityType.HOST, value=row.get("device") or "unknown",
+                            role="host") for row in samples],
+            evidence={
+                "count": total,
+                "messages": [(row.get("message") or "")[:300] for row in samples],
+            },
+            narrative_hint=(
+                "Windows Defender does not raise this outside its routine "
+                "health-heartbeat template unless it actually detected "
+                "something. Confirm what was flagged, whether it was removed "
+                "or only quarantined, and whether the same host shows any "
+                "other unusual activity this run."
+            ),
+        ))
+
+    # ----- Linux SSH: real per-account, per-source auth evidence --------------- #
+
+    def _ssh_logons(self, q: EventQuery, r: AnalyzerResult,
+                    baseline: Baseline, profile: Profile) -> None:
+        total = q.count(kind=EventKind.AUTH, action=_SSH_AUTH_ACTIONS)
+        if not total:
+            return
+        r.metrics.append(Metric(
+            key="auth.ssh_events", value=total, section="router",
+            label="SSH authentication events",
+        ))
+        self._ssh_new_account(q, r, baseline)
+        self._ssh_external_logon(q, r, profile)
+        self._ssh_failure_burst(q, r)
+
+    def _ssh_new_account(self, q: EventQuery, r: AnalyzerResult, baseline: Baseline) -> None:
+        if not baseline.has_baseline():
+            return
+        accounts = {a for a in q.distinct_values("user", kind=EventKind.AUTH,
+                                                  action="ssh_accepted") if a}
+        novel = baseline.novel(EntityType.USER, sorted(accounts))
+        if not novel:
+            return
+        r.signals.append(Signal(
+            id="auth.ssh_new_account",
+            analyzer=self.name,
+            title=f"{len(novel)} account(s) authenticated over SSH for the first time",
+            taxonomy="auth.ssh_new_account",
+            severity_hint=Severity.MEDIUM,
+            confidence=0.55,
+            entities=[Entity(type=EntityType.USER, value=a, role="account")
+                     for a in sorted(novel)[:10]],
+            evidence={"accounts": sorted(novel)[:20]},
+            narrative_hint=(
+                "A never-seen-before account logging in over SSH is routine "
+                "the first time this analyzer runs, and routine again for a "
+                "legitimate new user - but on a host with a small, known set "
+                "of SSH users it is exactly what a newly created or "
+                "compromised-then-repurposed account would look like too. "
+                "Check whether this account is expected."
+            ),
+        ))
+
+    def _ssh_external_logon(self, q: EventQuery, r: AnalyzerResult, profile: Profile) -> None:
+        rows = q.sample(n=_SSH_SAMPLE_LIMIT, kind=EventKind.AUTH, action="ssh_accepted")
+        external: dict[str, dict] = {}
+        for row in rows:
+            src_ip = row.get("src_ip")
+            if not src_ip or profile.is_internal(src_ip):
+                continue
+            external.setdefault(src_ip, row)
+        for src_ip, row in sorted(external.items()):
+            r.signals.append(Signal(
+                id=f"auth.ssh_external_logon.{src_ip}",
+                analyzer=self.name,
+                title=f"SSH logon accepted from external address {src_ip}",
+                taxonomy="auth.ssh_external_logon",
+                severity_hint=Severity.HIGH,
+                confidence=0.7,
+                entities=[
+                    Entity(type=EntityType.IP, value=src_ip, role="source"),
+                    Entity(type=EntityType.USER, value=row.get("user") or "unknown",
+                          role="account"),
+                ],
+                evidence={
+                    "src_ip": src_ip, "account": row.get("user"),
+                    "method": row.get("proto"), "device": row.get("device"),
+                },
+                narrative_hint=(
+                    "A successful SSH logon from outside this network is "
+                    "either an intentionally exposed/port-forwarded service, "
+                    "an authorised remote-access path, or unauthorised access "
+                    "reaching this host directly - confirm which. Unlike "
+                    "perimeter scanning, an *accepted* external SSH session "
+                    "has no innocent default explanation."
+                ),
+            ))
+
+    def _ssh_failure_burst(self, q: EventQuery, r: AnalyzerResult) -> None:
+        """The single most standard brute-force signature there is - not yet
+        observed on this device (no attempt has occurred), but the format is
+        universal enough across OpenSSH versions to build confidently ahead
+        of the first real one."""
+        total = q.count(kind=EventKind.AUTH, action=_SSH_FAILURE_ACTIONS)
+        if total < _SSH_FAILURE_BURST_MIN:
+            return
+        by_source = q.top("src_ip", n=10, kind=EventKind.AUTH, action=_SSH_FAILURE_ACTIONS)
+        by_account = q.top("user", n=10, kind=EventKind.AUTH, action=_SSH_FAILURE_ACTIONS)
+        r.signals.append(Signal(
+            id="auth.ssh_failure_burst",
+            analyzer=self.name,
+            title=f"{total} failed/invalid SSH logon attempt(s) this run",
+            taxonomy="auth.ssh_failure_burst",
+            severity_hint=Severity.MEDIUM,
+            confidence=0.6,
+            entities=[Entity(type=EntityType.IP, value=ip, role="source")
+                     for ip, _n in by_source[:10] if ip],
+            evidence={
+                "failed_attempts": total, "by_source": by_source, "by_account": by_account,
+            },
+            narrative_hint=(
+                "A cluster of failed or invalid-user SSH attempts is the "
+                "classic shape of brute-force scanning. Many distinct "
+                "attempted usernames from one source is automated scanning; "
+                "many attempts against one real account is a targeted "
+                "attempt. Check whether any later logon from the same "
+                "source succeeded, and whether this host's SSH port is "
+                "reachable from anywhere it should not be."
             ),
         ))
