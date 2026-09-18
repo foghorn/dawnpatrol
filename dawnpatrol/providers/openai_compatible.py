@@ -7,6 +7,27 @@ in small ways and a thin client is easier to accommodate than a strict one.
 
 Set ``DAWNPATROL_AI_PROVIDER=openai_compatible`` and ``DAWNPATROL_AI_BASE_URL`` to
 the server root (the ``/v1`` suffix is added when absent).
+
+Two settings exist only because newer OpenAI reasoning models (the gpt-5.x
+line, confirmed live against ``gpt-5.6-sol``) are not drop-in compatible with
+older OpenAI-compatible servers on this same endpoint shape:
+
+* ``DAWNPATROL_AI_MAX_TOKENS_PARAM`` (default ``max_tokens``) - these models
+  reject ``max_tokens`` outright ("Unsupported parameter... Use
+  'max_completion_tokens' instead"). Most other backends on this endpoint
+  (Ollama, LM Studio, vLLM, llama.cpp, LiteLLM, older OpenAI models) still
+  expect ``max_tokens`` and may not recognize the newer name, so this is
+  configurable per deployment rather than guessed or auto-detected.
+* ``DAWNPATROL_AI_REASONING_EFFORT`` (unset by default) - these models refuse
+  function tools on ``/v1/chat/completions`` entirely unless this is
+  explicitly ``none`` ("Function tools with reasoning_effort are not
+  supported... use /v1/responses or set reasoning_effort to 'none'" is the
+  server's own error text). Since this pipeline requires tool calling, a
+  reasoning-tier model needs this set to ``none`` to be usable here at all -
+  which also means it runs with its reasoning effectively disabled for this
+  task, not a free capability upgrade over a non-reasoning model of the same
+  family. Omitted from the payload entirely when unset, since most
+  non-OpenAI servers do not recognize this field.
 """
 
 from __future__ import annotations
@@ -19,7 +40,7 @@ from typing import Any
 import httpx
 
 from ..models import TokenUsage
-from ..secrets import read_bool, read_float, read_int
+from ..secrets import read_bool, read_env, read_float, read_int
 from .base import SUBMIT_TOOL, AgentRun, Provider, ToolCallLog, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -34,6 +55,10 @@ class OpenAICompatibleProvider(Provider):
         # Local models are usually free; hosted ones can be priced via env.
         self.price_input_per_mtok = read_float("DAWNPATROL_AI_PRICE_IN", 0.0)
         self.price_output_per_mtok = read_float("DAWNPATROL_AI_PRICE_OUT", 0.0)
+        self.max_tokens_param = (
+            read_env("DAWNPATROL_AI_MAX_TOKENS_PARAM", "max_tokens") or "max_tokens"
+        )
+        self.reasoning_effort = read_env("DAWNPATROL_AI_REASONING_EFFORT", "") or ""
 
     @property
     def endpoint(self) -> str:
@@ -96,11 +121,13 @@ class OpenAICompatibleProvider(Provider):
                     "messages": messages,
                     "tools": self._tool_defs(tools),
                     "tool_choice": "auto",
-                    "max_tokens": self.settings.max_tokens,
+                    self.max_tokens_param: self.settings.max_tokens,
                     "stream": False,
                 }
                 if self.settings.temperature is not None:
                     payload["temperature"] = self.settings.temperature
+                if self.reasoning_effort:
+                    payload["reasoning_effort"] = self.reasoning_effort
 
                 try:
                     resp = client.post(self.endpoint, json=payload)

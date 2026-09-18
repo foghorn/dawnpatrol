@@ -133,26 +133,21 @@ _WIN_LOGON_TYPES = {
     "11": "cached",
 }
 
-#: Windows Defender's routine templates - health heartbeats and ordinary
-#: scheduled-scan lifecycle - as distinct from an actual detection, which
-#: uses different wording entirely ("...has detected malware...", naming a
-#: specific threat). The scan-lifecycle entries were added after this device
-#: produced its first real ones in production: "scan has started/finished"
-#: (a routine Quick Scan, Scan Trigger: Scheduled maintenance) and "has
-#: removed history of malware and other potentially unwanted software" (a
-#: housekeeping event that clears OLD detection history - notably, none of
-#: these three ever names a specific threat or file path, unlike a real
-#: detection). Initially missing this cost one HIGH-severity false positive
-#: on the very first real (non-heartbeat) data this branch ever saw. This is
-#: the inverse of a positive match: anything NOT matching one of these
-#: known-benign templates is treated as a real detection, rather than trying
-#: to enumerate every possible detection wording up front.
-_DEFENDER_ROUTINE_PREFIXES = (
-    "Endpoint Protection client is up and running",
-    "Endpoint Protection client health report",
-    "Microsoft Defender Antivirus scan has started",
-    "Microsoft Defender Antivirus scan has finished",
-    "Microsoft Defender Antivirus has removed history of malware",
+#: Windows Defender's REAL detection template, matched positively - after
+#: TWO rounds of a new benign Defender message type breaking an earlier
+#: inverse-match design (health heartbeats, then scan lifecycle and history
+#: cleanup, then routine configuration-hash changes and security
+#: intelligence version updates - all real, all live, all false HIGH-severity
+#: positives), enumerating "everything benign" proved to be an open-ended
+#: list this device kept extending. Microsoft's actual detection template
+#: (EventID 1116) is stable and well-documented across Windows versions:
+#: "...has detected malware or other potentially unwanted software," always
+#: paired with a named Threat/Category/Path the routine templates never
+#: carry. Add to this tuple only when a genuinely new *detection* wording is
+#: confirmed live - never touch it to suppress a false positive; enumerating
+#: benign wording is what got this design into trouble twice already.
+_DEFENDER_DETECTION_PREFIXES = (
+    "Microsoft Defender Antivirus has detected malware or other potentially unwanted software",
 )
 
 
@@ -184,7 +179,7 @@ def _win_account(message: str) -> str | None:
 
 
 def _parse_windows_defender(message: str, common: dict[str, Any]) -> Event | None:
-    if message.startswith(_DEFENDER_ROUTINE_PREFIXES):
+    if not message.startswith(_DEFENDER_DETECTION_PREFIXES):
         return None
     return Event(kind=EventKind.IDS, action="detection", **common)
 

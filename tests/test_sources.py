@@ -262,11 +262,39 @@ def test_windows_defender_scan_lifecycle_is_not_a_detection(librenms, msg):
     assert librenms._normalize(entry, "8").kind == EventKind.SYSTEM
 
 
+@pytest.mark.parametrize("msg", [
+    # Verbatim shapes from a later production pull for device 8 - a second,
+    # different pair of benign Defender templates (routine config-hash churn
+    # from a definitions update, and the definitions update itself) that
+    # produced a second false HIGH-severity positive under the old
+    # inverse-match design, on data the first fix's benign list never saw.
+    # This is exactly why the design was flipped to a positive match instead
+    # of continuing to enumerate every new benign template as it appears.
+    ("Microsoft Defender Antivirus Configuration has changed. If this is an "
+     "unexpected event you should review the settings as this may be the "
+     "result of malware.   \\011Old value: HKLM\\\\SOFTWARE\\\\Microsoft\\\\"
+     "Windows Defender\\\\CoreService\\\\WdConfigHash = 0xDE07B17C   "
+     "\\011New value: HKLM\\\\SOFTWARE\\\\Microsoft\\\\"),
+    ("Microsoft Defender Antivirus security intelligence version updated.   "
+     "\\011Current security intelligence Version: 1.459.277.0   "
+     "\\011Previous security intelligence Version: 1.459.267.0   "
+     "\\011Security intelligence Type: AntiVirus   \\011Update Type: Delta"),
+])
+def test_windows_defender_routine_config_and_update_is_not_a_detection(librenms, msg):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-WINDOWS_DEFEND",
+             "seq": 17, "msg": msg}
+    assert librenms._normalize(entry, "8").kind == EventKind.SYSTEM
+
+
 def test_windows_defender_detection_is_flagged(librenms):
+    """"Microsoft Defender Antivirus," matching this device's real naming
+    convention throughout every other message captured from it - not the
+    older "Windows Defender Antivirus" name this fixture used before any
+    real detection-shaped message had ever actually been observed live."""
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "MICROSOFT-WINDOWS-WINDOWS_DEFEND",
         "seq": 15,
-        "msg": ("Windows Defender Antivirus has detected malware or other "
+        "msg": ("Microsoft Defender Antivirus has detected malware or other "
                 "potentially unwanted software."),
     }
     ev = librenms._normalize(entry, "8")
