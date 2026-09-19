@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 
 from dawnpatrol.config import AISettings
 from dawnpatrol.providers.base import SUBMIT_TOOL, ToolSpec
@@ -157,6 +158,39 @@ def test_unsupported_max_tokens_error_surfaces_clearly(monkeypatch):
     assert "max_completion_tokens" in run.error
 
 
+def test_openai_compatible_cost_does_not_double_count_cached_tokens(monkeypatch):
+    """Same fix, same reasoning, as openai_provider.py's equivalent test -
+    this provider's /v1/chat/completions usage shape has the identical
+    inclusive-input_tokens convention whenever the backend is OpenAI itself
+    or a faithful proxy (LiteLLM, for one)."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"finish_reason": "tool_calls", "message": {
+                "content": None,
+                "tool_calls": [{"id": "1", "type": "function",
+                               "function": {"name": SUBMIT_TOOL, "arguments": "{}"}}],
+            }}],
+            "usage": {
+                "prompt_tokens": 3014, "completion_tokens": 7,
+                "prompt_tokens_details": {"cached_tokens": 3004, "cache_write_tokens": 7},
+            },
+        })
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    provider.price_input_per_mtok = 4.00
+    provider.price_output_per_mtok = 20.00
+    provider.price_cache_read_per_mtok = 0.40
+    provider.price_cache_write_per_mtok = 5.00
+
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_tools(), max_turns=3)
+
+    fresh_input = 3014 - 3004
+    expected = (fresh_input / 1_000_000 * 4.00 + 3004 / 1_000_000 * 0.40
+               + 7 / 1_000_000 * 20.00 + 7 / 1_000_000 * 5.00)
+    assert run.usage.cost_usd == pytest.approx(expected)
+
+
 # --------------------------------------------------------------------------- #
 # OpenAIProvider: /v1/responses, verified live against gpt-5.6-sol before
 # this file existed - tool calling and reasoning work together natively
@@ -186,13 +220,16 @@ def _oa_function_call(name: str, arguments: str, call_id: str = "call_1") -> dic
             "name": name, "arguments": arguments}
 
 
-def _oa_response(output: list[dict], status: str = "completed") -> dict:
+def _oa_response(output: list[dict], status: str = "completed", *,
+                 input_tokens: int = 100, output_tokens: int = 20,
+                 cached_tokens: int = 30, cache_write_tokens: int = 0) -> dict:
     return {
         "status": status,
         "output": output,
         "usage": {
-            "input_tokens": 100, "output_tokens": 20,
-            "input_tokens_details": {"cached_tokens": 30, "cache_write_tokens": 0},
+            "input_tokens": input_tokens, "output_tokens": output_tokens,
+            "input_tokens_details": {"cached_tokens": cached_tokens,
+                                     "cache_write_tokens": cache_write_tokens},
             "output_tokens_details": {"reasoning_tokens": 5},
         },
     }
@@ -326,3 +363,38 @@ def test_openai_provider_usage_maps_cached_tokens(monkeypatch):
     assert run.usage.output_tokens == 20
     assert run.usage.cache_read_tokens == 30
     assert run.usage.calls == 1
+
+
+def test_openai_provider_cost_does_not_double_count_cached_tokens(monkeypatch):
+    """input_tokens=3014, cached_tokens=3004, cache_write_tokens=7,
+    output_tokens=7 - a real usage object from resending an identical
+    ~3010-token prefix against gpt-5.6-sol (see openai_provider.py's
+    estimate_cost docstring). Real rates: $4.00/$20.00/$0.40/$5.00 per Mtok
+    for input/output/cache-read/cache-write. The naive (Anthropic-style)
+    formula would bill the 3004 cached tokens twice - once at $4.00 as part
+    of input_tokens, again at $0.40 - overstating cost by roughly 75x on
+    just that component."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_oa_response(
+            [_oa_function_call(SUBMIT_TOOL, "{}")],
+            input_tokens=3014, output_tokens=7, cached_tokens=3004, cache_write_tokens=7,
+        ))
+
+    provider = _oa_provider(monkeypatch, _oa_settings(), handler)
+    provider.price_input_per_mtok = 4.00
+    provider.price_output_per_mtok = 20.00
+    provider.price_cache_read_per_mtok = 0.40
+    provider.price_cache_write_per_mtok = 5.00
+
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_tools(), max_turns=3)
+
+    fresh_input = 3014 - 3004
+    expected = (fresh_input / 1_000_000 * 4.00 + 3004 / 1_000_000 * 0.40
+               + 7 / 1_000_000 * 20.00 + 7 / 1_000_000 * 5.00)
+    assert run.usage.cost_usd == pytest.approx(expected)
+    assert run.usage.cost_usd == pytest.approx(0.0014166, abs=1e-7)
+
+    naive_double_counted = (3014 / 1_000_000 * 4.00 + 3004 / 1_000_000 * 0.40
+                            + 7 / 1_000_000 * 20.00 + 7 / 1_000_000 * 5.00)
+    assert run.usage.cost_usd < naive_double_counted

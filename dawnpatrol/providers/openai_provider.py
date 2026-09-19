@@ -64,15 +64,40 @@ class OpenAIProvider(Provider):
 
     def __init__(self, settings) -> None:
         super().__init__(settings)
-        # No verified real-world pricing for every model this could point at
-        # (including ones newer than any published rate card) - left at 0.0
-        # ("unknown/free") rather than guessed. Real usage is billed by
-        # OpenAI regardless of what these are set to; treat the account's own
-        # usage dashboard as the source of truth until real pricing is known
-        # and set here.
+        # Left at 0.0 ("unknown/free") for any model this points at whose
+        # real published rate hasn't been supplied and set here - guessing a
+        # number would be worse than admitting it's unknown. Real usage is
+        # billed by OpenAI regardless of what these are set to; treat the
+        # account's own usage dashboard as the source of truth for a model
+        # not priced below.
         self.price_input_per_mtok = read_float("DAWNPATROL_AI_PRICE_IN", 0.0)
         self.price_output_per_mtok = read_float("DAWNPATROL_AI_PRICE_OUT", 0.0)
         self.price_cache_read_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_READ", 0.0)
+        self.price_cache_write_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_WRITE", 0.0)
+
+    def estimate_cost(self, usage: TokenUsage) -> float:
+        """Overrides the base formula, which assumes Anthropic's convention
+        (``input_tokens`` already *excludes* cached tokens, reported
+        separately and additively). OpenAI's ``/v1/responses`` does the
+        opposite - confirmed live by resending an identical long prefix and
+        watching ``input_tokens`` stay ~constant while ``cached_tokens``
+        jumped to nearly the same value: ``input_tokens`` is the TOTAL
+        prompt size, and ``cached_tokens`` is a *subset* of it, not an
+        addition. Using the base formula unmodified here would double-bill
+        every cached token: once at the full input rate as part of
+        ``input_tokens``, again at the cache-read rate. ``cache_write_tokens``
+        by contrast IS additive - confirmed live in the same test, a token
+        both counted in ``input_tokens`` and written to cache for the first
+        time billed the normal input rate plus a separate write surcharge -
+        so it is simply added on top, same as the base formula's treatment.
+        """
+        fresh_input = max(0, usage.input_tokens - usage.cache_read_tokens)
+        return (
+            fresh_input / 1_000_000 * self.price_input_per_mtok
+            + usage.cache_read_tokens / 1_000_000 * self.price_cache_read_per_mtok
+            + usage.output_tokens / 1_000_000 * self.price_output_per_mtok
+            + usage.cache_write_tokens / 1_000_000 * self.price_cache_write_per_mtok
+        )
 
     @property
     def endpoint(self) -> str:

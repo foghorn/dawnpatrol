@@ -55,10 +55,29 @@ class OpenAICompatibleProvider(Provider):
         # Local models are usually free; hosted ones can be priced via env.
         self.price_input_per_mtok = read_float("DAWNPATROL_AI_PRICE_IN", 0.0)
         self.price_output_per_mtok = read_float("DAWNPATROL_AI_PRICE_OUT", 0.0)
+        self.price_cache_read_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_READ", 0.0)
+        self.price_cache_write_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_WRITE", 0.0)
         self.max_tokens_param = (
             read_env("DAWNPATROL_AI_MAX_TOKENS_PARAM", "max_tokens") or "max_tokens"
         )
         self.reasoning_effort = read_env("DAWNPATROL_AI_REASONING_EFFORT", "") or ""
+
+    def estimate_cost(self, usage: TokenUsage) -> float:
+        """Same fix as openai_provider.py's override, for the same reason:
+        this endpoint's `prompt_tokens` is the TOTAL prompt size, inclusive
+        of any cached portion (`cached_tokens` is a subset, not an additive
+        count) whenever the server behind this provider is OpenAI itself or
+        a proxy faithfully reporting OpenAI's own usage shape (LiteLLM, for
+        one). The base formula assumes Anthropic's convention instead
+        (input_tokens already excludes cache reads) and would double-bill
+        every cached token here without this override."""
+        fresh_input = max(0, usage.input_tokens - usage.cache_read_tokens)
+        return (
+            fresh_input / 1_000_000 * self.price_input_per_mtok
+            + usage.cache_read_tokens / 1_000_000 * self.price_cache_read_per_mtok
+            + usage.output_tokens / 1_000_000 * self.price_output_per_mtok
+            + usage.cache_write_tokens / 1_000_000 * self.price_cache_write_per_mtok
+        )
 
     @property
     def endpoint(self) -> str:
@@ -236,11 +255,11 @@ def _try_parse_json(text: str) -> dict[str, Any] | None:
 
 def _usage_from(data: dict[str, Any]) -> TokenUsage:
     u = data.get("usage") or {}
+    details = u.get("prompt_tokens_details") or {}
     return TokenUsage(
         input_tokens=int(u.get("prompt_tokens") or 0),
         output_tokens=int(u.get("completion_tokens") or 0),
-        cache_read_tokens=int(
-            (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-        ),
+        cache_read_tokens=int(details.get("cached_tokens") or 0),
+        cache_write_tokens=int(details.get("cache_write_tokens") or 0),
         calls=1,
     )

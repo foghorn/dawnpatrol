@@ -10,7 +10,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Integer, and_, case, cast, func, select
+from sqlalchemy import Integer, and_, case, cast, func, or_, select
 
 from . import schema as S
 from .models import EventKind
@@ -63,6 +63,23 @@ class EventQuery:
         with self._engine.connect() as conn:
             return int(conn.execute(
                 select(func.count()).select_from(S.events).where(self._base(**filters))
+            ).scalar_one())
+
+    def count_zone(self, zone: str, **filters: Any) -> int:
+        """Count events touching ``zone`` on either side of the flow.
+
+        A plain ``count(src_zone=zone)`` only sees traffic originating in the
+        zone - a segment whose firewall activity is exclusively inbound
+        (something else being blocked reaching in) reads as zero, which is
+        indistinguishable from "no firewall activity at all". Mirrors the
+        src_ip/dst_ip union already used for the distinct-client count.
+        """
+        with self._engine.connect() as conn:
+            return int(conn.execute(
+                select(func.count()).select_from(S.events).where(
+                    self._base(**filters),
+                    or_(S.events.c.src_zone == zone, S.events.c.dst_zone == zone),
+                )
             ).scalar_one())
 
     def distinct_count(self, column: str, **filters: Any) -> int:
@@ -145,6 +162,22 @@ class EventQuery:
         with self._engine.connect() as conn:
             rows = conn.execute(
                 select(S.events.c.ts).where(self._base(**filters))
+            ).all()
+        buckets: dict[str, int] = {}
+        for (ts,) in rows:
+            key = _aware(ts).strftime("%Y-%m-%d %H:00")
+            buckets[key] = buckets.get(key, 0) + 1
+        return dict(sorted(buckets.items()))
+
+    def hourly_zone(self, zone: str, **filters: Any) -> dict[str, int]:
+        """Like :meth:`hourly`, but touching ``zone`` on either side - see
+        :meth:`count_zone` for why src_zone alone under-counts."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(S.events.c.ts).where(
+                    self._base(**filters),
+                    or_(S.events.c.src_zone == zone, S.events.c.dst_zone == zone),
+                )
             ).all()
         buckets: dict[str, int] = {}
         for (ts,) in rows:

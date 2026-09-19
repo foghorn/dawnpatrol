@@ -419,6 +419,11 @@ def test_segment_firewall_client_count_includes_both_directions(store, profile, 
     result = SegmentReviewAnalyzer().run(q, profile, baseline)
     by_key = {m.key: m.value for m in result.metrics}
     assert by_key["zone.iot.fw_clients"] == 3
+    # The event count must be equally bidirectional, or a segment whose
+    # traffic is exclusively inbound-blocked reads as zero firewall events
+    # while simultaneously reporting distinct firewall clients - an
+    # internally contradictory "no activity" reading.
+    assert by_key["zone.iot.fw"] == 3
 
 
 def test_segment_client_counts_are_distinct_not_event_counts(q, profile, baseline):

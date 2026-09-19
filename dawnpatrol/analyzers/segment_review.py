@@ -65,14 +65,17 @@ class SegmentReviewAnalyzer(Analyzer):
 
         for zone in profile.zones:
             dns_count = q.count(kind=EventKind.DNS, src_zone=zone.name)
-            fw_out = q.count(kind=EventKind.FIREWALL, src_zone=zone.name)
+            # Either side of the flow, not just traffic the zone originated -
+            # a segment whose only firewall activity is other zones being
+            # blocked reaching in would otherwise read as zero.
+            fw_count = q.count_zone(zone.name, kind=EventKind.FIREWALL)
             r.metrics.append(Metric(
                 key=f"zone.{zone.name}.dns", value=dns_count, section="segments",
                 label=f"{zone.name}: DNS queries",
                 prior=baseline.prior(f"zone.{zone.name}.dns"),
             ))
             r.metrics.append(Metric(
-                key=f"zone.{zone.name}.fw", value=fw_out, section="segments",
+                key=f"zone.{zone.name}.fw", value=fw_count, section="segments",
                 label=f"{zone.name}: firewall events",
             ))
 
@@ -238,7 +241,7 @@ class SegmentReviewAnalyzer(Analyzer):
         until enough has accumulated.
         """
         tz = _site_timezone(profile.timezone)
-        hourly = q.hourly(kind=EventKind.FIREWALL, src_zone=zone.name)
+        hourly = q.hourly_zone(zone.name, kind=EventKind.FIREWALL)
 
         # Recorded even when this zone had zero firewall traffic this run - a
         # real, meaningful "0" for its history, not an absence of data.

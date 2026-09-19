@@ -67,6 +67,12 @@ class Provider(ABC):
     price_input_per_mtok: float = 0.0
     price_output_per_mtok: float = 0.0
     price_cache_read_per_mtok: float = 0.0
+    #: A cache write is real, billed usage distinct from a cache read (often
+    #: priced *above* base input, e.g. 1.25x - "populating" the cache costs
+    #: more than reading from it). Zero by default like the others; a
+    #: provider that never reports cache_write_tokens (most don't) simply
+    #: never multiplies against it.
+    price_cache_write_per_mtok: float = 0.0
 
     def __init__(self, settings: AISettings) -> None:
         self.settings = settings
@@ -94,6 +100,7 @@ class Provider(ABC):
             usage.input_tokens / 1_000_000 * self.price_input_per_mtok
             + usage.output_tokens / 1_000_000 * self.price_output_per_mtok
             + usage.cache_read_tokens / 1_000_000 * self.price_cache_read_per_mtok
+            + usage.cache_write_tokens / 1_000_000 * self.price_cache_write_per_mtok
         )
 
     def available(self) -> tuple[bool, str]:
