@@ -212,109 +212,28 @@ truth until real per-token pricing is known and set here.
 
 ### Model choice and report quality
 
-The investigate stage (the only one that calls a model) is provider-agnostic by
-design, so swapping models is a config change, not a code change. Two real
-trials against non-default providers are recorded here, alongside the
-Anthropic baseline, because each result was informative enough to be worth
-keeping — not because five runs across three models is a rigorous benchmark.
-Treat this as one data point per model (or, for GPT, per provider
-configuration) on one day, against one network's data, not a general ranking.
-
-**Trial 1: a local, open-weight model** (`gemma4:e2b` via a LiteLLM deployment
-on the local network). Connection, authentication, and the OpenAI-compatible
-tool-calling protocol all verified working correctly before enabling it — the
-model returned well-formed `tool_calls`, matching schema, when asked to in
-isolation. Against a real run, though, it skipped investigation entirely: one
-call to the model, straight to `submit_analysis`, no use of
-`query_events`/`get_entity_history`/etc. even though the task prompt
-explicitly instructs investigating before submitting. One resulting finding
-also misread its own cited evidence — it interpreted a signal that meant
-"this host **is** actively forwarding endpoint telemetry" as proof monitoring
-had failed, and used unsupported, alarmist language framing ("...Persistence")
-no evidence in the run supported. The anti-fabrication guardrail still held
-throughout — every finding cited a real signal id, nothing invented made it
-past the adjudicator — but a structural guardrail only catches "did you cite
-something real," never "did you correctly interpret what you cited." That is
-model judgment, and there is no code-level substitute for it.
-
-**Trial 2: OpenAI directly** (`gpt-5.6-sol`, real API, real key, verified live
-before enabling). First attempt used `openai_compatible` against
-`/v1/chat/completions` — the two compatibility settings documented above were
-required just to get it running at all, including `reasoning_effort: none`,
-which meant its first several runs investigated with reasoning off. Even so,
-one of those runs investigated properly (4-6 tool calls, not the local
-model's single shot) and its first live run caught something real: a
-HIGH-severity Windows Defender "detection" signal that was actually a false
-positive in `librenms_syslog.py`'s own message parser (routine Defender
-configuration-hash churn and a definitions-version update, mislabeled as a
-detection). The model correctly recognized the cited evidence didn't support
-the signal, declined to report it as a finding, and said so plainly in
-`data_quality_notes` instead of trusting the signal's severity_hint at face
-value. That's exactly the kind of judgment call an anti-fabrication guardrail
-cannot make on its own - it can only confirm a finding cites something real,
-not that the deterministic layer's own classification of that something was
-correct. The parser bug is now fixed (the detection template is matched
-positively instead of trying to enumerate every possible benign one - see
-`_parse_windows_defender`'s docstring for why that design lost twice before
-being changed).
-
-Losing reasoning to unlock tool calling was enough of a real capability gap
-that a dedicated `openai` provider on `/v1/responses` was built next (see
-"Model provider" above) - tool calling and reasoning confirmed working
-together natively, no workaround, before switching the live config over. The
-before/after on the same model is in the table below: reasoning actually
-running quadrupled the number of findings formalized (1 → 4) on directly
-comparable same-day data, closing most of the "found less to investigate"
-gap noted below for the reasoning-off run. The Defender parser bug did not
-recur in the reasoning-on run either, though that run's window did not
-happen to produce any Defender configuration/intelligence-update messages
-at all - the fix was not re-exercised there, just not contradicted.
-
-Both Claude tiers and GPT converged on the same behavior neither trial
-initially expected: none of them formalize every available signal into a
-`Findings` entry the way Opus does. Sonnet and GPT both fold confirmed-benign,
-already-explained signals (DGA candidates, DNS beacons, the deauth outlier)
-into the narrative sections instead, reserving formal Findings for what
-actually needs a decision. Neither approach is wrong per this system's own
-calibration language ("a report with no findings is a good report when it is
-true"), but it means Sonnet's and GPT's delivered reports carry a thinner
-permanent, trend-trackable Findings record than Opus's for the same
-underlying signal set.
+The investigate stage is provider-agnostic, so swapping models is a config
+change, not a code change. Real trials, one data point per row — not a
+rigorous benchmark:
 
 | Model | Provider | Rounds of investigation | Findings | Cost | Investigate stage |
 |---|---|---|---|---|---|
 | `claude-opus-5` | anthropic | 10 model calls | 8, all correctly grounded | $2.83 | ~5.0 min |
-| `claude-sonnet-5` | anthropic | 10 model calls | 2, correctly synthesized (one recurring watchlist item merged into a single finding, not duplicated) | $0.77 | ~3.3 min |
-| `gpt-5.6-sol` | openai (native `/v1/responses`, reasoning `high`) | 6 model calls | 4, correctly grounded, closest to Opus's breadth of the non-Opus runs | $0.00 (pricing not configured - see above; real billing still applies) | ~4.2 min |
-| `gpt-5.6-sol` | openai_compatible (`/v1/chat/completions`, reasoning forced `none`) | 4 model calls | 1, correctly scoped; also caught a real parser bug the other two Claude trials never encountered | $0.00 (pricing not configured; real billing still applies) | ~0.8 min |
-| `gemma4:e2b` (local, via LiteLLM) | openai_compatible | 1 model call, zero tool use | 4, one materially inaccurate | $0.00 (genuinely free - local hardware) | ~2.4 min |
+| `claude-sonnet-5` | anthropic | 10 model calls | 2, correctly synthesized | $0.77 | ~3.3 min |
+| `gpt-5.6-sol` | openai (`/v1/responses`, reasoning `high`) | 6 model calls | 4, correctly grounded | $0.00* | ~4.2 min |
+| `gpt-5.6-sol` | openai_compatible (`/v1/chat/completions`, reasoning forced `none`) | 4 model calls | 1, correctly scoped | $0.00* | ~0.8 min |
+| `gemma4:e2b` (local, via LiteLLM) | openai_compatible | 1 model call, zero tool use | 4, one materially inaccurate | $0.00 (local hardware) | ~2.4 min |
 
-Sonnet reached fewer findings than Opus on the same kind of window (2 vs. 8,
-on different days' data, so not a like-for-like count) but did so with the same
-number of investigation rounds and at roughly a quarter of the cost — a
-reasonable default for cost-sensitive deployments. GPT's own two rows are the
-clean comparison here, same model, same day, only reasoning on vs. off: with
-reasoning it took longer (~4.2 min vs. ~0.8 min) but formalized four times as
-many findings, at similar overall cache-assisted token cost - reasoning was
-worth the wall-clock time on this run. One earlier trial (Opus) surfaced a
-real cross-boundary traffic pattern (Windows Delivery Optimization on port
-7680) that had no dedicated analyzer signal at all, purely by choosing to
-query beyond what the deterministic layer handed it; neither Sonnet nor
-either GPT configuration pursued that particular thread in their own runs.
-Treat that as one observed instance of deeper unprompted investigation, not a
-demonstrated general gap in the other models - it was not tested head-to-head
-on identical data.
+\* Pricing not configured for OpenAI (`DAWNPATROL_AI_PRICE_IN`/`_OUT` above) —
+real billing still applies regardless of the report's displayed cost.
 
-The local model's zero cost and fast wall-clock time do not offset a report
-that needs to be read with less trust in its own interpretation; if you deploy
-against a local model, read the first several reports it produces closely
-rather than assuming the guardrails alone make it safe to trust unattended,
-and consider whether the prompt (`dawnpatrol/agent/prompts/`) needs
-strengthening for the specific model you chose. No enforcement was added to
-force tool use before `submit_analysis` - a model that has genuinely nothing
-to investigate should be free to say so; each trial above was treated as
-evidence about that model, not a case for adding a structural workaround to
-compensate for it.
+Sonnet and GPT are both more conservative than Opus about promoting a signal
+to a formal `Findings` entry, folding confirmed-benign ones into narrative
+instead — a behavioral difference, not a quality gap. The local model skipped
+investigation entirely and produced one finding that misread its own cited
+evidence; the anti-fabrication guardrail held (it cited a real signal), but
+that guardrail can't catch a wrong interpretation of what was cited. Read a
+new model's first several reports closely before trusting it unattended.
 
 ---
 
