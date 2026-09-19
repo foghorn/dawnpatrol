@@ -220,12 +220,14 @@ rigorous benchmark:
 |---|---|---|---|---|---|
 | `claude-opus-5` | anthropic | 10 model calls | 8, all correctly grounded | $2.83 | ~5.0 min |
 | `claude-sonnet-5` | anthropic | 10 model calls | 2, correctly synthesized | $0.77 | ~3.3 min |
-| `gpt-5.6-sol` | openai (`/v1/responses`, reasoning `high`) | 6 model calls | 4, correctly grounded | $0.00* | ~4.2 min |
-| `gpt-5.6-sol` | openai_compatible (`/v1/chat/completions`, reasoning forced `none`) | 4 model calls | 1, correctly scoped | $0.00* | ~0.8 min |
+| `gpt-5.6-sol` | openai (`/v1/responses`, reasoning `high`) | 6 model calls | 4, correctly grounded | $0.68* | ~4.2 min |
+| `gpt-5.6-sol` | openai_compatible (`/v1/chat/completions`, reasoning forced `none`) | 4 model calls | 1, correctly scoped | $0.34* | ~0.8 min |
 | `gemma4:e2b` (local, via LiteLLM) | openai_compatible | 1 model call, zero tool use | 4, one materially inaccurate | $0.00 (local hardware) | ~2.4 min |
 
-\* Pricing not configured for OpenAI (`DAWNPATROL_AI_PRICE_IN`/`_OUT` above) —
-real billing still applies regardless of the report's displayed cost.
+\* Pricing wasn't configured for OpenAI (`DAWNPATROL_AI_PRICE_IN`/`_OUT`
+above), so these are estimated: the real combined billed cost for both OpenAI
+runs was $1.02, split between the two rows by each run's share of total
+tokens (input + output).
 
 Sonnet and GPT are both more conservative than Opus about promoting a signal
 to a formal `Findings` entry, folding confirmed-benign ones into narrative
