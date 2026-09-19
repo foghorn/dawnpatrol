@@ -38,10 +38,32 @@ _TABLE_REF = re.compile(
 # and the nested FROM inside the subquery is matched separately anyway.
 _NOT_A_TABLE = {"select", "with"}
 _LIMIT_RE = re.compile(r"\blimit\s+(\d+)", re.IGNORECASE)
+_RUN_ID_TOKEN = re.compile(r"^[A-Za-z0-9_-]+$")
+_COL = r"(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?run_id"
 
 
 class SQLRejected(DawnPatrolError):
     """The statement failed validation and was not executed."""
+
+
+def _scopes_to_run(lowered: str, run_id: str) -> bool:
+    """True only if the query binds `run_id` to this exact run's value.
+
+    Deliberately not a substring check for the word "run_id" - that would
+    pass for `SELECT *, 'run_id' AS note FROM events WHERE src_ip='...'`,
+    which mentions the column name without scoping anything, and would let
+    the tool read every run still inside the raw retention window.
+    """
+    if not _RUN_ID_TOKEN.match(run_id):
+        return False
+    rid = re.escape(run_id.lower())
+    quoted = rf"""['"]{rid}['"]"""
+    patterns = (
+        rf"{_COL}\s*=\s*{quoted}",
+        rf"{quoted}\s*=\s*{_COL}",
+        rf"{_COL}\s+in\s*\([^)]*{quoted}[^)]*\)",
+    )
+    return any(re.search(p, lowered) for p in patterns)
 
 
 def validate(sql: str, run_id: str, max_rows: int = DEFAULT_LIMIT) -> tuple[str, int]:
@@ -78,9 +100,9 @@ def validate(sql: str, run_id: str, max_rows: int = DEFAULT_LIMIT) -> tuple[str,
 
     # Scope to this run unless the model deliberately queried a long-term table.
     long_term = referenced & {"ioc_dns", "ioc_flow", "entities", "metrics"}
-    if "events" in referenced and "run_id" not in lowered and not long_term:
+    if "events" in referenced and not long_term and not _scopes_to_run(lowered, run_id):
         raise SQLRejected(
-            f"queries against `events` must filter by run_id. "
+            f"queries against `events` must filter by this run's exact id. "
             f"Add: WHERE run_id = '{run_id}'"
         )
 

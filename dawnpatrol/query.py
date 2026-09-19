@@ -266,6 +266,25 @@ class EventQuery:
             ).all()
         return [(r[0], int(r[1]), int(r[2] or 0)) for r in rows]
 
+    def dns_client_domain_stats(self, limit: int = 50000) -> list[tuple[str, str, int]]:
+        """(client_ip, domain, queries) for every distinct pair this run -
+        deliberately unranked by count, unlike :meth:`group_pairs`. A
+        subdomain-fanout detector needs every distinct domain a client asked
+        for, not just the most-repeated ones: each tunneling subdomain is
+        typically queried exactly once (the payload changes every request),
+        which a count-descending ranking would push to the bottom and a
+        small limit would then truncate away entirely."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(S.events.c.client_ip, S.events.c.domain, func.count().label("n"))
+                .where(self._base(kind=EventKind.DNS), S.events.c.client_ip.is_not(None),
+                       S.events.c.domain.is_not(None))
+                .group_by(S.events.c.client_ip, S.events.c.domain)
+                .order_by(S.events.c.client_ip, S.events.c.domain)
+                .limit(limit)
+            ).all()
+        return [(r[0], r[1], int(r[2])) for r in rows]
+
     def dns_pairs_for_ioc(self, limit: int = 50000) -> list[tuple[str | None, str, int, int]]:
         """(client_ip, domain, queries, blocked) for the long-term IOC slice."""
         blocked_expr = func.sum(case((S.events.c.blocked.is_(True), 1), else_=0))
@@ -278,6 +297,25 @@ class EventQuery:
                 .order_by(func.count().desc()).limit(limit)
             ).all()
         return [(r[0], r[1], int(r[2]), int(r[3] or 0)) for r in rows]
+
+    def bytes_by_pair(self, n: int = 500, **filters: Any) -> list[tuple[str, str, int, int]]:
+        """(src_ip, dst_ip, total_bytes, hits) - sum of ``pkt_len`` per (src,
+        dst) pair, ordered by bytes descending. A pair with no ``pkt_len`` on
+        any of its events contributes 0, never null - callers should not have
+        to special-case missing data."""
+        bytes_expr = func.coalesce(
+            func.sum(cast(S.events.c.pkt_len, Integer)), 0
+        ).label("bytes")
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(S.events.c.src_ip, S.events.c.dst_ip, bytes_expr,
+                       func.count().label("hits"))
+                .where(self._base(**filters), S.events.c.src_ip.is_not(None),
+                       S.events.c.dst_ip.is_not(None))
+                .group_by(S.events.c.src_ip, S.events.c.dst_ip)
+                .order_by(bytes_expr.desc()).limit(n)
+            ).all()
+        return [(r[0], r[1], int(r[2] or 0), int(r[3])) for r in rows]
 
     def flow_pairs_for_ioc(self, limit: int = 50000
                            ) -> list[tuple[str | None, str, int | None, str | None, int]]:

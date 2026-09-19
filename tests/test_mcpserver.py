@@ -104,6 +104,10 @@ def test_query_events_rejects_a_write_statement(toolctx):
 def test_query_events_runs_a_real_select(toolctx, store, window):
     from dawnpatrol.models import Event, EventKind
 
+    # query_events scopes to the most recently recorded run (store.recent_runs),
+    # so that run must actually exist for a run_id-scoped query to validate.
+    store.start_run("run-x", 1, window.start, window)
+    store.finish_run("run-x", finished_at=window.end, status="GREEN", finding_count=0)
     store.insert_events("run-x", [
         Event(ts=window.start, source="synthetic", kind=EventKind.FIREWALL,
               dedup_key="e1", action="drop"),
@@ -111,6 +115,14 @@ def test_query_events_runs_a_real_select(toolctx, store, window):
     out = toolctx.query_events("SELECT COUNT(*) AS c FROM events WHERE run_id='run-x'")
     assert out["row_count"] == 1
     assert out["rows"][0][0] == 1
+
+
+def test_query_events_rejects_scoping_to_a_run_other_than_the_current_one(toolctx, store, window):
+    store.start_run("run-x", 1, window.start, window)
+    store.finish_run("run-x", finished_at=window.end, status="GREEN", finding_count=0)
+    out = toolctx.query_events("SELECT * FROM events WHERE run_id='some-other-run'")
+    assert "error" in out
+    assert "rejected" in out["error"]
 
 
 def test_get_metric_history_empty_is_not_an_error(toolctx):

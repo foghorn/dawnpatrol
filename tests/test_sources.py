@@ -412,6 +412,90 @@ def test_sshd_program_variant_without_the_session_suffix_is_also_parsed(librenms
 
 
 # --------------------------------------------------------------------------- #
+# Router/gateway web-UI admin login
+# --------------------------------------------------------------------------- #
+
+
+def test_luci_accepted_login_becomes_an_auth_event(librenms):
+    """Verbatim shape from LibreNMS's /logs/syslog/7 (the IoT gateway) and
+    /logs/syslog/4 (the DMZ gateway) for a real LuCI admin login."""
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "UHTTPD", "seq": 30,
+             "msg": "[info] luci: accepted login on / for root from 10.10.0.35"}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "web_login_success"
+    assert ev.user == "root"
+    assert ev.src_ip == "10.10.0.35"
+
+
+def test_luci_failed_login_becomes_an_auth_event(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "UHTTPD", "seq": 31,
+             "msg": "[info] luci: failed login on / for root from 10.10.0.35"}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "web_login_failed"
+
+
+def test_asus_web_login_successful_becomes_an_auth_event(librenms):
+    """Verbatim shape from LibreNMS's /logs/syslog/3, the ASUS edge router."""
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "HTTPD", "seq": 32,
+             "msg": "[LOGIN][http][Web] successful (10.10.0.35)"}
+    ev = librenms._normalize(entry, "3")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "web_login_success"
+    assert ev.src_ip == "10.10.0.35"
+    assert ev.user is None
+
+
+def test_asus_web_login_failed_becomes_an_auth_event(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "HTTPD", "seq": 33,
+             "msg": "[LOGIN][http][Web] failed (10.10.0.35)"}
+    ev = librenms._normalize(entry, "3")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "web_login_failed"
+
+
+def test_asus_web_login_translation_quirk_is_still_a_success(librenms):
+    """Verbatim shape from LibreNMS's /logs/syslog/7 - a firmware translation
+    quirk spells the success case "successed" rather than "successful"; it is
+    still a successful login, not a different outcome."""
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "HTTPD", "seq": 34,
+             "msg": "[LOGIN][http][Web] successed (10.10.0.35)"}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "web_login_success"
+
+
+def test_non_login_uhttpd_and_httpd_chatter_stays_system(librenms):
+    for program in ("UHTTPD", "HTTPD"):
+        entry = {"timestamp": "2026-06-01 03:14:15", "program": program, "seq": 35,
+                 "msg": "some other line under this program tag"}
+        ev = librenms._normalize(entry, "3")
+        assert ev.kind == EventKind.SYSTEM
+
+
+@pytest.mark.parametrize("program,message,expected", [
+    ("UHTTPD", "[info] luci: accepted login on / for root from 10.0.0.5",
+     {"success": True, "ip": "10.0.0.5", "user": "root"}),
+    ("UHTTPD", "[info] luci: failed login on / for admin from 10.0.0.6",
+     {"success": False, "ip": "10.0.0.6", "user": "admin"}),
+    ("HTTPD", "[LOGIN][http][Web] successful (10.0.0.7)",
+     {"success": True, "ip": "10.0.0.7", "user": None}),
+    ("HTTPD", "[LOGIN][http][Web] successed (10.0.0.8)",
+     {"success": True, "ip": "10.0.0.8", "user": None}),
+    ("HTTPD", "[LOGIN][http][Web] failed (10.0.0.9)",
+     {"success": False, "ip": "10.0.0.9", "user": None}),
+    ("UHTTPD", "not a login line at all", None),
+    ("HTTPD", "not a login line at all", None),
+    ("KERNEL", "[LOGIN][http][Web] successful (10.0.0.7)", None),
+])
+def test_parse_router_admin_login(program, message, expected):
+    from dawnpatrol.sources.librenms_syslog import _parse_router_admin_login
+
+    assert _parse_router_admin_login(program, message) == expected
+
+
+# --------------------------------------------------------------------------- #
 # DHCP lease parsing
 # --------------------------------------------------------------------------- #
 
@@ -497,6 +581,90 @@ def test_parse_dhcp(message, expected):
     from dawnpatrol.sources.librenms_syslog import _parse_dhcp
 
     assert _parse_dhcp(message) == expected
+
+
+# --------------------------------------------------------------------------- #
+# dnsmasq query log (program "DNSMASQ", not "DNSMASQ-DHCP") - a segment
+# gateway resolving for its own clients, format confirmed against the real
+# feed (device 7, the IoT gateway).
+# --------------------------------------------------------------------------- #
+
+
+def test_dnsmasq_query_a_becomes_a_dns_event(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ", "seq": 20,
+             "msg": "119 10.10.50.163/51007 query[A] jnn-pa.googleapis.com from 10.10.50.163"}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.DNS
+    assert ev.domain == "jnn-pa.googleapis.com"
+    assert ev.qtype == "A"
+    assert ev.client_ip == "10.10.50.163"
+    assert ev.src_zone == "iot"
+    assert ev.blocked is False
+
+
+def test_dnsmasq_query_aaaa_is_also_captured(librenms):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ", "seq": 21,
+             "msg": "120 10.10.50.163/53438 query[AAAA] jnn-pa.googleapis.com from 10.10.50.163"}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.DNS
+    assert ev.qtype == "AAAA"
+
+
+@pytest.mark.parametrize("verb_line", [
+    # forwarded/reply/cached answer a query already captured by its own
+    # query[...] line - one query can produce several reply lines (one per
+    # round-robin A record), so turning these into events too would multiply
+    # a single lookup into many.
+    "119 10.10.50.163/51007 forwarded jnn-pa.googleapis.com to 10.10.10.69",
+    "119 10.10.50.163/51007 reply jnn-pa.googleapis.com is 172.217.113.4",
+    "131 10.10.50.131/49153 cached info.cspserver.net is 13.192.20.145",
+])
+def test_dnsmasq_answer_lines_are_not_turned_into_dns_events(librenms, verb_line):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ", "seq": 22, "msg": verb_line}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.SYSTEM
+
+
+@pytest.mark.parametrize("verb_line", [
+    # Every dnsmasq restart replays a bulk self-test sweep against its own
+    # loopback address for every statically-known host and DHCP lease -
+    # confirmed live: one restart produced 118 query[PTR] + 80 config + 36
+    # DHCP + 2 bare-hosts-path lines, all from 127.0.0.1, none of it real
+    # device activity.
+    "1 127.0.0.1/60318 query[PTR] 218.10.10.10.in-addr.arpa from 127.0.0.1",
+    "1 127.0.0.1/60318 config 10.10.10.218 is NXDOMAIN",
+    "13 127.0.0.1/60318 DHCP 10.10.50.114 is Nest-Cam-indoor.lan",
+    "53 127.0.0.1/60318 /tmp/hosts/dhcp.cfg01411c 10.10.50.1 is IoTFirewall.lan",
+])
+def test_dnsmasq_restart_self_test_from_loopback_is_not_a_dns_event(librenms, verb_line):
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ", "seq": 23, "msg": verb_line}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.SYSTEM
+
+
+def test_dnsmasq_rebind_warning_is_not_a_dns_event(librenms):
+    """Not a query line at all - falls through to a plain SYSTEM event like
+    any other unparsed dnsmasq chatter. The full message is preserved, so
+    it's still queryable, just not a per-lookup Event."""
+    entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ", "seq": 24,
+             "msg": "possible DNS-rebind attack detected: clients3.google.com"}
+    ev = librenms._normalize(entry, "7")
+    assert ev.kind == EventKind.SYSTEM
+    assert "rebind" in (ev.message or "")
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("119 10.10.50.163/51007 query[A] jnn-pa.googleapis.com from 10.10.50.163",
+     {"client": "10.10.50.163", "qtype": "A", "domain": "jnn-pa.googleapis.com"}),
+    ("1 127.0.0.1/60318 query[PTR] 1.10.10.10.in-addr.arpa from 127.0.0.1", None),
+    ("119 10.10.50.163/51007 forwarded jnn-pa.googleapis.com to 10.10.10.69", None),
+    ("119 10.10.50.163/51007 reply jnn-pa.googleapis.com is 172.217.113.4", None),
+    ("exiting on receipt of SIGTERM", None),
+])
+def test_parse_dnsmasq_query(message, expected):
+    from dawnpatrol.sources.librenms_syslog import _parse_dnsmasq_query
+
+    assert _parse_dnsmasq_query(message) == expected
 
 
 def test_unparseable_timestamp_is_dropped_not_guessed(librenms):

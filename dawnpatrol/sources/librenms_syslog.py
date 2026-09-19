@@ -34,6 +34,38 @@ devices that have neither SNMP presence nor a local DNS resolver - which is
 most of what the IoT/DMZ segment gateways can offer at all. Confirmed against
 the real feed on all three devices (main router and both OpenWRT gateways)
 before being encoded here, not assumed from documentation.
+
+``DNSMASQ`` (no ``-DHCP`` suffix) query-log lines are a third: a segment
+gateway that runs its own local dnsmasq as the resolver for its clients (the
+IoT gateway, 10.128.10.8) can be configured to log every query it answers,
+which is real per-device DNS visibility for a segment `pihole_dns.py` never
+sees directly. Two things confirmed against the real live feed (device 7,
+12/48h pulls via the LibreNMS API) before this was encoded, both classic
+"looks like a query, isn't" traps:
+
+  * Every dnsmasq restart logs a bulk self-test sweep - one ``query[PTR]``
+    plus a ``config``/``DHCP``/bare-hosts-path answer line, per statically
+    known host and DHCP lease, all at one identical timestamp, all from
+    client ``127.0.0.1``. A single observed restart produced 118+80+36+2
+    such lines. None of it is a real device asking to resolve anything;
+    excluding ``client == 127.0.0.1`` unconditionally removes the whole
+    artifact, regardless of verb - every real client query observed live
+    came from a real ``10.128.50.x`` address, never loopback.
+  * ``forwarded``/``reply``/``cached`` lines answer a query already logged
+    by its ``query[...]`` line - often several ``reply`` lines for one
+    query (one per round-robin A record: a single lookup for
+    ``jnn-pa.googleapis.com`` produced 8). Turning those into events too
+    would multiply one real lookup into many DNS events, so only the
+    ``query[...]`` line becomes an ``Event`` here - one event per lookup,
+    the same shape `pihole_dns.py` already produces.
+
+The double-visibility this creates - the same resolution can now show up
+once here (real IoT client IP) and once more in Pi-hole's own query log
+(client_ip=10.128.10.8, since the gateway is itself a DNS client of
+Pi-hole for its upstream lookups) - is a network fact, not a parsing bug,
+and is documented in `profile.yml`'s `known_quirks` rather than
+deduplicated here: the two sources are recording two different hops of the
+same lookup, not the same event twice.
 """
 
 from __future__ import annotations
@@ -75,6 +107,31 @@ _PROTO_NUMBERS = {"1": "icmp", "2": "igmp", "6": "tcp", "17": "udp",
 #: "STA aa:bb:... IEEE 802.11: deauthenticated ...".
 _MAC_RE = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
 
+#: OpenWRT LuCI web-UI login, format confirmed live on both segment gateways
+#: (devices 4 and 7, 72h pull): "[info] luci: accepted login on / for root
+#: from 10.128.10.35". Only "accepted" was observed live; "failed" is LuCI's
+#: own stable, symmetric wording (dispatcher.lua logs both outcomes through
+#: the same call shape) - built ahead of the first real one, the same
+#: reasoning _parse_sshd_session already applies to OpenSSH's
+#: "Failed"/"Invalid user" lines never having occurred on this deployment.
+_LUCI_LOGIN_RE = re.compile(
+    r"^\[info\]\s+luci:\s+(?P<result>accepted|failed)\s+login\s+on\s+\S+\s+"
+    r"for\s+(?P<user>\S+)\s+from\s+(?P<ip>\S+)",
+    re.IGNORECASE,
+)
+
+#: ASUS/Asuswrt-family web-UI login, format confirmed live on the edge router
+#: (device 3): "[LOGIN][http][Web] successful (10.128.10.35)" and
+#: "... failed (...)". The IoT gateway's own HTTPD-tagged web service
+#: produces the identical line shape but spells the success case "successed"
+#: (a firmware translation quirk, not a different outcome) - `success\w*`/
+#: `fail\w*` matches every variant without caring about the exact suffix.
+#: No username in this line - only the ASUS-style bare admin login has one.
+_ASUS_WEBLOGIN_RE = re.compile(
+    r"^\[LOGIN\]\[http\]\[Web\]\s+(?P<result>success\w*|fail\w*)\s+\((?P<ip>[\d.]+)\)",
+    re.IGNORECASE,
+)
+
 #: DNSMASQ-DHCP lines, format confirmed against the real feed on all three
 #: devices (main router + both OpenWRT segment gateways):
 #:   DHCPDISCOVER(eth0) aa:bb:cc:dd:ee:ff
@@ -88,6 +145,20 @@ _DHCP_VERB_RE = re.compile(
     r"\([^)]*\)\s*(.*)$"
 )
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+
+#: dnsmasq query-log line (program tag "DNSMASQ", not "DNSMASQ-DHCP"), format
+#: confirmed against the real feed (device 7, the IoT segment gateway):
+#:   119 10.128.50.163/51007 query[A] jnn-pa.googleapis.com from 10.128.50.163
+#:   120 10.128.50.163/53438 query[AAAA] jnn-pa.googleapis.com from 10.128.50.163
+#: Only the `query[...]` verb ever reaches this pattern - `forwarded`,
+#: `reply`, `cached`, `config`, `DHCP`, and the bare hosts-file-path verb are
+#: deliberately never matched here (see the module docstring for why: they
+#: either multiply one lookup into several answer lines, or are dnsmasq's own
+#: post-restart self-test against 127.0.0.1, never a real client query).
+_DNSMASQ_QUERY_RE = re.compile(
+    r"^\d+\s+(?P<client>\S+?)/\d+\s+query\[(?P<qtype>[A-Za-z0-9]+)\]\s+"
+    r"(?P<domain>\S+)\s+from\s+\S+\s*$"
+)
 
 
 def _parse_dhcp(message: str) -> dict[str, Any] | None:
@@ -111,6 +182,41 @@ def _parse_dhcp(message: str) -> dict[str, Any] | None:
     if len(tokens) > idx:
         hostname = tokens[idx]
     return {"verb": verb, "ip": ip, "mac": mac, "hostname": hostname}
+
+
+def _parse_dnsmasq_query(message: str) -> dict[str, Any] | None:
+    """Parse one dnsmasq ``query[...]`` line into client/qtype/domain, or
+    None for every other verb (forwarded/reply/cached/config/DHCP/etc.) or a
+    query from ``127.0.0.1`` - the post-restart self-test sweep, never a
+    real device (see the module docstring)."""
+    m = _DNSMASQ_QUERY_RE.match(message.strip())
+    if not m:
+        return None
+    client = m.group("client")
+    if client == "127.0.0.1":
+        return None
+    return {"client": client, "qtype": m.group("qtype"), "domain": m.group("domain")}
+
+
+def _parse_router_admin_login(program: str, message: str) -> dict[str, Any] | None:
+    """Web-UI admin login on a router or segment gateway, from either of two
+    confirmed-live formats - LuCI (program ``UHTTPD``) or the ASUS-family web
+    GUI (program ``HTTPD``). Returns None for any other line under either
+    tag; both services log plenty of non-login chatter under the same
+    program name."""
+    if program == "UHTTPD":
+        m = _LUCI_LOGIN_RE.match(message.strip())
+        if not m:
+            return None
+        return {"success": m.group("result").lower() == "accepted",
+                "ip": m.group("ip"), "user": m.group("user")}
+    if program == "HTTPD":
+        m = _ASUS_WEBLOGIN_RE.match(message.strip())
+        if not m:
+            return None
+        return {"success": m.group("result").lower().startswith("success"),
+                "ip": m.group("ip"), "user": None}
+    return None
 
 
 #: Windows Security auditing lines, forwarded as the full rendered event text
@@ -213,7 +319,7 @@ _DATE_FMT = "%Y-%m-%d %H:%M:%S"
 
 class LibreNMSSyslogSource(Source):
     name = "librenms_syslog"
-    kinds = frozenset({EventKind.FIREWALL, EventKind.SYSTEM, EventKind.AUTH})
+    kinds = frozenset({EventKind.FIREWALL, EventKind.SYSTEM, EventKind.AUTH, EventKind.DNS})
     requires_env = frozenset({"DAWNPATROL_SOURCE_LIBRENMS_URL", "DAWNPATROL_SOURCE_LIBRENMS_TOKEN"})
     max_window_hours = None
 
@@ -509,6 +615,40 @@ class LibreNMSSyslogSource(Source):
                     kind=EventKind.SYSTEM,
                     action=parsed["verb"].lower(),
                     user=parsed["mac"],
+                    **self.assign_zones(src_ip=parsed["ip"]),
+                    **common,
+                )
+
+        # dnsmasq query log: real per-client DNS visibility for a segment
+        # gateway that resolves for its own clients (the IoT gateway) rather
+        # than forwarding straight to Pi-hole. One Event per query line only -
+        # see the module docstring and _parse_dnsmasq_query for why every
+        # other verb, and every 127.0.0.1 "query", is deliberately excluded.
+        if program == "DNSMASQ":
+            parsed = _parse_dnsmasq_query(message)
+            if parsed:
+                return Event(
+                    kind=EventKind.DNS,
+                    domain=parsed["domain"],
+                    qtype=parsed["qtype"],
+                    blocked=False,  # this dnsmasq instance has no blocklist
+                    **self.assign_zones(client_ip=parsed["client"]),
+                    **common,
+                )
+
+        # Router/gateway web-UI admin login - LuCI on the OpenWRT segment
+        # gateways (program "UHTTPD"), the native web GUI on the ASUS edge
+        # router and, with a firmware translation quirk, on the IoT gateway's
+        # own HTTPD-tagged service too (program "HTTPD"). See
+        # _parse_router_admin_login and the module docstring for both
+        # confirmed-live formats.
+        if program in {"UHTTPD", "HTTPD"}:
+            parsed = _parse_router_admin_login(program, message)
+            if parsed:
+                return Event(
+                    kind=EventKind.AUTH,
+                    action="web_login_success" if parsed["success"] else "web_login_failed",
+                    user=parsed["user"],
                     **self.assign_zones(src_ip=parsed["ip"]),
                     **common,
                 )

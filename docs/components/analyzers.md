@@ -6,8 +6,9 @@ dozen metrics and signals - the ~25k tokens of dense, numeric evidence the model
 reasons over. They are pure functions: no network, no model calls, which is what makes
 them fast to iterate on and trivial to test against synthetic data.
 
-Nine ship today: `firewall_volume`, `firewall_patterns`, `dns_anomalies`, `novel_clients`,
-`beaconing`, `auth_activity`, `segment_review`, `correlation`, `baseline_delta`. This
+Ten ship today: `firewall_volume`, `firewall_patterns`, `dns_anomalies`, `novel_clients`,
+`beaconing`, `auth_activity`, `segment_review`, `data_volume`, `correlation`,
+`baseline_delta`. This
 guide explains the contract and query API, gives a one-paragraph mechanism summary of
 every analyzer, then walks through `firewall_patterns.py` in full because it exercises
 every part of the contract, and finally shows you how to add another.
@@ -150,9 +151,17 @@ it, so one `/24` sweep is never double-reported as forty individual probers.
 is usually the most compromise-relevant telemetry available without endpoint agents:
 domain novelty, a DGA-shape heuristic (long, high-entropy, vowel-poor or digit-heavy
 leftmost labels), a genuine policy violation (a host resolving outside the approved
-resolver), and two outlier checks (block rate, NXDOMAIN rate) that each compare a
+resolver), two outlier checks (block rate, NXDOMAIN rate) that each compare a
 candidate against its *peers*, excluding the candidate itself - otherwise the very
-outlier being tested for would inflate its own baseline and never trigger.
+outlier being tested for would inflate its own baseline and never trigger - and two
+DNS tunneling shapes: one client resolving many distinct, almost-never-repeated
+subdomains of one apex (encoded data typically lives in the subdomain itself), and a
+domain with an unusual concentration of TXT/NULL queries (the classic payload-carrying
+record types for tunneling tools). Both tunneling checks were validated against this
+deployment's live 24h Pi-hole traffic before shipping - real CDN traffic (Meta's
+`fbcdn.net`) crossed the subdomain-fanout threshold and is now in the default
+benign-domain list, and a real Cloudflare Tunnel deployment crossed the TXT/NULL
+threshold and is excluded via this deployment's own `profile.yml`.
 
 **`novel_clients`** (order 35) reuses the exact same `Baseline.novel()` mechanism
 `dns_anomalies` applies to domains, for two different device identities: internal IP
@@ -169,13 +178,16 @@ domain reputation has never seen. Runs on DNS query timing today; a flow source 
 configured) gives it materially stronger, cache-immune connection-level timing instead.
 
 **`auth_activity`** (order 45) is the largest signal surface of any analyzer, because it
-covers four independent auth-adjacent sources with very different data shapes: VPN
+covers five independent auth-adjacent sources with very different data shapes: VPN
 daemon lifecycle (this deployment's VPN log has no per-session data, so this stays a
 restart-frequency check, explicitly labeled as not login analysis), Wi-Fi
 deauthentication (a real per-device and mass-burst check), Windows logon/Defender
-telemetry, and Linux SSH. Every check here was built and tuned against real captured
-production data for the specific source it covers, not assumed from documentation - see
-the module's own docstring for the verification history of each one.
+telemetry, Linux SSH, and router/gateway web-UI admin login (LuCI on the OpenWRT segment
+gateways, the ASUS-family GUI on the edge router - the single highest-value target on a
+home network, and until this was added, nothing watched who administers it). Every check
+here was built and tuned against real captured production data for the specific source
+it covers, not assumed from documentation - see the module's own docstring for the
+verification history of each one.
 
 **`segment_review`** (order 50) is driven entirely by `profile.yml` - nothing in the
 code hardcodes what "IoT" or "DMZ" mean, only what the profile declares about a zone's
@@ -184,6 +196,17 @@ layout unchanged. Three checks per zone: egress outside a declared allowlist, ac
 inbound sessions (blanket for untrusted zones, novelty-gated for trusted ones so a
 standing intentional port-forward doesn't fire every run), and a time-of-day baseline
 that flags real activity during hours a zone has historically been quiet.
+
+**`data_volume`** (order 55) is the closest thing to exfiltration detection
+possible without a flow source: total outbound-accepted bytes per internal
+source, flagged when one source is a peer-relative outlier or when a single
+(source, destination) pair moves an absolute large amount in one run,
+boosted when that destination is novel. Written and validated against this
+deployment's live feed with an honest result: the edge router currently logs
+zero internal-to-external ACCEPT traffic at all, so today this analyzer
+reports a confirmed-zero metric with a data-quality note rather than a
+signal - see the module docstring for exactly what was checked and why the
+code is still worth shipping now.
 
 **`correlation`** (order 60) is the highest-value tier, and the one that only works
 because every source normalizes into one `Event` shape: a host active in both DNS and

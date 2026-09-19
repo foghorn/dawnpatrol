@@ -47,6 +47,19 @@ account authenticating over SSH, a successful logon from outside this
 network, and a burst of failed/invalid-user attempts - the single most
 standard brute-force signature there is, though none had occurred on this
 device as of when this was built.
+
+Router/gateway web-UI admin login: the highest-value target on a home
+network is the device that controls every other device's traffic, and until
+now nothing watched who administers it. Two confirmed-live formats -
+LuCI's `[info] luci: accepted login on / for root from <ip>` on both OpenWRT
+segment gateways, and the ASUS-family GUI's `[LOGIN][http][Web] successful
+(<ip>)` on the edge router (a firmware translation quirk spells this
+"successed" on one device; matched regardless) -
+`librenms_syslog._parse_router_admin_login` turns both into the same
+`EventKind.AUTH` shape. Two checks, symmetric to the SSH ones: a successful
+login from outside this network, and a burst of failed attempts - no
+per-account novelty check, since these panels typically have exactly one
+account and "a new account logged in" is not a meaningful question here.
 """
 
 from __future__ import annotations
@@ -92,6 +105,12 @@ _SSH_FAILURE_ACTIONS = ["ssh_failed", "ssh_invalid"]
 _SSH_FAILURE_BURST_MIN = 5
 _SSH_SAMPLE_LIMIT = 500
 
+#: Keep in sync with librenms_syslog._parse_router_admin_login's `action`
+#: values.
+_ROUTER_ADMIN_ACTIONS = ["web_login_success", "web_login_failed"]
+_ROUTER_ADMIN_FAILURE_BURST_MIN = 5
+_ROUTER_ADMIN_SAMPLE_LIMIT = 500
+
 
 class AuthActivityAnalyzer(Analyzer):
     name = "auth_activity"
@@ -105,6 +124,7 @@ class AuthActivityAnalyzer(Analyzer):
         self._windows_logons(q, r, baseline, profile)
         self._windows_defender(q, r)
         self._ssh_logons(q, r, baseline, profile)
+        self._router_admin_logons(q, r, profile)
         return r
 
     # ----- VPN: service-level only, no per-session data available ------------- #
@@ -521,5 +541,96 @@ class AuthActivityAnalyzer(Analyzer):
                 "attempt. Check whether any later logon from the same "
                 "source succeeded, and whether this host's SSH port is "
                 "reachable from anywhere it should not be."
+            ),
+        ))
+
+    # ----- Router/gateway web-UI admin login ------------------------------------ #
+
+    def _router_admin_logons(self, q: EventQuery, r: AnalyzerResult, profile: Profile) -> None:
+        """LuCI (the OpenWRT segment gateways) and the ASUS-family web GUI
+        (the edge router) both produce real per-login evidence for the
+        single highest-value target on a home network: the device that
+        controls every other device's traffic. Two checks, symmetric to the
+        SSH ones above: a successful login from outside this network, and a
+        burst of failed attempts. There is no per-account novelty check here
+        - these admin panels typically have exactly one account (root/admin),
+        so "a new account logged in" is not a meaningful question the way it
+        is for Windows or SSH.
+        """
+        total = q.count(kind=EventKind.AUTH, action=_ROUTER_ADMIN_ACTIONS)
+        if not total:
+            return
+        r.metrics.append(Metric(
+            key="auth.router_admin_events", value=total, section="router",
+            label="Router/gateway web-UI login events",
+        ))
+        self._router_admin_external_login(q, r, profile)
+        self._router_admin_failure_burst(q, r)
+
+    def _router_admin_external_login(self, q: EventQuery, r: AnalyzerResult,
+                                      profile: Profile) -> None:
+        rows = q.sample(n=_ROUTER_ADMIN_SAMPLE_LIMIT, kind=EventKind.AUTH,
+                        action="web_login_success")
+        external: dict[str, dict] = {}
+        for row in rows:
+            src_ip = row.get("src_ip")
+            if not src_ip or profile.is_internal(src_ip):
+                continue
+            external.setdefault(src_ip, row)
+        for src_ip, row in sorted(external.items()):
+            r.signals.append(Signal(
+                id=f"auth.router_admin_external_login.{src_ip}",
+                analyzer=self.name,
+                title=f"Router/gateway admin login accepted from external address {src_ip}",
+                taxonomy="auth.router_admin_external_login",
+                severity_hint=Severity.HIGH,
+                confidence=0.7,
+                entities=[
+                    Entity(type=EntityType.IP, value=src_ip, role="source"),
+                    Entity(type=EntityType.HOST, value=row.get("device") or "unknown",
+                          role="target"),
+                ],
+                evidence={
+                    "src_ip": src_ip, "account": row.get("user"),
+                    "device": row.get("device"),
+                },
+                narrative_hint=(
+                    "A successful admin-panel login whose source address is "
+                    "outside this network means the device that controls every "
+                    "other device's traffic was just reconfigurable from "
+                    "outside it - either an intentionally exposed remote-"
+                    "management feature or unauthorised access. Unlike "
+                    "perimeter scanning, this has no innocent default "
+                    "explanation; confirm whether remote administration is "
+                    "meant to be enabled on this device at all."
+                ),
+            ))
+
+    def _router_admin_failure_burst(self, q: EventQuery, r: AnalyzerResult) -> None:
+        """Structurally ready, not yet verified against a real burst - only
+        successful logins have occurred on this deployment so far. The same
+        reasoning `_ssh_failure_burst` already applies: build ahead of the
+        first real one rather than waiting for it."""
+        total = q.count(kind=EventKind.AUTH, action="web_login_failed")
+        if total < _ROUTER_ADMIN_FAILURE_BURST_MIN:
+            return
+        by_source = q.top("src_ip", n=10, kind=EventKind.AUTH, action="web_login_failed")
+        r.signals.append(Signal(
+            id="auth.router_admin_failure_burst",
+            analyzer=self.name,
+            title=f"{total} failed router/gateway admin login attempt(s) this run",
+            taxonomy="auth.router_admin_failure_burst",
+            severity_hint=Severity.MEDIUM,
+            confidence=0.6,
+            entities=[Entity(type=EntityType.IP, value=ip, role="source")
+                     for ip, _n in by_source[:10] if ip],
+            evidence={"failed_attempts": total, "by_source": by_source},
+            narrative_hint=(
+                "A cluster of failed admin-panel logins is a password-guessing "
+                "attempt against the device that controls every other device's "
+                "traffic - the single highest-value credential on this "
+                "network. Check whether any later attempt from the same "
+                "source succeeded, and whether this device's admin interface "
+                "is reachable from anywhere it should not be."
             ),
         ))

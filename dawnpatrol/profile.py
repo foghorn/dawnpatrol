@@ -67,6 +67,12 @@ DEFAULT_BENIGN_SUFFIXES = [
     "google.com", "gstatic.com", "googleapis.com", "microsoft.com", "windowsupdate.com",
     "apple.com", "icloud.com", "cloudflare.com", "akamai.net", "amazonaws.com",
     "netflix.com", "mozilla.org", "ubuntu.com", "debian.org", "github.com",
+    # Meta's CDN legitimately serves many distinct edge hostnames per client
+    # (scontent-xyz1-1.fbcdn.net, ...) - confirmed live as a real false
+    # positive for dns_anomalies.py's subdomain-fanout tunneling check
+    # (one real client crossed 40+ distinct fbcdn.net hostnames at a 0.93
+    # uniqueness ratio in ordinary use) before this was added.
+    "facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com",
     "pool.ntp.org", "in-addr.arpa", "ip6.arpa", "local", "arpa",
 ]
 

@@ -72,6 +72,32 @@ def test_events_query_must_be_scoped_to_the_run():
         sqlguard.validate("SELECT * FROM events", RUN)
 
 
+def test_mentioning_run_id_without_scoping_to_it_is_rejected():
+    """Merely containing the text "run_id" must not satisfy the check.
+
+    A prior version of this guard did a substring search for "run_id" in the
+    query text, which this string would pass while reading every run still in
+    the raw retention window, not just RUN.
+    """
+    with pytest.raises(sqlguard.SQLRejected, match="run_id"):
+        sqlguard.validate(
+            "SELECT *, 'run_id' AS note FROM events WHERE src_ip='1.2.3.4'", RUN)
+
+
+def test_scoping_to_a_different_run_id_is_rejected():
+    with pytest.raises(sqlguard.SQLRejected, match="run_id"):
+        sqlguard.validate("SELECT * FROM events WHERE run_id='someone-elses-run'", RUN)
+
+
+def test_qualified_and_in_clause_run_id_scoping_is_accepted():
+    sql, _ = sqlguard.validate(
+        f"SELECT * FROM events e WHERE e.run_id = '{RUN}'", RUN)
+    assert "events" in sql
+    sql, _ = sqlguard.validate(
+        f"SELECT * FROM events WHERE run_id IN ('{RUN}', 'other')", RUN)
+    assert "events" in sql
+
+
 @pytest.mark.parametrize("sql", [
     "SELECT * FROM(events)",
     "SELECT * FROM (events)",

@@ -181,6 +181,7 @@ dawnpatrol/
 │   │   ├── beaconing.py
 │   │   ├── auth_activity.py        # VPN lifecycle + Wi-Fi deauthentication
 │   │   ├── segment_review.py
+│   │   ├── data_volume.py       # outbound byte-volume outliers (exfil proxy)
 │   │   ├── correlation.py
 │   │   ├── baseline_delta.py
 │   │   └── TEMPLATE.py

@@ -13,12 +13,13 @@ from dawnpatrol.analyzers.auth_activity import AuthActivityAnalyzer
 from dawnpatrol.analyzers.baseline import Baseline
 from dawnpatrol.analyzers.beaconing import BeaconingAnalyzer, beacon_score
 from dawnpatrol.analyzers.correlation import CorrelationAnalyzer
+from dawnpatrol.analyzers.data_volume import DataVolumeAnalyzer
 from dawnpatrol.analyzers.dns_anomalies import DNSAnomalyAnalyzer, looks_like_dga
 from dawnpatrol.analyzers.firewall_patterns import FirewallPatternAnalyzer
 from dawnpatrol.analyzers.firewall_volume import FirewallVolumeAnalyzer
 from dawnpatrol.analyzers.novel_clients import NovelClientAnalyzer
 from dawnpatrol.analyzers.segment_review import SegmentReviewAnalyzer
-from dawnpatrol.models import EntityType, Metric
+from dawnpatrol.models import EntityType, Metric, Severity
 from dawnpatrol.query import EventQuery
 from tests.conftest import make_events
 
@@ -168,6 +169,116 @@ def test_low_nxdomain_count_is_not_flagged_regardless_of_rate(q, profile, baseli
 def test_dga_heuristic(domain, expected):
     suspicious, _entropy, _label = looks_like_dga(domain)
     assert suspicious is expected
+
+
+@pytest.mark.parametrize("domain,expected_apex", [
+    ("a1b2c3.tunnel.evil.com", "evil.com"),
+    ("example.com", "example.com"),
+    ("deep.sub.domain.foo.bar.co.uk", "bar.co.uk"),
+    ("shop.example.com.au", "example.com.au"),
+])
+def test_apex_domain_extraction(domain, expected_apex):
+    from dawnpatrol.analyzers.dns_anomalies import apex_domain
+
+    assert apex_domain(domain) == expected_apex
+
+
+def test_subdomain_fanout_tunneling_is_detected(q, profile, baseline, window):
+    """The core DNS tunneling shape: one client, many distinct subdomains of
+    one apex, almost none repeated - encoded data typically lives in the
+    subdomain itself, so each query differs from the last."""
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+              dedup_key=f"tun-fan-{i}", client_ip="10.10.0.160", src_zone="lan",
+              domain=f"{i:016x}.tunnel.example.net", qtype="A", blocked=False)
+        for i in range(50)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = DNSAnomalyAnalyzer().run(q, profile, baseline)
+    hits = [s for s in result.signals if s.taxonomy == "dns.tunnel_suspect"]
+    assert len(hits) == 1
+    signal = hits[0]
+    assert signal.evidence["client"] == "10.10.0.160"
+    assert signal.evidence["apex"] == "example.net"
+    assert signal.evidence["distinct_subdomains"] == 50
+    assert signal.evidence["uniqueness_ratio"] == 1.0
+    assert signal.severity_hint.name == "MEDIUM"
+
+
+def test_repeated_subdomains_at_high_volume_is_not_tunneling(q, profile, baseline, window):
+    """High query volume alone is not tunneling - it is the SAME small set of
+    subdomains being re-resolved that must not fire, only a low uniqueness
+    ratio distinguishes this from real fan-out."""
+    from dawnpatrol.models import Event, EventKind
+
+    events = []
+    subdomains = [f"host{i}.example.net" for i in range(45)]  # crosses the count floor
+    for i in range(900):  # each subdomain resolved ~20 times -> ratio ~0.05
+        events.append(Event(
+            ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+            dedup_key=f"tun-repeat-{i}", client_ip="10.10.0.161", src_zone="lan",
+            domain=subdomains[i % len(subdomains)], qtype="A", blocked=False,
+        ))
+    q.store.insert_events(q.run_id, events)
+    result = DNSAnomalyAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "dns.tunnel_suspect" for s in result.signals)
+
+
+def test_subdomain_fanout_under_a_benign_apex_is_excluded(q, profile, baseline, window):
+    """A CDN or analytics platform can legitimately generate huge subdomain
+    diversity under one apex - the benign-domain list is the same escape
+    hatch novel_domains and dga already use, reused here."""
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+              dedup_key=f"tun-benign-{i}", client_ip="10.10.0.162", src_zone="lan",
+              domain=f"edge-{i}.google.com", qtype="A", blocked=False)
+        for i in range(50)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = DNSAnomalyAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "dns.tunnel_suspect" for s in result.signals)
+
+
+def test_txt_null_concentration_is_detected(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+              dedup_key=f"tun-qtype-{i}", client_ip="10.10.0.163", src_zone="lan",
+              domain="leak.example.net", qtype="TXT", blocked=False)
+        for i in range(30)
+    ] + [
+        Event(ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+              dedup_key=f"tun-qtype-a-{i}", client_ip="10.10.0.163", src_zone="lan",
+              domain="leak.example.net", qtype="A", blocked=False)
+        for i in range(10)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = DNSAnomalyAnalyzer().run(q, profile, baseline)
+    hits = [s for s in result.signals if s.taxonomy == "dns.tunnel_qtype_suspect"]
+    assert len(hits) == 1
+    top = hits[0].evidence["top"]
+    assert any(h["domain"] == "leak.example.net" and h["txt_null_queries"] == 30 for h in top)
+
+
+def test_a_few_spf_txt_lookups_are_not_flagged(q, profile, baseline, window):
+    """A handful of TXT lookups (SPF/DKIM/verification) is routine - both the
+    absolute floor and the concentration ratio must be crossed."""
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="pihole_dns", kind=EventKind.DNS,
+              dedup_key=f"spf-{i}", client_ip="10.10.0.164", src_zone="lan",
+              domain="mail-provider.example.net", qtype="TXT", blocked=False)
+        for i in range(3)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = DNSAnomalyAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "dns.tunnel_qtype_suspect" for s in result.signals)
 
 
 # --------------------------------------------------------------------------- #
@@ -1015,3 +1126,188 @@ def test_a_couple_of_ssh_failures_is_not_a_burst(q, profile, baseline, window):
     q.store.insert_events(q.run_id, events)
     result = AuthActivityAnalyzer().run(q, profile, baseline)
     assert not any(s.taxonomy == "auth.ssh_failure_burst" for s in result.signals)
+
+
+# --------------------------------------------------------------------------- #
+# Router/gateway web-UI admin login
+# --------------------------------------------------------------------------- #
+
+
+def test_router_admin_login_from_external_address_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind, Severity
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="ra1", action="web_login_success", user="root",
+              src_ip="203.0.113.5", src_zone="external", device="7"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "auth.router_admin_external_login")
+    assert signal.severity_hint == Severity.HIGH
+    assert signal.evidence["src_ip"] == "203.0.113.5"
+
+
+def test_router_admin_login_from_internal_address_is_not_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    q.store.insert_events(q.run_id, [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key="ra2", action="web_login_success", user="root",
+              src_ip="10.10.0.35", src_zone="lan", device="7"),
+    ])
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.router_admin_external_login" for s in result.signals)
+
+
+def test_router_admin_failure_burst_is_flagged(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"ra3-{i}", action="web_login_failed", src_ip="203.0.113.5", device="3")
+        for i in range(6)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "auth.router_admin_failure_burst")
+    assert signal.evidence["failed_attempts"] == 6
+
+
+def test_a_couple_of_router_admin_failures_is_not_a_burst(q, profile, baseline, window):
+    from dawnpatrol.models import Event, EventKind
+
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"ra4-{i}", action="web_login_failed", src_ip="10.10.0.35", device="3")
+        for i in range(2)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    assert not any(s.taxonomy == "auth.router_admin_failure_burst" for s in result.signals)
+
+
+# --------------------------------------------------------------------------- #
+# Data volume
+# --------------------------------------------------------------------------- #
+
+MB = 1024 * 1024
+
+
+def _fw_accept(dedup_key: str, ts, src_ip: str, dst_ip: str, pkt_len: int):
+    from dawnpatrol.models import Event, EventKind
+
+    return Event(ts=ts, source="librenms_syslog", kind=EventKind.FIREWALL,
+                dedup_key=dedup_key, action="accept", proto="tcp",
+                src_ip=src_ip, dst_ip=dst_ip, pkt_len=pkt_len)
+
+
+def test_no_egress_bytes_produces_a_zero_metric_and_a_note(store, profile, window):
+    """Internal-to-internal ACCEPT traffic (the only kind this deployment's
+    edge router actually logs, per the module docstring) must never be
+    counted as egress, and the metric must say why it reads zero rather than
+    presenting silence as a clean bill of health."""
+    run_id = "vol-no-egress"
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        _fw_accept("v1", window.end, "10.10.0.30", "10.10.15.135", 300 * MB),
+    ])
+    result = DataVolumeAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    by_key = {m.key: m.value for m in result.metrics}
+    assert by_key["fw.bytes.outbound_accepted"] == 0
+    assert result.signals == []
+    assert any("egress" in note or "logged" in note for note in result.notes)
+
+
+def test_source_outlier_is_detected_against_its_peers(store, profile, window):
+    run_id = "vol-outlier"
+    store.start_run(run_id, 1, window.start, window)
+    events = [
+        # One dominant source, split across two pairs so neither alone trips
+        # the large-transfer floor - this test isolates the peer-outlier check.
+        _fw_accept("v2", window.end, "10.10.0.21", "203.0.113.50", 150 * MB),
+        _fw_accept("v3", window.end, "10.10.0.21", "203.0.113.53", 150 * MB),
+        _fw_accept("v4", window.end, "10.10.0.22", "203.0.113.51", 10 * MB),
+        _fw_accept("v5", window.end, "10.10.0.23", "203.0.113.52", 8 * MB),
+    ]
+    store.insert_events(run_id, events)
+    result = DataVolumeAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    outliers = [s for s in result.signals if s.taxonomy == "data.volume_outlier"]
+    assert len(outliers) == 1
+    signal = outliers[0]
+    assert signal.id == "data.volume_outlier.10.10.0.21"
+    assert signal.evidence["outbound_accepted_bytes"] == 300 * MB
+    assert not any(s.taxonomy == "data.large_transfer" for s in result.signals)
+
+
+def test_similar_volumes_across_peers_do_not_trigger_an_outlier(store, profile, window):
+    run_id = "vol-no-outlier"
+    store.start_run(run_id, 1, window.start, window)
+    events = [
+        _fw_accept("v6", window.end, "10.10.0.21", "203.0.113.50", 60 * MB),
+        _fw_accept("v7", window.end, "10.10.0.22", "203.0.113.51", 65 * MB),
+        _fw_accept("v8", window.end, "10.10.0.23", "203.0.113.52", 55 * MB),
+    ]
+    store.insert_events(run_id, events)
+    result = DataVolumeAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert not any(s.taxonomy == "data.volume_outlier" for s in result.signals)
+
+
+def test_transfer_below_every_floor_does_not_fire(store, profile, window):
+    run_id = "vol-below-floor"
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        _fw_accept("v9", window.end, "10.10.0.21", "203.0.113.50", 50 * MB),
+    ])
+    result = DataVolumeAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    assert result.signals == []
+
+
+def test_large_transfer_to_a_novel_destination_is_medium_severity(store, profile, window):
+    run_id = "vol-large-novel"
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        _fw_accept("v10", window.end, "10.10.0.21", "203.0.113.60", 250 * MB),
+    ])
+    result = DataVolumeAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "data.large_transfer")
+    assert signal.evidence["destination_is_novel"] is True
+    assert signal.severity_hint == Severity.MEDIUM
+
+
+def test_large_transfer_to_a_long_known_destination_is_low_severity(store, profile, window):
+    from datetime import timedelta
+
+    run_id = "vol-large-known"
+    store.observe_entities([(EntityType.IP, "203.0.113.61", 1)], window.start - timedelta(days=30))
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        _fw_accept("v11", window.end, "10.10.0.21", "203.0.113.61", 250 * MB),
+    ])
+    result = DataVolumeAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    signal = next(s for s in result.signals if s.taxonomy == "data.large_transfer")
+    assert signal.evidence["destination_is_novel"] is False
+    assert signal.severity_hint == Severity.LOW
+
+
+def test_internal_to_internal_transfer_never_counts_as_egress(store, profile, window):
+    """The exact live shape this analyzer was validated against: a NAS
+    repeatedly hitting a DMZ host is real traffic, but it never left the
+    network, so it must not inflate the egress metric or read as a transfer
+    signal - see the module docstring for the confirmed live pattern."""
+    run_id = "vol-internal-only"
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        _fw_accept("v12", window.end, "10.10.0.30", "10.10.15.135", 500 * MB),
+        _fw_accept("v13", window.end, "10.10.0.21", "203.0.113.62", 1 * MB),
+    ])
+    result = DataVolumeAnalyzer().run(
+        EventQuery(store, run_id), profile, Baseline(store, run_id))
+    by_key = {m.key: m.value for m in result.metrics}
+    assert by_key["fw.bytes.outbound_accepted"] == 1 * MB
+    assert result.signals == []

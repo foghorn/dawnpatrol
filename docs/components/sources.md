@@ -117,6 +117,41 @@ never recur:
   every device's record count (`"N device(s) collected from, records per device: h1=120,
   h2=45, ..."`), plus a second line naming any device that returned zero records - so
   the full picture survives the same render-time cap that used to hide it.
+- **`DNSMASQ` (no `-DHCP` suffix) query-log lines become real DNS events** - a
+  segment gateway that runs its own local dnsmasq as the resolver for its
+  clients (the IoT gateway here) can be configured to log every query it
+  answers, giving per-device DNS visibility for a segment Pi-hole never sees
+  directly. Format confirmed against the real live feed: `<id> <client_ip>/
+  <port> query[TYPE] <domain> from <client_ip>`. Two traps, both verified
+  against production traffic before being encoded: (1) only the `query[...]`
+  line becomes an `Event` - `forwarded`/`reply`/`cached` lines answer a query
+  already captured by its own `query[...]` line, often several `reply` lines
+  per query (one per round-robin A record), so turning those into events too
+  would multiply one real lookup into many; (2) every dnsmasq restart replays
+  a bulk self-test sweep - `query[PTR]` plus a `config`/`DHCP`/bare-hosts-path
+  answer line per statically-known host and DHCP lease, all at one identical
+  timestamp, all from client `127.0.0.1` - confirmed live at 118+80+36+2 lines
+  for a single restart. None of it is real device activity; excluding
+  `client == 127.0.0.1` unconditionally removes the whole artifact. See
+  `_parse_dnsmasq_query` and the module docstring in `librenms_syslog.py`.
+  This also means the *same* DNS resolution can now legitimately appear from
+  two sources - here, with the real client IP, and in `pihole_dns.py`'s own
+  query log, attributed to the gateway's IP (10.128.10.8) as its own upstream
+  client - documented as a `known_quirks` entry in `profile.yml` rather than
+  deduplicated, since they are two different hops of the same lookup, not a
+  duplicate record.
+- **Router/gateway web-UI admin login becomes a real per-login `AUTH` event** -
+  two confirmed-live formats, from a 72h pull across all three
+  firewall-logging devices: LuCI's `[info] luci: accepted login on / for
+  root from <ip>` (program `UHTTPD`, both OpenWRT segment gateways) and the
+  ASUS-family GUI's `[LOGIN][http][Web] successful (<ip>)` (program `HTTPD`,
+  the edge router). A firmware translation quirk spells the success case
+  "successed" rather than "successful" on the IoT gateway's own
+  `HTTPD`-tagged service - still a successful login, matched by the same
+  pattern regardless of the exact suffix. Only LuCI's "accepted" case was
+  observed live; "failed" is built from LuCI's own stable, symmetric
+  dispatcher.lua wording ahead of the first real one, the same reasoning
+  already applied to OpenSSH's "Failed"/"Invalid user" lines below.
 - **Every device with a private IP is registered in the cross-source device directory**
   (`dawnpatrol/devices.py`, `ARCHITECTURE.md` §8.3) - a per-run registry keyed by IP
   address, not by LibreNMS's own `device_id`, so any other source can contribute to the

@@ -2,7 +2,8 @@
 
 DNS is usually the most compromise-relevant telemetry available, so this
 analyzer does more real detection than the firewall ones: novel domains, DGA
-shape, resolver bypass, and per-client block-rate outliers.
+shape, resolver bypass, per-client block/NXDOMAIN-rate outliers, and two
+DNS tunneling shapes (subdomain fan-out, TXT/NULL concentration).
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+from typing import Any
 
 from ..models import (
     AnalyzerResult,
@@ -32,6 +34,50 @@ NOVEL_REPORT_LIMIT = 25
 NXDOMAIN_MIN_COUNT = 30
 NXDOMAIN_RATE_FLOOR = 15.0
 NXDOMAIN_RATE_MULTIPLE = 4.0
+
+#: A small, deliberately incomplete list of two-label public suffixes -
+#: enough to keep unrelated organizations that happen to share a ccTLD
+#: second-level domain (two sites under "co.uk" are not the same apex) from
+#: being merged into one false "apex" by a naive last-two-labels split. Not a
+#: full public-suffix implementation, the same heuristic-not-perfect
+#: tradeoff `looks_like_dga` already makes for its own shape.
+_TWO_LABEL_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "net.uk",
+    "co.jp", "co.nz", "co.za", "co.in", "co.kr", "co.il",
+    "com.au", "net.au", "org.au", "edu.au", "gov.au",
+    "com.br", "com.mx", "com.cn", "com.tw", "com.sg", "com.hk",
+})
+
+#: DNS tunneling: a single client resolving many distinct, mostly-unique-use
+#: subdomains of one apex. Each encoded query typically carries a slice of
+#: data in the subdomain itself, so almost every one differs from the last -
+#: the uniqueness ratio is what separates this from a legitimate high-volume
+#: domain (repeatedly resolving the *same* few names).
+TUNNEL_MIN_DISTINCT_SUBDOMAINS = 40
+TUNNEL_MIN_UNIQUENESS_RATIO = 0.8
+
+#: DNS tunneling, second shape: TXT and NULL are the classic payload-carrying
+#: record types (larger response per query) for tools like iodine, dnscat2,
+#: and Cobalt Strike's DNS beacon. Legitimate TXT use (SPF/DKIM/domain
+#: verification) is rare and low-volume per domain; NULL is virtually never
+#: used at all outside tunneling.
+TUNNEL_QTYPES = ("TXT", "NULL")
+TUNNEL_QTYPE_MIN_COUNT = 20
+TUNNEL_QTYPE_MIN_RATIO = 0.5
+TUNNEL_QTYPE_REPORT_LIMIT = 100
+
+
+def apex_domain(domain: str) -> str:
+    """Best-effort registrable domain: the last two labels, or three when the
+    last two are a known ccTLD second-level suffix (co.uk, com.au, ...).
+    See `_TWO_LABEL_SUFFIXES` for the tradeoff this makes."""
+    parts = domain.rstrip(".").split(".")
+    if len(parts) < 2:
+        return domain
+    last_two = ".".join(parts[-2:])
+    if last_two in _TWO_LABEL_SUFFIXES and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return last_two
 
 
 def shannon_entropy(text: str) -> float:
@@ -109,6 +155,8 @@ class DNSAnomalyAnalyzer(Analyzer):
         self._resolver_bypass(q, r, profile)
         self._client_outliers(q, r, profile)
         self._nxdomain_outliers(q, r, profile)
+        self._tunnel_fanout(q, r, profile)
+        self._tunnel_qtype_outliers(q, r, profile)
         return r
 
     # ----- novelty --------------------------------------------------------- #
@@ -342,3 +390,124 @@ class DNSAnomalyAnalyzer(Analyzer):
                     "rather than firing on a bare threshold."
                 ),
             ))
+
+    # ----- DNS tunneling: subdomain fan-out --------------------------------------- #
+
+    def _tunnel_fanout(self, q: EventQuery, r: AnalyzerResult, profile: Profile) -> None:
+        """One client resolving many distinct, mostly-unique subdomains of a
+        single apex domain - the core DNS tunneling shape, since each
+        encoded query typically carries a slice of data in the subdomain
+        itself. The uniqueness ratio (distinct subdomains / total queries to
+        that apex) is what separates this from ordinary high-volume access
+        to a domain, which mostly re-resolves the same handful of names.
+        """
+        pairs = q.dns_client_domain_stats(limit=50000)
+        if not pairs:
+            return
+        grouped: dict[tuple[str, str], dict[str, Any]] = {}
+        for client, domain, queries in pairs:
+            if not client or not domain:
+                continue
+            apex = apex_domain(domain)
+            if profile.is_benign_domain(apex):
+                continue
+            slot = grouped.setdefault((client, apex), {"subdomains": set(), "total": 0})
+            slot["subdomains"].add(domain)
+            slot["total"] += queries
+
+        for (client, apex), slot in grouped.items():
+            distinct = len(slot["subdomains"])
+            total = slot["total"]
+            if distinct < TUNNEL_MIN_DISTINCT_SUBDOMAINS:
+                continue
+            ratio = distinct / total if total else 0.0
+            if ratio < TUNNEL_MIN_UNIQUENESS_RATIO:
+                continue
+            confidence = 0.5
+            if ratio >= 0.95:
+                confidence += 0.2
+            if distinct >= 200:
+                confidence += 0.2
+            caveat = profile.attribution_caveat(client)
+            r.signals.append(Signal(
+                id=f"dns.tunnel_suspect.{client}.{apex}",
+                analyzer=self.name,
+                title=f"{profile.label_for(client)} resolved {distinct} distinct "
+                     f"subdomains of {apex}",
+                taxonomy="dns.tunnel_suspect",
+                severity_hint=Severity.MEDIUM,
+                confidence=round(min(confidence, 0.9), 2),
+                entities=[
+                    Entity(type=EntityType.IP, value=client, role="client"),
+                    Entity(type=EntityType.DOMAIN, value=apex, role="apex"),
+                ],
+                evidence={
+                    "client": client,
+                    "apex": apex,
+                    "distinct_subdomains": distinct,
+                    "total_queries": total,
+                    "uniqueness_ratio": round(ratio, 2),
+                    "sample_subdomains": sorted(slot["subdomains"])[:10],
+                    "attribution_caveat": caveat,
+                },
+                narrative_hint=(
+                    "A high volume of distinct, almost-never-repeated subdomains "
+                    "under one apex is the core DNS tunneling shape - encoded data "
+                    "usually lives in the subdomain itself, so nearly every query "
+                    "differs from the last. Content-delivery, telemetry, and "
+                    "analytics platforms can look similar; check whether the apex "
+                    "is a known CDN/analytics provider not yet in the "
+                    "benign-domain list before escalating."
+                ),
+            ))
+
+    # ----- DNS tunneling: TXT/NULL concentration ------------------------------------ #
+
+    def _tunnel_qtype_outliers(self, q: EventQuery, r: AnalyzerResult, profile: Profile) -> None:
+        """TXT and NULL are the classic payload-carrying record types for DNS
+        tunneling tools - a larger response fits per query than a bare A
+        record allows. Flagged on an absolute floor *and* a concentration
+        ratio against that domain's own total query volume, since a handful
+        of legitimate SPF/DKIM TXT lookups is routine and must not fire this
+        on its own.
+        """
+        candidates = q.top("domain", n=TUNNEL_QTYPE_REPORT_LIMIT,
+                           kind=EventKind.DNS, qtype=list(TUNNEL_QTYPES))
+        if not candidates:
+            return
+        hits = []
+        for domain, tn_count in candidates:
+            if not domain or tn_count < TUNNEL_QTYPE_MIN_COUNT or profile.is_benign_domain(domain):
+                continue
+            total = q.count(domain=domain, kind=EventKind.DNS)
+            ratio = tn_count / total if total else 0.0
+            if ratio < TUNNEL_QTYPE_MIN_RATIO:
+                continue
+            hits.append({
+                "domain": domain, "txt_null_queries": tn_count,
+                "total_queries": total, "ratio_pct": round(ratio * 100, 1),
+            })
+        if not hits:
+            return
+        hits.sort(key=lambda h: -h["txt_null_queries"])
+        r.metrics.append(Metric(
+            key="dns.tunnel_qtype_candidates", value=len(hits), section="dns",
+            label="Domains with unusual TXT/NULL query concentration",
+        ))
+        r.signals.append(Signal(
+            id="dns.tunnel_qtype_candidates",
+            analyzer=self.name,
+            title=f"{len(hits)} domain(s) with an unusual TXT/NULL query concentration",
+            taxonomy="dns.tunnel_qtype_suspect",
+            severity_hint=Severity.MEDIUM,
+            confidence=0.5,
+            entities=[Entity(type=EntityType.DOMAIN, value=h["domain"]) for h in hits[:10]],
+            evidence={"count": len(hits), "top": hits[:15]},
+            narrative_hint=(
+                "TXT and NULL records let a tunneling tool carry more payload "
+                "per response than a bare A/AAAA query would. Legitimate TXT use "
+                "(SPF, DKIM, domain verification) is rare and low-volume per "
+                "domain, which is why this requires both an absolute floor and a "
+                "concentration ratio, not a bare count."
+            ),
+        ))

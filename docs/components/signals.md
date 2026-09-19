@@ -54,8 +54,9 @@ is never double-reported as dozens of individual probers.
 ## `dns_anomalies` (order 30)
 
 DNS is usually the most compromise-relevant telemetry available, so this analyzer does
-the most real detection: novelty, DGA shape, resolver-policy violation, and two flavors
-of per-client outlier.
+the most real detection: novelty, DGA shape, resolver-policy violation, two flavors
+of per-client outlier, and two DNS tunneling shapes (subdomain fan-out, TXT/NULL
+concentration).
 
 | Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Key evidence |
 |---|---|---|---|---|---|
@@ -64,6 +65,8 @@ of per-client outlier.
 | `dns.resolver_bypass` | `dns.resolver_bypass` | HIGH | 0.85 | An internal host queries port 53 on a DNS server that isn't in `profile.yml`'s `approved_resolvers` | `approved_resolvers`, `observed` (client→resolver pairs + query counts) |
 | `dns.block_outlier.<client>` | `dns.client_block_outlier` | LOW | 0.6 | One client's Pi-hole block rate is ≥60% *and* ≥2.5× the network's mean rate (min 200 queries to qualify) | `client`, `queries`, `blocked`, `block_rate_pct`, `network_mean_block_rate_pct`, `attribution_caveat` |
 | `dns.nxdomain_outlier.<client>` | `dns.nxdomain_outlier` | LOW | 0.5 | One client's NXDOMAIN rate is ≥15% *and* ≥4× its peers' mean (peers exclude the client itself, to avoid the outlier inflating its own baseline); min 30 NXDOMAIN responses and 200 total queries | `client`, `queries`, `nxdomain`, `nxdomain_rate_pct`, `peer_mean_nxdomain_rate_pct`, `attribution_caveat` |
+| `dns.tunnel_suspect.<client>.<apex>` | `dns.tunnel_suspect` | MEDIUM | 0.5–0.9 (scales with uniqueness ratio and subdomain count) | One client resolves ≥40 distinct subdomains of one non-benign apex, and distinct subdomains are ≥80% of total queries to that apex (near-1:1 - each query mostly unique, the core tunneling shape) | `client`, `apex`, `distinct_subdomains`, `total_queries`, `uniqueness_ratio`, `sample_subdomains`, `attribution_caveat` |
+| `dns.tunnel_qtype_candidates` | `dns.tunnel_qtype_suspect` | MEDIUM | 0.5 | One or more non-benign domains have ≥20 TXT/NULL queries *and* TXT/NULL is ≥50% of that domain's total query volume - the classic payload-carrying record types for DNS tunneling tools | `count`, `top` (domain, txt_null_queries, total_queries, ratio_pct) |
 
 ## `novel_clients` (order 35)
 
@@ -90,10 +93,10 @@ the moment a flow source is configured, since flow timing isn't diluted by DNS c
 ## `auth_activity` (order 45)
 
 Authentication-adjacent events across every source that produces them: VPN daemon
-lifecycle, Wi-Fi deauthentication, Windows logon/Defender telemetry, and Linux SSH.
-The largest signal surface of any analyzer, added incrementally as each data source was
-confirmed live against real production data (see the module's own docstring for the
-verification history of each subsection).
+lifecycle, Wi-Fi deauthentication, Windows logon/Defender telemetry, Linux SSH, and
+router/gateway web-UI admin login. The largest signal surface of any analyzer, added
+incrementally as each data source was confirmed live against real production data (see
+the module's own docstring for the verification history of each subsection).
 
 | Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Key evidence |
 |---|---|---|---|---|---|
@@ -107,6 +110,8 @@ verification history of each subsection).
 | `auth.ssh_new_account` | `auth.ssh_new_account` | MEDIUM | 0.55 | A never-seen-before account authenticated over SSH (accepted) | `accounts` |
 | `auth.ssh_external_logon.<src_ip>` | `auth.ssh_external_logon` | HIGH | 0.7 | A *successful* (accepted) SSH logon whose source address is outside the network | `src_ip`, `account`, `method`, `device` |
 | `auth.ssh_failure_burst` | `auth.ssh_failure_burst` | MEDIUM | 0.6 | ≥5 failed or invalid-user SSH attempts this run — the classic brute-force/spray signature | `failed_attempts`, `by_source`, `by_account` |
+| `auth.router_admin_external_login.<src_ip>` | `auth.router_admin_external_login` | HIGH | 0.7 | A *successful* router/gateway web-UI admin login (LuCI or the ASUS-family GUI) whose source address is outside the network | `src_ip`, `account`, `device` |
+| `auth.router_admin_failure_burst` | `auth.router_admin_failure_burst` | MEDIUM | 0.6 | ≥5 failed router/gateway admin login attempts this run. Structurally ready; unverified against a real burst as of when it was built | `failed_attempts`, `by_source` |
 
 ## `segment_review` (order 50)
 
@@ -130,6 +135,28 @@ run's watchlist into something that can actually re-fire.
 |---|---|---|---|---|---|
 | `corr.watchlist.<type>.<value>` | `watchlist.hit` | MEDIUM | 0.7 | An entity (`ip`, `domain`, or `host`) the model carried forward on a prior run's watchlist (`watchlist_updates`) shows activity again this run. `host` matches the same way `ip` does — by address — plus `Event.device`, in case some future source populates that with a real hostname | `entity`, `entity_type`, `events_this_period`, `watch_reason`, `watch_expires` |
 | `corr.internal_scan.<ip>` | `lateral.internal_scan` | HIGH | 0.65 | An internal host probes ≥20 distinct destination ports with ≥50 total hits — the shape of lateral-movement enumeration, only visible when internal traffic actually traverses a logging device | `src`, `hits`, `distinct_destination_ports`, `duration_hours` |
+
+## `data_volume` (order 55)
+
+Outbound byte-volume signals, from `pkt_len` on ACCEPTed firewall events -
+the closest thing to exfiltration detection possible without a flow source.
+Validated against this deployment's live feed before being written: as of
+2026-09, the edge router logs zero internal-to-external ACCEPT lines at all
+(everything logged is internal-to-internal), and both segment gateways log
+DROP/REJECT only, never ACCEPT. So on this network today this analyzer
+correctly reports a near-zero `fw.bytes.outbound_accepted` metric and raises
+nothing - a confirmed telemetry gap, not a bug - and activates the moment
+that gap closes (an explicit egress-ACCEPT log rule, or a flow source), with
+no code changes needed. See the module docstring for the full validation.
+
+| Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Key evidence |
+|---|---|---|---|---|---|
+| `data.volume_outlier.<src_ip>` | `data.volume_outlier` | MEDIUM | 0.5 | An internal source's total outbound-accepted bytes are ≥50MB *and* ≥5× the mean of its peers (≥3 sources with any egress required for a peer comparison) | `src`, `outbound_accepted_bytes`, `network_mean_bytes`, `multiple_of_mean`, `attribution_caveat` |
+| `data.large_transfer.<src_ip>.<dst_ip>` | `data.large_transfer` | MEDIUM if the destination is novel, else LOW | 0.6 novel / 0.45 known | A single (source, destination) pair's outbound-accepted bytes reach ≥200MB in one run | `src`, `dst`, `bytes`, `hits`, `destination_is_novel`, `attribution_caveat` |
+
+`pkt_len` is a per-packet length (iptables' `LEN=` field), not a
+per-connection byte total - every signal here is directional evidence, never
+a byte-accurate count, and both `narrative_hint`s say so explicitly.
 
 ## `baseline_delta` (order 900)
 
