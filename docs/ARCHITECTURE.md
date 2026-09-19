@@ -387,19 +387,26 @@ class Analyzer(ABC):
 ```
 
 `EventQuery` is a thin, typed query API over the run's SQLite — `q.count(kind=...,
-action="drop", group_by="dst_port")`, `q.top(..., n=15, by="unique:src_ip")`,
-`q.hourly(...)` — so analyzers stay short and readable. They never touch the network,
+action="drop")`, `q.top("dst_port", n=15, by="unique:src_ip")`, `q.hourly(kind=...,
+action="drop")` — so analyzers stay short and readable. They never touch the network,
 which makes them trivially testable against fixtures and fast to iterate on.
 
-`baseline` exposes history: `baseline.first_seen(domain)`, `baseline.metric_series(key,
-days=30)`, `baseline.is_novel_ip(ip)`. Newly-seen-domain detection becomes a real
-database query instead of a diff against a note the model wrote yesterday.
+`baseline` exposes history: `baseline.prior(metric_key)` (last run's value),
+`baseline.novel(EntityType.DOMAIN, [...])` (never-seen-before check), `baseline.series(
+metric_key, days=30)` (a metric's own history, for trend baselining), `baseline.
+recurrence(taxonomy, entity_value)` (how many prior runs), `baseline.watchlist()` (items
+the agent itself carried forward via its own structured output). Newly-seen-domain
+detection becomes a real database query instead of a diff against a note the model wrote
+yesterday.
 
 Analyzers are independent and run in dependency order only where declared. Adding one is
 a single file with one method.
 
-See `docs/components/analyzers.md` for the `EventQuery`/`Baseline` APIs in full and a
-worked example of adding a new detection.
+See `docs/components/analyzers.md` for the `EventQuery`/`Baseline` APIs in full, a
+mechanism summary of every analyzer that ships, and a worked example of adding a new
+detection. See `docs/components/signals.md` for an exhaustive, per-signal catalog of
+everything every analyzer currently emits — taxonomy, severity, confidence, exact
+trigger condition, and evidence fields.
 
 ### 6.3 Enrichment
 

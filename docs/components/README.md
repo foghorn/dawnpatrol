@@ -9,7 +9,8 @@ something and start there if you want to understand why it's shaped the way it i
 | Guide | Answers |
 |---|---|
 | [Sources](sources.md) | How does telemetry get in? How do I add a new one? |
-| [Analyzers](analyzers.md) | How do 300,000 events become 40 signals? How do I detect a new pattern? |
+| [Analyzers](analyzers.md) | How do 300,000 events become a few dozen signals? How do I detect a new pattern? |
+| [Signal catalog](signals.md) | What does every signal currently emitted actually mean - severity, confidence, evidence, exact trigger? |
 | [Enrichment](enrichment.md) | How does an IP or domain get external context, safely and on a budget? |
 | [Outputs](outputs.md) | How does a finished report get delivered? How do I add a destination? |
 | [Providers](providers.md) | Which model actually does the judgment, and how do I point at a different one? |
