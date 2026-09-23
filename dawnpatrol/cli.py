@@ -50,6 +50,12 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--window-hours", type=int, default=None)
     run.add_argument("--dry-run", action="store_true",
                      help="do everything except actually deliver")
+    run.add_argument("--ephemeral", action="store_true",
+                     help="delete this run's database rows and report files "
+                          "immediately after it finishes (success or failure); "
+                          "delivery still happens for real unless --dry-run is "
+                          "also set. Does not undo this run's contribution to "
+                          "the long-term entity baseline.")
     run.add_argument("--stop-after", choices=STOP_STAGES, default="",
                      help="halt after a stage; 'analyze' costs no API spend")
     run.add_argument("--print", dest="do_print", action="store_true",
@@ -86,6 +92,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     runs = sub.add_parser("runs", help="list recent runs")
     runs.add_argument("--limit", type=int, default=15)
+
+    delr = sub.add_parser("delete-run", help="permanently remove one run's data "
+                          "(events, metrics, signals, findings, report files); "
+                          "does not affect the long-term entity baseline")
+    delr.add_argument("run_id")
+    delr.add_argument("--force", action="store_true",
+                      help="delete even if the run has no recorded finish time "
+                           "(looks still in progress)")
 
     sub.add_parser("canary", help="report on the most recent detection self-test")
     return p
@@ -131,7 +145,7 @@ def _dispatch(command: str, args: argparse.Namespace, settings: Settings) -> int
             "probe": cmd_probe, "init-db": cmd_init_db, "hunt": cmd_hunt,
             "render": cmd_render, "suppress": cmd_suppress,
             "suppressions": cmd_suppressions, "unsuppress": cmd_unsuppress,
-            "runs": cmd_runs, "canary": cmd_canary,
+            "runs": cmd_runs, "canary": cmd_canary, "delete-run": cmd_delete_run,
         }
         handler = handlers.get(command)
         if handler is None:
@@ -185,23 +199,60 @@ def cmd_run(settings, profile, store, args) -> int:
         dry_run=args.dry_run,
         stop_after=args.stop_after,
     )
-    if outcome.error:
-        log.error("run failed: %s", outcome.error)
-        return 1
-    if outcome.report and args.do_print:
-        print(render_with(args.format, outcome.report))
-    if outcome.report and not args.do_print and not outcome.stopped_after:
-        r = outcome.report
-        print(f"{r.status.value}: {r.finding_count} finding(s), "
-              f"{r.canary_summary}, run {r.run_id}")
-    if outcome.stopped_after == "analyze" and outcome.report:
-        print(f"\n{len(outcome.report.metrics)} metrics, "
-              f"{len(outcome.report.signals)} signals, no API spend.")
-        for signal in sorted(outcome.report.signals,
-                             key=lambda s: -int(s.severity_hint))[:15]:
-            print(f"  [{signal.severity_hint.label():8}] {signal.id}: {signal.title}")
-    failed = [d for d in outcome.deliveries if not d.ok]
-    return 1 if failed else 0
+    try:
+        if outcome.error:
+            log.error("run failed: %s", outcome.error)
+            return 1
+        if outcome.report and args.do_print:
+            print(render_with(args.format, outcome.report))
+        if outcome.report and not args.do_print and not outcome.stopped_after:
+            r = outcome.report
+            print(f"{r.status.value}: {r.finding_count} finding(s), "
+                  f"{r.canary_summary}, run {r.run_id}")
+        if outcome.stopped_after == "analyze" and outcome.report:
+            print(f"\n{len(outcome.report.metrics)} metrics, "
+                  f"{len(outcome.report.signals)} signals, no API spend.")
+            for signal in sorted(outcome.report.signals,
+                                 key=lambda s: -int(s.severity_hint))[:15]:
+                print(f"  [{signal.severity_hint.label():8}] {signal.id}: {signal.title}")
+        failed = [d for d in outcome.deliveries if not d.ok]
+        return 1 if failed else 0
+    finally:
+        if args.ephemeral and outcome.run_id:
+            _cleanup_ephemeral_run(settings, store, outcome.run_id)
+
+
+def _cleanup_ephemeral_run(settings: Settings, store: Store, run_id: str) -> None:
+    """Best-effort: an ephemeral run's own failure shouldn't mask itself."""
+    try:
+        deleted = store.delete_run(run_id, force=True)
+        removed_files = _delete_run_files(settings, run_id)
+        log.info("ephemeral cleanup for %s: %s, %d file(s) removed",
+                 run_id, deleted, len(removed_files))
+    except DawnPatrolError as exc:
+        log.warning("ephemeral cleanup failed for run %s: %s", run_id, exc)
+
+
+def _delete_run_files(settings: Settings, run_id: str) -> list[str]:
+    """Remove a run's report files, and latest.* if it was the most recent."""
+    removed: list[str] = []
+    out = settings.output_dir
+    for path in out.glob(f"*/report-{run_id}.*"):
+        path.unlink(missing_ok=True)
+        removed.append(str(path))
+    latest_json = out / "latest.json"
+    is_latest = False
+    if latest_json.is_file():
+        try:
+            is_latest = json.loads(latest_json.read_text(encoding="utf-8")
+                                   ).get("run_id") == run_id
+        except (OSError, json.JSONDecodeError):
+            is_latest = False
+    if is_latest:
+        for latest in out.glob("latest.*"):
+            latest.unlink(missing_ok=True)
+            removed.append(str(latest))
+    return removed
 
 
 def cmd_validate(settings, profile, store, args) -> int:
@@ -377,6 +428,21 @@ def cmd_runs(settings, profile, store, args) -> int:
         print(f"{row['run_id']:30} {status:7} {row.get('finding_count') or 0:>4} "
               f"{row.get('cost_usd') or 0:>7.3f}  "
               f"{row['window_start']} -> {row['window_end']}")
+    return 0
+
+
+def cmd_delete_run(settings, profile, store, args) -> int:
+    deleted = store.delete_run(args.run_id, force=args.force)
+    removed_files = _delete_run_files(settings, args.run_id)
+    print(f"deleted run {args.run_id}:")
+    for table, count in sorted(deleted.items()):
+        print(f"  {table:16} {count}")
+    if removed_files:
+        print(f"  {len(removed_files)} output file(s) removed")
+    print("\nNote: this does not undo the run's contribution to the long-term "
+          "entity baseline (occurrence counts, first/last seen in the "
+          "`entities` table) - that table isn't scoped to a single run and "
+          "can't be reversed per run.")
     return 0
 
 

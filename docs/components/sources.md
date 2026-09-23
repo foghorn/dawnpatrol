@@ -153,7 +153,7 @@ never recur:
   dispatcher.lua wording ahead of the first real one, the same reasoning
   already applied to OpenSSH's "Failed"/"Invalid user" lines below.
 - **Every device with a private IP is registered in the cross-source device directory**
-  (`dawnpatrol/devices.py`, `ARCHITECTURE.md` §8.3) - a per-run registry keyed by IP
+  (`dawnpatrol/devices.py`, `ARCHITECTURE.md` §6.4) - a per-run registry keyed by IP
   address, not by LibreNMS's own `device_id`, so any other source can contribute to the
   same entry. Public (globally routable) IPs are excluded by default - a personal
   domain monitored over ping is a real example that showed up in this device list -

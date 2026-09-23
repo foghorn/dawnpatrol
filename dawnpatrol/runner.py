@@ -68,6 +68,9 @@ class RunOutcome:
     deliveries: list[DeliveryResult] = field(default_factory=list)
     error: str | None = None
     stopped_after: str = ""
+    #: Set even when report is None (an early failure) - the one thing every
+    #: outcome has, since start_run() writes the row before anything else runs.
+    run_id: str = ""
 
     @property
     def ok(self) -> bool:
@@ -149,7 +152,7 @@ class Runner:
             run_number=self.store.next_run_number(),
             dry_run=dry_run,
         )
-        outcome = RunOutcome()
+        outcome = RunOutcome(run_id=run_id)
         timings: dict[str, float] = {}
 
         log.info("run %s starting | window %s | %s", run_id, window,

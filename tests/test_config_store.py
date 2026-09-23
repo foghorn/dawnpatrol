@@ -7,7 +7,8 @@ from datetime import datetime, timedelta
 import pytest
 
 from dawnpatrol.config import DatabaseSettings, Settings
-from dawnpatrol.models import UTC, EntityType
+from dawnpatrol.errors import RunDeletionError
+from dawnpatrol.models import UTC, EntityType, Event, EventKind
 from dawnpatrol.profile import Profile
 from dawnpatrol.secrets import SecretRegistry, SecretStr, read_env
 
@@ -343,3 +344,48 @@ def test_readonly_sql_executes(store, window):
     store.start_run("r1", 1, window.start, window)
     cols, rows = store.readonly_sql("SELECT 1 AS n")
     assert cols == ["n"] and rows == [[1]]
+
+
+# --------------------------------------------------------------------------- #
+# delete_run
+# --------------------------------------------------------------------------- #
+
+
+def _finished_run(store, window, run_id="r1"):
+    store.start_run(run_id, 1, window.start, window)
+    store.insert_events(run_id, [
+        Event(ts=window.start, source="synthetic", kind=EventKind.FIREWALL,
+              dedup_key="e1", action="drop"),
+    ])
+    store.finish_run(run_id, finished_at=window.end, status="GREEN", finding_count=0)
+    return run_id
+
+
+def test_delete_run_removes_its_rows(store, window):
+    run_id = _finished_run(store, window)
+    store.observe_entities([(EntityType.IP, "1.2.3.4", 1)], window.start)
+
+    deleted = store.delete_run(run_id)
+
+    assert deleted["events"] == 1
+    assert deleted["runs"] == 1
+    cols, rows = store.readonly_sql(f"SELECT COUNT(*) FROM events WHERE run_id='{run_id}'")
+    assert rows == [[0]]
+    assert store.recent_runs(10) == []
+    # entities is a rolling baseline, not scoped to a run - untouched
+    assert store.entity_info("1.2.3.4")["occurrences"] == 1
+
+
+def test_delete_run_unknown_id_raises(store):
+    with pytest.raises(RunDeletionError, match="no run recorded"):
+        store.delete_run("does-not-exist")
+
+
+def test_delete_run_in_progress_requires_force(store, window):
+    store.start_run("r-active", 1, window.start, window)  # no finish_run
+
+    with pytest.raises(RunDeletionError, match="still in progress"):
+        store.delete_run("r-active")
+
+    deleted = store.delete_run("r-active", force=True)
+    assert deleted["runs"] == 1

@@ -1,134 +1,23 @@
 # DawnPatrol Architecture
 
-**Status:** Implemented and in production (Phases 1-4.5 complete; see §15)
-**Last updated:** 2026-09-17
-
-This document describes the system as it is actually built, not as it was originally
-proposed. Where an earlier draft described an open design question, this revision
-records the decision that was made and why (§16). For a tutorial-style walkthrough of
-any one plugin type - with a worked example of building your own - see
-`docs/components/`; this document is the systems-level view of how the pieces fit
-together.
-
 A single-container, scheduled threat-hunting pipeline. Deterministic code does the
 collection, normalization, and statistics; an AI agent does the judgment. Everything
-environment-specific lives in configuration, so the repo can be published publicly.
+environment-specific — addresses, hostnames, credentials, topology — lives in
+configuration, never in source, so the codebase itself is safe to publish.
+
+This document describes the system as it is built, for a reader (human or AI) trying to
+understand how it actually works. For a tutorial-style walkthrough of any one plugin
+type, with a worked example of building your own, see `docs/components/` — this document
+is the systems-level view of how the pieces fit together.
+
+Three things it is not: a real-time IDS (it's a scheduled batch analyst — collection runs
+on a schedule, not a stream); a SIEM (it reads your existing telemetry, it doesn't
+replace it); or multi-tenant (one deployment watches one network — run a second container
+for a second network).
 
 ---
 
-## 1. Goals and non-goals
-
-### Goals
-
-1. **One container, one schedule.** `docker run` with a cron expression in an env var.
-   No Open-WebUI, no ephemeral-container script rebuilding, no skills-as-credential-store.
-2. **Deterministic mechanics, AI judgment.** Pagination, integrity checks, aggregation,
-   formatting, and guardrail enforcement are code. The model spends its tokens on
-   correlation and severity calls, not on re-deriving a regex every morning.
-3. **Publishable.** No IPs, tokens, hostnames, or network topology in the source tree.
-4. **Atomic and extensible.** Drop a `.py` file into a folder, it gets picked up. No
-   registration lists to edit, no core code to touch.
-5. **Real state.** Trends and baselines come from a persistent database, not from
-   "search your notes for a title starting with DawnPatrol State".
-6. **Bounded cost.** Hard token, dollar, and tool-call ceilings enforced by the harness.
-
-### Non-goals
-
-- Real-time alerting. This is a scheduled batch analyst, not an IDS.
-- Being a SIEM. It reads from your existing telemetry; it does not replace it.
-- Multi-tenant / multi-network. One deployment watches one network. (Run two containers.)
-- A UI. Output is files and delivery plugins.
-
----
-
-## 2. What actually changes from the current system
-
-The existing agent prompt is ~1,900 lines. Most of it is not analysis guidance — it is
-compensation for the model having to redo mechanical work every run. Here is where each
-category of that knowledge lands in the new design.
-
-| Current prompt content | Lines | New home |
-|---|---|---|
-| LibreNMS `from`/`to` epoch-vs-string trap, differential test, baseline sanity checks | ~120 | `sources/librenms_syslog.py` + its tests |
-| Pi-hole `cursor` no-op, `errors="replace"`, `recordsFiltered` loop target, integrity gates | ~150 | `sources/pihole_dns.py` + its tests |
-| iptables regex, protocol-number normalization, program bucketing | ~40 | `sources/librenms_syslog.py` normalizer |
-| Hourly distribution, top-N by hit and by unique-source, port callouts | ~60 | `analyzers/firewall_volume.py` |
-| Prober / sweep / conntrack-return / stepped-TTL classification heuristics | ~50 | `analyzers/firewall_patterns.py` |
-| DGA detection, newly-seen domains, block-rate math, status taxonomy | ~70 | `analyzers/dns_anomalies.py` |
-| AbuseIPDB 25-IP budget, whitelist trap, score-vs-reports rule | ~90 | `enrichment/abuseipdb.py` (budget is a tool limit, not a request) |
-| ismalicious `classification.primary` false-positive trap | ~40 | `enrichment/ismalicious.py` |
-| Plain-text/ASCII/72-column email contract, template, pre-send checklist | ~300 | `render/plaintext.py` + a lint test |
-| Severity guardrails ("reputation may move by at most one level") | ~60 | `adjudicate.py`, enforced post-hoc in code |
-| Cross-run state via notes | ~40 | `state.db` (SQLite on a volume) |
-| Network inventory and segment expectations | ~50 | `profile.yml` (mounted config) |
-| **Actual analytical guidance the model still needs** | **~150** | `agent/prompts/system.md` |
-
-Roughly 90% of the prompt becomes code, config, or tests. What remains is the part a
-model is genuinely good at: looking at pre-computed signals across sources and deciding
-what matters.
-
-Two consequences worth naming up front:
-
-- **The formatting rules stop being a prompt problem.** The model never emits the report
-  body. It emits structured findings; a renderer produces the ASCII text (or, for email,
-  formatted HTML - see §8.6). The "ABSOLUTELY FORBIDDEN: em-dashes, emoji, pipe tables"
-  section disappears entirely, replaced by a unit test that asserts the plaintext output
-  is 7-bit ASCII. An early revision of the plaintext renderer also hard-wrapped every
-  line to 72 columns; that was dropped once real mail clients turned out to already
-  soft-wrap text/plain bodies, so the two wraps fought each other and produced ragged
-  paragraphs. The renderer's job is ASCII safety and a stable section structure, not
-  column layout - the reader's client decides that now.
-- **The guardrails stop being requests.** "Never enrich more than 25 IPs" becomes a tool
-  that returns an error on the 26th call. "Reputation may not create a finding" becomes a
-  validator that rejects a finding whose only evidence is a reputation score.
-
----
-
-## 3. Pipeline
-
-Eleven stages. Stages 1-6 and 8-11 are fully deterministic; only stage 7 calls the model.
-
-```
-  1. PLAN        resolve run window, load profile, open state DB, load baseline
-  2. COLLECT     run every enabled source plugin concurrently -> raw records
-  3. NORMALIZE   map raw records to the common Event model
-  4. VERIFY      per-source integrity gates; classify OK/DEGRADED/FAILED (blocking)
-  5. PERSIST     write events to run.db (SQLite); update baseline tables in state.db
-  6. ANALYZE     run every analyzer plugin -> Metrics + Signals
-  7. INVESTIGATE agent loop: evidence bundle in, structured Analysis out
-  8. ADJUDICATE  validate findings, enforce guardrails, compute overall status
-  9. RENDER      Report -> text / markdown / html / json
- 10. DELIVER     run every enabled output plugin; record results
- 11. CHECKPOINT  persist run summary, metrics, findings, watchlist for tomorrow
-```
-
-Every stage writes a structured record to `state.db` so a failed run is debuggable
-without re-running it. `dawnpatrol run --stop-after analyze` is a first-class mode — it
-gives you the full evidence bundle with zero API spend, which is how you develop
-analyzers.
-
-### Why stage 6 exists (the one addition to your folder proposal)
-
-You proposed three plugin folders: sources, enrichment, outputs. I am proposing a
-fourth, `analyzers/`, and it carries most of the value of the redesign.
-
-The problem it solves: a day of this network is ~300,000 events (≈75k syslog over 48h
-plus ≈222k DNS over 24h). That does not fit in a prompt, and paying a model to compute
-`Counter(ports).most_common(15)` is exactly the waste you want to eliminate. Analyzers
-are the reduction layer that turns 300,000 events into ~40 pre-computed signals and a
-few dozen metrics — roughly 25k tokens of dense, numeric evidence.
-
-It is also the right extension point for detection logic. Adding "flag any host that
-starts resolving a new TLD it has never used" should be a new file in `analyzers/`, not a
-paragraph appended to a system prompt where it competes for attention with 80 other
-paragraphs. Detection logic in code is testable against fixtures; detection logic in a
-prompt is not.
-
-The split in one line: **sources fetch, analyzers count, the agent decides.**
-
----
-
-## 4. Repository layout
+## 1. Repository map
 
 ```
 dawnpatrol/
@@ -138,81 +27,130 @@ dawnpatrol/
 ├── .env.example
 ├── README.md
 ├── config/
-│   └── profile.example.yml         # network topology template, no real values
+│   └── profile.yml                 # network topology — gitignored, real values live here
 ├── dawnpatrol/
-│   ├── __init__.py
-│   ├── cli.py                      # run / list-plugins / validate / render / probe
-│   ├── scheduler.py                # in-process cron loop
-│   ├── config.py                   # env + YAML -> typed settings
-│   ├── profile.py                  # network topology model
-│   ├── registry.py                 # plugin discovery
-│   ├── models.py                   # Event, Metric, Signal, Finding, Report
-│   ├── window.py                   # run-window arithmetic
-│   ├── devices.py                  # cross-source device directory, keyed by IP
-│   ├── store.py                    # run.db (events) + state.db (history)
-│   ├── verify.py                   # source health classification
-│   ├── adjudicate.py               # guardrail enforcement, status rollup
-│   ├── budget.py                   # token / dollar / call ceilings
-│   ├── canary.py                   # synthetic-signal self-validation
-│   ├── runner.py                   # pipeline orchestration
+│   ├── cli.py                      # argparse entry point: serve/run/validate/... (§10)
+│   ├── scheduler.py                # in-process cron loop + heartbeat file
+│   ├── config.py                   # env -> typed Settings (§9)
+│   ├── context.py                  # RunContext: threaded through every stage
+│   ├── profile.py                  # profile.yml -> Profile (zones, hosts, policy)
+│   ├── registry.py                 # plugin discovery, shared by all five plugin kinds
+│   ├── models.py                   # Event, Metric, Signal, Finding, Report, ...
+│   ├── schema.py                   # SQLAlchemy Table definitions — the one database
+│   ├── store.py                    # all reads/writes against that database
+│   ├── query.py                    # EventQuery: the typed read API analyzers use
+│   ├── devices.py                  # per-run, cross-source device directory
+│   ├── verify.py                   # source health classification (OK/DEGRADED/SUSPECT/FAILED)
+│   ├── adjudicate.py                # guardrail enforcement, status rollup (§7)
+│   ├── budget.py                   # token / dollar / tool-call ceiling
+│   ├── canary.py                   # detection self-test (§8)
+│   ├── errors.py                   # exception hierarchy, one type per failure mode
+│   ├── secrets.py                  # SecretStr, env/_FILE reading, leak scanning
+│   ├── runner.py                   # pipeline orchestration — Runner.run(), all 11 stages
 │   ├── agent/
-│   │   ├── harness.py              # Anthropic tool-runner loop
-│   │   ├── tools.py                # query_events, enrich_*, get_history, ...
-│   │   ├── bundle.py               # evidence bundle assembly
-│   │   ├── schema.py               # structured-output JSON schema for Analysis
+│   │   ├── harness.py              # drives one provider through one investigation
+│   │   ├── tools.py                # ToolBox: the in-run agent's tool surface
+│   │   ├── bundle.py                # evidence bundle assembly (what the model sees)
+│   │   ├── schema.py               # JSON schema for the submit_analysis tool
+│   │   ├── sqlguard.py             # validates the agent's read-only SQL
 │   │   └── prompts/
 │   │       ├── system.md
 │   │       └── task.md
 │   ├── render/
-│   │   ├── plaintext.py            # 7-bit ASCII, client-wrapped (the plaintext contract)
+│   │   ├── plaintext.py            # 7-bit ASCII report body — the delivery contract
 │   │   ├── markdown.py
-│   │   ├── html.py                 # full-page HTML: files, webhooks
+│   │   ├── html.py                 # full-page HTML: file output, webhook
 │   │   ├── html_email.py           # inline-styled HTML: the email body
 │   │   └── json_report.py
-│   ├── sources/                    # ── PLUGIN FOLDER ──
+│   ├── sources/                    # ── PLUGIN FOLDER (discovered, §5.1) ──
 │   │   ├── librenms_syslog.py
 │   │   ├── pihole_dns.py
 │   │   └── TEMPLATE.py
-│   ├── analyzers/                  # ── PLUGIN FOLDER ──
+│   ├── analyzers/                  # ── PLUGIN FOLDER (discovered, §5.2) ──
 │   │   ├── firewall_volume.py
 │   │   ├── firewall_patterns.py
 │   │   ├── dns_anomalies.py
-│   │   ├── novel_clients.py        # new-device detection: novel IP and novel MAC
+│   │   ├── novel_clients.py
 │   │   ├── beaconing.py
-│   │   ├── auth_activity.py        # VPN lifecycle + Wi-Fi deauthentication
+│   │   ├── auth_activity.py
 │   │   ├── segment_review.py
-│   │   ├── data_volume.py       # outbound byte-volume outliers (exfil proxy)
+│   │   ├── data_volume.py
 │   │   ├── correlation.py
 │   │   ├── baseline_delta.py
+│   │   ├── baseline.py             # not a plugin — the Baseline helper every analyzer takes
 │   │   └── TEMPLATE.py
-│   ├── enrichment/                 # ── PLUGIN FOLDER ──
+│   ├── enrichment/                 # ── PLUGIN FOLDER (discovered, §5.3) ──
 │   │   ├── abuseipdb.py
 │   │   ├── ismalicious.py
+│   │   ├── broker.py               # not a plugin — cache/budget/prefilter enforcement
 │   │   └── TEMPLATE.py
-│   ├── outputs/                    # ── PLUGIN FOLDER ──
+│   ├── outputs/                    # ── PLUGIN FOLDER (discovered, §5.4) ──
 │   │   ├── file_report.py
 │   │   ├── smtp_email.py
 │   │   ├── webhook.py
 │   │   └── TEMPLATE.py
+│   ├── providers/                  # ── PLUGIN FOLDER (discovered, §5.5) ──
+│   │   ├── anthropic_provider.py
+│   │   ├── openai_provider.py      # native /v1/responses
+│   │   ├── openai_compatible.py    # any /v1/chat/completions server
+│   │   └── TEMPLATE.py
 │   └── mcpserver/                  # external-agent MCP surface (§12)
-│       ├── server.py               # builds/registers tools, bearer-auth middleware
+│       ├── server.py               # tool registration, bearer-auth middleware
 │       ├── tools.py                # ToolContext: the tool implementations
 │       └── auth.py
-└── tests/
-    ├── fixtures/                   # recorded, scrubbed API responses
-    ├── test_sources/
-    ├── test_analyzers/
-    ├── test_render/                # ASCII + width + template lints
-    └── test_adjudicate/            # guardrail enforcement
+└── tests/                          # 430 tests, offline, zero spend (§14)
 ```
+
+`canary.py` is deliberately not a discovered plugin folder like the five above — it ships
+a fixed pair of canaries (`BUILTIN_CANARIES`), not something meant to grow by dropping in
+files. See §8.
 
 ---
 
-## 5. Core data model
+## 2. Pipeline
 
-One flat `Event` type, not a per-source shape. This is the decision that makes
-cross-source correlation possible at all: the IoT-device-bypassing-Pi-hole finding only
-works if a firewall event and a DNS event agree on what `src_ip` means.
+Eleven stages, run in `runner.py`'s `Runner.run()`. Stages 1–6 and 8–11 are fully
+deterministic; only stage 7 calls a model.
+
+```
+  1. PLAN        resolve run window, load profile, open the database, load baseline
+  2. COLLECT     run every enabled source plugin concurrently -> raw records
+  3. NORMALIZE   sources map their own raw records to the common Event model
+  4. VERIFY      per-source integrity gates; classify OK / DEGRADED / SUSPECT / FAILED
+  5. PERSIST     write events to the database; update the entity baseline
+  6. ANALYZE     run every applicable analyzer plugin -> Metrics + Signals
+  7. INVESTIGATE agent loop: evidence bundle in, structured analysis out
+  8. ADJUDICATE  validate findings, enforce guardrails, compute overall status
+  9. RENDER      Report -> plaintext / markdown / html / html_email / json
+ 10. DELIVER     run every enabled output plugin; record results
+ 11. CHECKPOINT  purge aged-out data by retention policy
+```
+
+Stages 3 and 4 aren't separate function calls — normalization happens inside each
+source's own `collect()`, and `verify.classify()` runs once per source right after
+collection. `--stop-after analyze` is a first-class CLI mode: it runs stages 1–6, costs
+zero API spend, and dumps the exact evidence bundle a model would see — the fast loop for
+developing an analyzer (§10).
+
+**Why there's a fourth plugin kind beyond sources, outputs, and reputation lookups.** A
+day of firewall and DNS traffic on a real home network is 500,000+ events. That doesn't
+fit in a prompt, and paying a model to compute `Counter(ports).most_common(15)` is exactly
+the kind of waste this design avoids. Analyzers are the reduction layer that turns
+hundreds of thousands of events into a few dozen pre-computed signals and metrics —
+dense, numeric evidence a model can actually reason over. It's also the right extension
+point for new detection logic: a new heuristic is a new file with one method, testable
+against synthetic fixtures, not a paragraph competing for attention in an 80-paragraph
+system prompt.
+
+The split in one line: **sources fetch, analyzers count, the agent decides.**
+
+---
+
+## 3. Data model
+
+One flat `Event` type (`dawnpatrol/models.py`), not a per-source shape. This is the
+decision that makes cross-source correlation possible at all — a firewall event and a DNS
+event have to agree on what `src_ip` means before anything downstream can join them.
 
 ```python
 class EventKind(StrEnum):
@@ -224,476 +162,496 @@ class Event:
     ts: datetime                  # UTC, tz-aware, required
     source: str                   # plugin name
     kind: EventKind
-    dedup_key: str                # stable per-source id for idempotent re-collection
+    dedup_key: str                # stable per-source id — makes re-collection idempotent
 
     # network (firewall / flow)
-    src_ip: str | None = None;   dst_ip: str | None = None
-    src_port: int | None = None; dst_port: int | None = None
-    proto: str | None = None     # normalized: tcp/udp/icmp/igmp/...
-    action: str | None = None    # drop/accept/reject/allow/block
-    iface_in: str | None = None; iface_out: str | None = None
-    ttl: int | None = None;      pkt_len: int | None = None
+    src_ip: str | None = None;    dst_ip: str | None = None
+    src_port: int | None = None;  dst_port: int | None = None
+    proto: str | None = None      # normalized: tcp/udp/icmp/igmp/...
+    action: str | None = None     # drop/accept/reject/allow/block
+    iface_in: str | None = None;  iface_out: str | None = None
+    ttl: int | None = None;       pkt_len: int | None = None
 
     # dns
-    domain: str | None = None;   qtype: str | None = None
-    blocked: bool | None = None; block_reason: str | None = None
-    upstream: str | None = None; client_ip: str | None = None
+    domain: str | None = None;    qtype: str | None = None
+    blocked: bool | None = None;  block_reason: str | None = None
+    upstream: str | None = None;  client_ip: str | None = None
 
     # host / system
-    device: str | None = None;   program: str | None = None
-    severity: str | None = None; message: str | None = None
+    device: str | None = None;    program: str | None = None
+    severity: str | None = None;  message: str | None = None
     user: str | None = None
 
     # derived at normalize time from profile.yml
-    src_zone: str | None = None; dst_zone: str | None = None
+    src_zone: str | None = None;  dst_zone: str | None = None
 
-    raw: dict = field(default_factory=dict)   # kept in SQLite, never bulk-sent to the model
+    raw: dict = field(default_factory=dict)   # kept in the DB, never bulk-sent to the model
 ```
 
-`src_zone` / `dst_zone` are assigned by matching IPs against the segments in
-`profile.yml`. That is what lets an analyzer say "IoT → external on a non-vendor port"
-without hardcoding `192.168.50.0/24` anywhere in the source tree.
+`src_zone`/`dst_zone` are assigned by matching IPs against `profile.yml`'s zones — that's
+what lets an analyzer say "IoT → external on a non-vendor port" without hardcoding a CIDR
+anywhere in the source tree. `Event.device` is not a hostname field for every source — for
+`librenms_syslog` it holds LibreNMS's numeric `device_id`, not a name.
 
-Downstream types:
+Downstream types, in the order data flows through them:
 
 ```python
-@dataclass
-class Metric:                     # deterministic; goes straight to the report
+class Metric:                     # deterministic; goes straight into the report
     key: str                      # "fw.drops.total", "dns.block_rate"
     value: float | int | str
-    unit: str | None
     section: str                  # which report section it belongs to
-    prior: float | None = None    # auto-filled from state.db
-    delta_pct: float | None = None
+    prior: float | None = None    # filled in from the baseline
+    # delta_pct is computed on demand from value and prior
 
-@dataclass
 class Signal:                     # a candidate finding, computed deterministically
     id: str                       # stable slug: "fw.prober.203.0.113.45.22"
     analyzer: str
     title: str
     taxonomy: str                 # "scan.persistent_prober", "dns.dga_suspect"
-    entities: list[Entity]        # typed subjects: ip / domain / host / port / device
-    severity_hint: Severity       # deterministic prior, the agent may adjust
+    entities: list[Entity]        # typed subjects: ip / domain / host / port / device / user
+    severity_hint: Severity       # a deterministic prior; the agent may adjust it by one level
     confidence: float             # 0-1
     evidence: dict                # numbers and quoted samples only
-    support: list[str]            # event dedup_keys, for drill-down
-    first_seen: date | None       # from state.db
-    days_recurring: int = 0
+    support: list[str] = []       # event dedup_keys, for sample_events drill-down
+    is_canary: bool = False       # excluded from the bundle and the report if true
 
-@dataclass
 class Finding:                    # produced by the agent, validated by adjudicate.py
     id: str; title: str; severity: Severity; confidence: Confidence
     zone: str; taxonomy: str
     what: str; why: str; not_this: str; action: str
-    signal_ids: list[str]         # REQUIRED — must reference at least one Signal
-    evidence_kinds: set[str]      # {"local_behavior", "reputation", "baseline_delta"}
+    signal_ids: list[str]         # REQUIRED — must resolve to at least one real Signal
+    evidence_kinds: list[str]     # {"local_behavior", "reputation", "baseline_delta", ...}
     entities: list[Entity]
     enrichment: list[EnrichmentRef]
+
+class Report:                     # everything the renderers need, fully assembled
+    run_id: str; status: Status; findings: list[Finding]; suppressed_findings: list[Finding]
+    metrics: list[Metric]; signals: list[Signal]; health: list[SourceHealth]
+    devices: list[dict]; executive_summary: str; section_narratives: dict
+    trend_notes: list[TrendNote]; actions: list[Action]; data_quality: list[str]
+    canaries: list[CanaryResult]; usage: TokenUsage; degraded: bool
 ```
 
-`Finding.signal_ids` being required is a structural anti-hallucination measure: a finding
-that does not trace to at least one deterministically-computed signal is rejected by the
-validator, not merely discouraged by a prompt rule.
+`Finding.signal_ids` being required and validated is the structural anti-hallucination
+measure: a finding that doesn't trace to at least one deterministically-computed signal is
+rejected by `adjudicate.py`, not merely discouraged by a prompt rule (§7).
 
 ---
 
-## 6. Plugin contracts
+## 4. Persistence
 
-All four folders use the same discovery mechanism: `pkgutil.iter_modules` over the
-package directory, import each module, collect subclasses of the relevant ABC. Files
-starting with `_` or named `TEMPLATE.py` are skipped.
+One database — SQLite by default, MySQL when `DAWNPATROL_DB_HOST`/`DAWNPATROL_DB_USER`
+are both set (credential-driven, not a mode flag, so pointing at a shared database is
+purely additive configuration). Every table lives in `schema.py`'s single `MetaData`;
+there is no separate per-run database file.
+
+| Table | Scope | Purpose |
+|---|---|---|
+| `runs` | one row per run | run_id, window, status, per-stage timings, token/cost accounting |
+| `source_health` | per run | per-source counts, span, health state, probe results |
+| `events` | per run | one row per normalized observation — the raw data itself |
+| `metrics` | per run | every deterministic statistic a run produced |
+| `signals` | per run | every candidate finding an analyzer computed |
+| `findings` | per run | every finding the agent's output survived adjudication as |
+| `canaries` | per run | per-run synthetic-signal injections and whether each was detected |
+| `deliveries` | per run | per-output success/failure, for "was the report actually sent" |
+| `ioc_dns` | per run, day-bucketed | thin `(day, client_ip, domain, queries, blocked)` rows |
+| `ioc_flow` | per run, day-bucketed | thin `(day, src_ip, dst_ip, dst_port, proto, hits)` rows |
+| `entities` | rolling, not run-scoped | first_seen / last_seen / occurrence counts per `(etype, value)` |
+| `enrichment_cache` | rolling, not run-scoped | `(enricher, subject)` -> normalized verdict + TTL |
+| `watchlist` | rolling, not run-scoped | items the agent carries forward, with an expiry |
+| `suppressions` | rolling, not run-scoped | tuned-out patterns: matcher, reason, author, expiry |
+| `notebook` | rolling, not run-scoped | free-text agent notes, off by default (§12) |
+
+Two different lifetimes share this one database. `events` — the bulk of the volume, ~150k
+rows per day of raw traffic on a real deployment — is retained for
+`DAWNPATROL_RETENTION_RAW_DAYS` (default 7), which still gives multi-day drill-down
+without real storage cost. `ioc_dns`/`ioc_flow` are a deliberately narrow slice (a few
+bytes per row, no message payload) kept for `DAWNPATROL_RETENTION_IOC_DAYS` (default 180)
+specifically so retrospective hunting works: when an IOC surfaces next month,
+`dawnpatrol hunt --domain evil.example --days 180` answers whether anything here ever
+touched it. `metrics` ages out on its own, longer clock
+(`DAWNPATROL_RETENTION_METRICS_DAYS`, default 730 — two years of trend history).
+
+**Everything else in the table above — `signals`, `findings`, `source_health`,
+`canaries`, `deliveries`, the `runs` row itself, and the rolling tables — has no
+automatic age-based purge at all.** `Store.purge()` (run at CHECKPOINT, stage 11) only
+touches `events` (by run age), `ioc_dns`/`ioc_flow` (by day), `metrics` (by timestamp),
+`enrichment_cache` (by expiry), and expired `watchlist` rows. That's a deliberate choice —
+finding history is what makes trend language honest ("RECURRING, day 4" is a database
+count, not a recollection) — but it means a database left running indefinitely
+accumulates those tables forever unless something else removes rows. `dawnpatrol
+delete-run <run_id>` and `dawnpatrol run --ephemeral` (§10) are the on-demand answer:
+each deletes every row a specific run owns across all nine run-scoped tables, plus that
+run's report files, immediately rather than waiting on age.
+
+**`entities` is the one table neither mechanism can clean up after.** It has no
+`run_id` — it's a rolling `(etype, value) -> first_seen, last_seen, occurrences` map, and
+PERSIST (stage 5) updates it from a run's own events *before* that run's own ANALYZE
+stage (stage 6) even builds a `Baseline` and reads it back. A run's contribution to those
+counts is folded in immediately and can't be surgically subtracted out afterward — the
+same reason `Store.purge()` never touches it either. This is what makes novel-IP and
+novel-domain detection deterministic (`Baseline.novel()` is a real query, not a diff
+against a note a model wrote yesterday), but it also means a test run leaves a small,
+permanent trace there even when `--ephemeral` cleans up everything else.
+
+The agent's own read-only SQL tool (`agent/sqlguard.py`, §6.3) can reach exactly six of
+these tables — `AGENT_READABLE = {"events", "metrics", "signals", "ioc_dns", "ioc_flow",
+"entities"}` — everything else (deliveries, config-adjacent tables, the notebook) is out
+of reach regardless of what SQL the model writes.
+
+---
+
+## 5. Plugin architecture
+
+Five plugin folders — sources, analyzers, enrichment, outputs, providers — share one
+discovery mechanism (`registry.py`): import every module in the package (skipping
+`TEMPLATE.py`, `base.py`, and anything starting with `_`), collect concrete subclasses of
+the folder's base class, key them by their declared `name`. A plugin with a duplicate
+`name` is a hard error at discovery time, not a silent overwrite.
 
 ```python
-# registry.py
-def discover(package, base_class) -> dict[str, type]:
-    for _, name, _ in pkgutil.iter_modules(package.__path__):
-        if name.startswith("_") or name == "TEMPLATE":
-            continue
-        importlib.import_module(f"{package.__name__}.{name}")
-    return {c.name: c for c in all_subclasses(base_class)}
+def discover(package: ModuleType, base: type[T]) -> list[type[T]]:
+    load_modules(package)                       # import every module; one bad plugin logs, doesn't crash the run
+    return _concrete_subclasses(base, package.__name__)   # scoped to this package only
 ```
 
-**Enablement is automatic and env-driven.** A plugin declares its required env vars; if
-all of them are set, it is enabled. No registry file, no `ENABLED_PLUGINS` list to
-maintain. `DAWNPATROL_DISABLE=pihole_dns` is the escape hatch, and `DAWNPATROL_SOURCES=...`
-pins an explicit set when you want determinism.
+**Enablement is automatic and env-driven.** A plugin declares the environment variables
+it needs in `requires_env`; if every one of them (or its `_FILE` twin) is present, the
+plugin turns on. No registry file, no `ENABLED_PLUGINS` list to maintain.
+`DAWNPATROL_DISABLE=pihole_dns` is the escape hatch, and
+`DAWNPATROL_SOURCES=librenms_syslog` (or `_ANALYZERS`/`_ENRICHERS`/`_OUTPUTS`) pins an
+explicit allowlist when you want determinism. `dawnpatrol list-plugins` shows exactly
+what was discovered and, for anything disabled, exactly which variable it's still waiting
+on.
 
-### 6.1 Sources
+### 5.1 Sources
 
 ```python
 class Source(ABC):
-    name: str                          # "librenms_syslog"
-    kinds: set[EventKind]
-    requires_env: set[str]             # gates auto-enablement
-    default_window_hours: int = 48
-    max_window_hours: int | None = None   # e.g. 24 for Pi-hole retention
+    name: str
+    kinds: frozenset[EventKind]
+    requires_env: frozenset[str]
+    max_window_hours: int | None = None    # hard retention ceiling, e.g. 24 for a DNS log
+    min_expected_records: int = 0          # volume floor below which a result looks broken
 
-    def configure(self, env: Mapping[str, str], profile: Profile) -> None: ...
-
+    def configure(self, profile: Profile) -> None: ...
     @abstractmethod
     def collect(self, window: Window, ctx: RunContext) -> CollectionResult: ...
-
-    @abstractmethod
     def self_test(self, ctx: RunContext) -> list[Probe]: ...
-
-    def health(self, result: CollectionResult, probes: list[Probe]) -> SourceHealth: ...
+    def extra_health_notes(self, result: CollectionResult) -> list[str]: ...
 ```
 
-`CollectionResult` carries `events`, `reported_total`, `unique_count`, `span_hours`,
-`pages`, and `errors`. `verify.py` applies the generic gates (unique ≈ reported total,
-span ≈ requested window, non-zero) and calls the source's own `health()` for anything
-source-specific.
+`self_test()` is the differential-probe mechanism: when a source returns zero records,
+the framework (`verify.classify()`) automatically calls it before deciding anything, and
+the probe results are recorded verbatim on the run. That's what makes "the API returned
+zero rows" and "the device stopped forwarding" distinguishable without relying on a model
+to remember to check. Health states are deliberately four, not two —
+`OK` / `DEGRADED` (partial but usable, e.g. a DNS source whose own retention is shorter
+than the requested window) / `SUSPECT` (zero rows, probes inconclusive) /
+`FAILED` (zero rows, probes affirmatively confirm an outage). Only affirmative probe
+evidence ever justifies `FAILED`; an HTTP 401 is treated as a configuration fault, never
+an outage. `SUSPECT` never renders as "monitoring is blind" — the renderer has distinct
+language per state, so that false-outage failure mode is structurally impossible, not
+just unlikely.
 
-`self_test()` is the differential test from the LibreNMS skill, promoted to a first-class
-plugin capability. When a source returns zero records, the framework **automatically**
-runs `self_test()` before classifying it, and the probe results are attached to the run
-record verbatim. This is the mechanism that makes "the API returned zero rows" and "the
-device stopped forwarding" distinguishable without asking a model to remember to check:
+Window handling is per-source: a source declaring `max_window_hours = 24` gets clamped by
+the framework (`Window.clamp_hours`), and the clamp is recorded as a known limit rather
+than a shortfall — the labels a reader sees are generated from the window each source
+actually achieved, not a uniform number every source is forced onto.
 
-```python
-# sources/librenms_syslog.py
-def self_test(self, ctx):
-    return [
-        self.probe("no-filter",       f"/logs/syslog/{self.primary}?limit=1"),
-        self.probe("control-device",  f"/logs/syslog/{self.controls[0]}?{ctx.window.qs()}&limit=1"),
-        self.probe("narrow-window",   f"/logs/syslog/{self.primary}?{ctx.window.last_hour().qs()}&limit=1"),
-        self.probe("auth-check",      "/devices?limit=1"),
-    ]
-```
+Two sources ship: `librenms_syslog.py` (firewall/kernel logs, DHCP leases, dnsmasq query
+logs, router-admin logins — everything LibreNMS's syslog collector forwards) and
+`pihole_dns.py` (DNS queries and block decisions). `EventKind` already reserves `IDS` and
+`FLOW` for a future intrusion-detection or NetFlow source; adding one is one file
+implementing `collect()` and `self_test()`, and every analyzer, enrichment path,
+renderer, output, and the MCP server's own `list_source_plugins`/`trigger_analysis`
+picks it up without modification. See `docs/components/sources.md` for the full
+contract and both shipped sources walked through in detail.
 
-Health states: `OK` / `DEGRADED` (partial but usable, e.g. Pi-hole's ~24h retention
-against a 48h request) / `SUSPECT` (zero rows, probes inconclusive) / `FAILED` (zero rows,
-probes confirm). **`SUSPECT` never renders as "monitoring is blind"** — the renderer has
-distinct language per state, so the false-outage failure mode is structurally impossible.
-
-Window handling is per-source. A source declaring `max_window_hours = 24` is clamped by
-the framework, and the clamp is recorded as a known limit rather than a shortfall. This
-kills the "never present a 24h DNS total alongside a 48h firewall total without labeling
-them" rule — the labels are generated from the window each source actually achieved.
-
-See `docs/components/sources.md` for the full contract, both shipped sources walked
-through line by line, and a worked example of adding a third.
-
-### 6.2 Analyzers
+### 5.2 Analyzers
 
 ```python
 class Analyzer(ABC):
     name: str
-    requires_kinds: set[EventKind]     # skipped if no source provided these
-    requires_sources: set[str] = set() # optional harder dependency
+    requires_kinds: frozenset[EventKind]      # skipped entirely if no source supplied these
+    requires_sources: frozenset[str] = frozenset()
+    order: int = 100                          # lower runs first
 
     @abstractmethod
     def run(self, q: EventQuery, profile: Profile, baseline: Baseline) -> AnalyzerResult:
-        """Returns Metrics and Signals. Pure: no network, no model calls."""
+        """Pure: no network, no model calls. Must not raise on empty input."""
 ```
 
-`EventQuery` is a thin, typed query API over the run's SQLite — `q.count(kind=...,
-action="drop")`, `q.top("dst_port", n=15, by="unique:src_ip")`, `q.hourly(kind=...,
-action="drop")` — so analyzers stay short and readable. They never touch the network,
-which makes them trivially testable against fixtures and fast to iterate on.
+`EventQuery` (`query.py`) is a typed, run_id-scoped read API over the events table —
+`q.count(kind=..., action="drop")`, `q.top("dst_port", n=15, by="unique:src_ip")`,
+`q.hourly(...)`, `q.dns_domain_stats(...)`, `q.source_profile(...)`, `q.subnet_spread(...)`
+and more — so analyzers stay short and readable, and every method is portable across
+SQLite and MySQL without an analyzer knowing which dialect it's running against. A query
+can also be scoped to exclude or include only specific sources — that's the mechanism
+that keeps canary events out of real statistics while still letting a second, isolated
+pass verify they were detected (§8).
 
-`baseline` exposes history: `baseline.prior(metric_key)` (last run's value),
-`baseline.novel(EntityType.DOMAIN, [...])` (never-seen-before check), `baseline.series(
-metric_key, days=30)` (a metric's own history, for trend baselining), `baseline.
-recurrence(taxonomy, entity_value)` (how many prior runs), `baseline.watchlist()` (items
-the agent itself carried forward via its own structured output). Newly-seen-domain
-detection becomes a real database query instead of a diff against a note the model wrote
-yesterday.
+`Baseline` (`analyzers/baseline.py`) exposes history: `baseline.prior(metric_key)` (last
+run's value), `baseline.novel(EntityType.DOMAIN, [...])` (never-seen-before check, with a
+one-hour grace window since an entity is written to the baseline during the same run that
+first observes it), `baseline.series(key, days=30)`, `baseline.recurrence(taxonomy,
+entity_value)`, `baseline.watchlist()`. Newly-seen-domain detection is a real database
+query, not a diff against a note.
 
-Analyzers are independent and run in dependency order only where declared. Adding one is
-a single file with one method.
+Ten analyzers ship, run in `order`: `firewall_volume` (10), `firewall_patterns` (20),
+`dns_anomalies` (30), `novel_clients` (35), `beaconing` (40), `auth_activity` (45),
+`segment_review` (50), `data_volume` (55), `correlation` (60), `baseline_delta` (900, runs
+last deliberately, so it can see what every other analyzer produced). See
+`docs/components/analyzers.md` for what each one does and the full `EventQuery`/`Baseline`
+API, and `docs/components/signals.md` for an exhaustive per-signal catalog — taxonomy,
+severity, confidence, exact trigger condition, evidence fields — of everything any
+analyzer currently emits.
 
-See `docs/components/analyzers.md` for the `EventQuery`/`Baseline` APIs in full, a
-mechanism summary of every analyzer that ships, and a worked example of adding a new
-detection. See `docs/components/signals.md` for an exhaustive, per-signal catalog of
-everything every analyzer currently emits — taxonomy, severity, confidence, exact
-trigger condition, and evidence fields.
-
-### 6.3 Enrichment
+### 5.3 Enrichment
 
 ```python
 class Enricher(ABC):
     name: str
-    subject_types: set[str]            # {"ip"} / {"domain"} / {"url"} / {"hash"}
-    requires_env: set[str]
-    default_budget: int                # lookups per run
-    cache_ttl: timedelta               # per-subject cache lifetime
+    subject_types: frozenset[str]      # {"ip"} / {"domain"} / {"url"} / {"hash"}
+    requires_env: frozenset[str]
+    default_budget: int = 25           # lookups per run
+    cache_ttl: timedelta = timedelta(days=7)
     batch_size: int = 1
 
     @abstractmethod
     def lookup(self, subjects: list[str]) -> dict[str, Enrichment]: ...
-
-    def prefilter(self, subjects: list[str]) -> list[str]:
-        """Drop subjects this source cannot usefully answer (RFC1918, known-good TLDs)."""
+    def prefilter(self, subjects: list[str]) -> list[str]: ...
 ```
 
-`Enrichment` is a normalized verdict — `score` (0-100), `verdict`
-(benign/unknown/suspicious/malicious), `whitelisted`, `categories`, `attributes`,
-`raw` — so an analyzer or the renderer can consume any enricher without knowing whether
-it was AbuseIPDB or ismalicious or something you add next month.
+Three things the framework (`enrichment/broker.py`) enforces so no plugin — and no
+prompt — has to: **caching** (every lookup cached by `(enricher, subject)` with a TTL;
+the same top scanner IPs recur every day, so most lookups after week one are free),
+**budget** (enforced at the tool boundary — the (N+1)th call returns a structured
+"budget exhausted" result rather than the model being asked not to overspend), and
+**prefiltering** (`abuseipdb.py` drops non-routable addresses before spending budget on
+them; `ismalicious.py` drops domains `profile.is_benign_domain()` already recognizes).
 
-Three things the framework handles so no plugin (and no prompt) has to:
+`Enrichment` is a normalized verdict (`score`, `verdict`, `whitelisted`, `categories`,
+`attributes`, `raw`) so an analyzer or the model can consume any enricher without caring
+whether it was AbuseIPDB or something added next month. AbuseIPDB's `totalReports` —
+heavily inflated for cloud and security-vendor space, and uncorrelated with the actual
+abuse score — is deliberately absent from the normalized shape and lives only in `raw`
+for audit; the model cannot misreport a number it's never handed. Two enrichers ship:
+`abuseipdb.py` and `ismalicious.py`. See `docs/components/enrichment.md` for the full
+contract and a worked example of adding a new reputation source.
 
-- **Caching.** Every lookup is cached in `state.db` keyed by `(enricher, subject)` with a
-  TTL. Your top scanner IPs are the same every single day; after week one, most lookups
-  are free. This alone is a large share of the current run's enrichment cost.
-- **Budget.** Enforced at the tool boundary. The 26th lookup returns a structured
-  "budget exhausted" result. The model cannot overspend, so the prompt does not need to
-  ask it not to.
-- **Prefiltering.** `abuseipdb.prefilter()` drops non-public addresses;
-  `ismalicious.prefilter()` drops a configurable known-good domain list. Wasted lookups
-  are prevented, not discouraged.
-
-The AbuseIPDB score-vs-`totalReports` trap is handled by simply not surfacing
-`totalReports` in the normalized `Enrichment` at all. It lives in `.raw` for audit. The
-model cannot misreport a number it is not given.
-
-See `docs/components/enrichment.md` for the full contract and a worked example of
-adding a new reputation source.
-
-### 6.4 Outputs
+### 5.4 Outputs
 
 ```python
 class Output(ABC):
     name: str
-    renderer: str                      # "plaintext" | "markdown" | "html" | "html_email" | "json"
-    requires_env: set[str]
-    run_when: set[Status] = {GREEN, AMBER, RED}   # env-overridable
+    renderer: str = "plaintext"     # "plaintext" | "markdown" | "html" | "html_email" | "json"
+    requires_env: frozenset[str]
+    default_run_when: frozenset[Status] = {GREEN, AMBER, RED}
+    default_important_only: bool = False
 
     @abstractmethod
-    def emit(self, rendered: str, report: Report, ctx: RunContext) -> DeliveryResult: ...
+    def emit(self, rendered: str, report: Report, ctx: RunContext) -> DeliveryResult:
+        """Must not raise; return ok=False instead."""
 ```
 
-Renderers are shared library code, not plugins — an output picks one by name. This
-avoids every new delivery destination re-implementing the ASCII contract, which is the
-exact failure the current email-format skill exists to prevent. Write the renderer once,
-test it once, and `smtp_email`, `file_report`, and a future `s3_upload` all get it right.
+Renderers are shared library code, not plugins — an output picks one by name, so every
+new delivery destination inherits a correct report body instead of re-implementing
+formatting. `run_when` (`DAWNPATROL_OUTPUT_<NAME>_RUN_WHEN=AMBER,RED` /
+`IMPORTANT` / `ALWAYS` / `NEVER`) makes "page me only when something's notable, but
+always write the file" a per-destination config setting, not prompt logic.
+`Report.has_important()` is what `IMPORTANT` checks against: status other than GREEN, a
+failed canary, or an unusable source.
 
-`run_when` makes "page me only on AMBER/RED, but always write the file" a config
-setting rather than prompt logic.
+Three outputs ship: `file_report.py` (writes `${OUTPUT_DIR}/YYYY-MM-DD/report-<run_id>.*`
+plus a `latest.*` copy of each configured format — always enabled, the durable record of
+every run), `smtp_email.py` (a multipart message: `html_email` as the formatted body a
+normal client shows, `plaintext` underneath as the fallback; recipients come from
+`DAWNPATROL_OUTPUT_SMTP_TO`, never from run content — see §13), and `webhook.py` (generic
+JSON POST — ntfy, Slack, Discord, Home Assistant). See `docs/components/outputs.md` for
+the full contract and a worked example of a new destination.
 
-Shipped outputs: `file_report` (writes `${OUTPUT_DIR}/YYYY-MM-DD/report.{txt,json}`, plus
-`html` if configured, and a `latest.*` copy of each), `smtp_email` (a multipart message:
-`html_email` as the formatted body a normal client shows, `plaintext` underneath as the
-fallback), and `webhook` (generic JSON POST — ntfy, Slack, Discord, Home Assistant). A
-future `healthchecks_ping` for dead-man's-switch monitoring remains a natural next
-output, not yet built.
+### 5.5 Providers
 
-See `docs/components/outputs.md` for the full contract, `run_when` policy in detail, and
-a worked example of adding a new delivery destination.
+```python
+class Provider(ABC):
+    name: str
+    requires_env: frozenset[str]
+    price_input_per_mtok: float = 0.0
+    price_output_per_mtok: float = 0.0
+    price_cache_read_per_mtok: float = 0.0
+    price_cache_write_per_mtok: float = 0.0
+
+    @abstractmethod
+    def run_agent(self, *, system_static: str, system_context: str, user_message: str,
+                  tools: list[ToolSpec], max_turns: int,
+                  on_turn: Callable[[TokenUsage], None] | None = None) -> AgentRun: ...
+    def estimate_cost(self, usage: TokenUsage) -> float: ...   # base formula; a provider may override
+    def available(self) -> tuple[bool, str]: ...
+```
+
+The model backend is a plugin like everything else, discovered the same way. Three ship:
+`anthropic_provider.py` (the default), `openai_provider.py` (native `/v1/responses`,
+built specifically for reasoning-effort control and correct cache-token accounting on
+that endpoint), and `openai_compatible.py` (any `/v1/chat/completions` server — Ollama,
+LM Studio, vLLM, or a hosted OpenAI-shaped API; a local model is one environment variable
+away, not a code change). `DAWNPATROL_AI_PROVIDER`/`DAWNPATROL_AI_MODEL` select the
+combination; nothing else in the pipeline depends on which one is active. See
+`docs/components/providers.md` for the contract and a worked example of adding a new
+backend, and §6.1 below for what each shipped provider actually does differently.
 
 ---
 
-## 7. State and persistence
+## 6. The AI harness
 
-Two SQLite databases on one mounted volume. This is the direct fix for "the container is
-ephemeral so scripts get recreated every day".
+### 6.1 Model and loop
 
-**`run.db`** — per-run, disposable, `${DATA_DIR}/runs/<run_id>/run.db`. One `events`
-table plus indexes on `(ts)`, `(kind, ts)`, `(src_ip)`, `(dst_port)`, `(domain)`,
-`(client_ip)`. Retained for `DAWNPATROL_RUN_RETENTION_DAYS` (default 7) so you can re-run
-analysis or let the agent drill into yesterday. At ~300k rows this is roughly 60-120 MB
-per run.
+The default is Claude Opus 5 (`claude-opus-5`) via `anthropic_provider.py`, which drives
+a hand-written tool loop rather than the SDK's own tool runner — a deliberate choice: the
+harness needs per-turn budget checks, cost accounting mid-loop, and a terminal-tool break,
+and keeping the loop's shape identical across providers makes them easy to reason about
+side by side. `DAWNPATROL_AI_MODEL` is a plain env var; nothing about the pipeline assumes
+a particular model, and `claude-sonnet-5`/`claude-haiku-4-5` are one variable away for a
+quieter network or a tighter budget.
 
-Raw events age out, but a **narrow long-term slice** does not. `state.db` keeps DNS
-resolutions and, once a flow source exists, connection tuples as thin rows for
-`DAWNPATROL_IOC_RETENTION_DAYS` (default 180) — a few bytes each, no message payload. This
-is what makes retrospective hunting possible: when an IOC surfaces next month,
-`dawnpatrol hunt --domain evil.example --days 180` answers whether anything here ever
-touched it. Detection is usually retroactive; the store should assume that.
+Per-turn request configuration (Anthropic): `thinking: {"type": "adaptive"}` (this is
+genuinely reasoning-heavy work), `output_config: {"effort": ...}` (`DAWNPATROL_AI_EFFORT`,
+default `high` — the primary cost/quality dial), an optional `output_config.task_budget`
+when `DAWNPATROL_AI_TASK_BUDGET_TOKENS >= 20000` (gives the model a ceiling to pace
+itself against so it wraps up rather than being cut off mid-investigation), and streaming
+throughout since `max_tokens` is large. Server-side refusal fallback
+(`betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"`) is on by default —
+security log content occasionally trips a classifier, and a refused run should degrade to
+a fallback model rather than produce no report; if the server rejects the beta parameters
+outright, the provider retries once without them rather than failing the whole run.
 
-**`state.db`** — permanent, `${DATA_DIR}/state.db`:
+The OpenAI-facing providers exist because `/v1/chat/completions` compatibility mode has
+real gaps against reasoning models (rejecting `max_tokens` in favor of
+`max_completion_tokens`, requiring an explicit `reasoning_effort` to keep tool calling and
+reasoning coexisting) — `openai_compatible.py` carries the workarounds as configurable
+settings, while `openai_provider.py` targets `/v1/responses` natively and reuses
+`DAWNPATROL_AI_EFFORT` directly for `reasoning.effort` since the accepted value range
+matches. Cache-token accounting differs by convention between the two families and each
+provider's `estimate_cost()` override accounts for it correctly: Anthropic's
+`input_tokens` **excludes** cache reads (additive), OpenAI's `input_tokens` **includes**
+them (inclusive) — a naive shared formula would silently double-bill every cached token
+on one side or the other.
 
-| Table | Purpose |
-|---|---|
-| `runs` | run_id, window, status, per-stage timings, token/cost accounting |
-| `source_health` | per-run, per-source: counts, span, health state, probe results |
-| `metrics` | long metric series — powers real 30/90-day trends, not just yesterday |
-| `findings` | every finding ever emitted; enables "day 4 of this pattern" and dedup |
-| `entities` | first_seen / last_seen / occurrence counts for IPs, domains, hosts |
-| `enrichment_cache` | `(enricher, subject)` -> normalized verdict + TTL |
-| `watchlist` | items the agent carries forward with an expiry; the agent can also close one early when resolved, otherwise it drops out at expiry |
-| `suppressions` | tuned-out patterns: matcher, reason, author, expiry |
-| `canaries` | per-run synthetic-signal injections and whether each was detected |
-| `deliveries` | per-output success/failure, for "was the report actually sent" |
-| `notebook` | free-text notes read back into every future run's context (§ 12), off by default |
+### 6.2 Prompt structure and caching
 
-The `entities` table is what makes novel-domain and novel-IP detection deterministic and
-genuinely reliable. `findings` history is what makes trend language honest — "RECURRING
-(day 4)" is a database count, not a recollection.
-
----
-
-## 8. The AI harness
-
-### 8.1 Model and loop
-
-Claude Opus 5 (`claude-opus-5`) via the official `anthropic` Python SDK, driven by a
-hand-written loop (`providers/anthropic_provider.py`) rather than the SDK's tool runner -
-a deliberate choice, not an oversight: the harness needs per-turn budget checks, cost
-accounting mid-loop, and a terminal-tool break, and keeping the loop's shape identical to
-the `openai_compatible` provider's makes both easy to reason about side by side. Every
-provider is a plugin (`docs/components/providers.md`), so this loop shape is one
-implementation among however many backends get added, not baked into the harness itself.
-
-Configuration per run:
-
-- `thinking: {"type": "adaptive"}` — this is genuinely reasoning-heavy work.
-- `output_config: {"effort": ...}` — the primary cost/quality dial,
-  `DAWNPATROL_AI_EFFORT`, default `high`.
-- `output_config.task_budget` (beta `task-budgets-2026-03-13`) — gives the model a token
-  ceiling it can pace itself against, so it wraps up gracefully rather than being cut off
-  mid-investigation.
-- Streaming, since `max_tokens` is large.
-- Server-side refusal fallbacks (`betas: ["server-side-fallback-2026-07-01"]`,
-  `fallbacks: "default"`) — security log content occasionally trips classifiers, and a
-  refused run should degrade to a fallback model rather than produce no report.
-
-`DAWNPATROL_AI_MODEL` is an env var. Nothing in the pipeline depends on the model choice;
-`claude-haiku-4-5` is a perfectly reasonable setting for a quiet network or for testing.
-
-The model backend itself is a plugin (`dawnpatrol/providers/`, discovered the same way as
-sources/analyzers/enrichers/outputs): `anthropic_provider.py` ships as the default, and
-`openai_compatible.py` points at any `/v1/chat/completions` server — Ollama, LM Studio,
-vLLM, a local model is one environment variable away, not a code change. See
-`docs/components/providers.md` for the `Provider` contract and a worked example of
-adding a new backend.
-
-### 8.2 Prompt structure and caching
-
-Ordered for maximum cache hit rate — render order is `tools` → `system` → `messages`, so
-stable content goes first:
+Ordered for maximum cache hit rate — stable content first:
 
 ```
-tools            [stable, cached]     tool definitions
-system           [stable, cached]     system.md: role, severity taxonomy, epistemics
-                 [semi-stable, cached] profile.yml rendered as network context
-messages[0]      [volatile]           evidence bundle + task
-messages[1..n]   [volatile]           tool call / result turns
+system_static     [stable, cached]      system.md: role, severity taxonomy, epistemics
+system_context     [semi-stable, cached]  profile.yml rendered as network context (+ notebook, if enabled)
+user_message       [volatile]            evidence bundle + task instruction
+(tool turns)        [volatile]            tool call / result pairs
 ```
 
-Cache breakpoint after the profile block. The system prompt plus profile is ~8-10k
-tokens that are byte-identical every day until you edit the profile, so day 2 onward
-reads them at the cache rate. Crucially, **no timestamps, run IDs, or counts appear
-before the breakpoint** — that is the classic silent cache invalidator, and
-`usage.cache_read_input_tokens` is asserted non-zero in the run record so a regression
-is visible rather than silently expensive.
+`Profile.as_context()` is required to be deterministic — no timestamps, run IDs, or
+counts before the cache breakpoint — because that's the classic silent cache invalidator:
+one varying token anywhere in the stable prefix and every day pays the full input price
+again. The system prompt plus profile is a few thousand tokens that are byte-identical
+every day until the profile itself is edited, so day two onward reads them at the cache
+rate; `usage.cache_read_tokens` being nonzero from the very first multi-turn run (the
+breakpoint is hit within a single run's own tool loop, before a second day ever arrives)
+is treated as something worth watching — a regression there is a real, visible cost
+regression, not a curiosity.
 
-### 8.3 Tools
+### 6.3 Tools
+
+Built per-run by `agent/tools.py`'s `ToolBox`, registered conditionally based on what's
+actually configured this run:
 
 | Tool | Purpose | Guard |
 |---|---|---|
-| `describe_schema()` | events table columns, kinds present, row counts | — |
-| `query_events(sql)` | read-only SQL against `run.db` | single `SELECT`, read-only connection, injected `LIMIT`, 5s timeout, byte cap on results |
-| `sample_events(signal_id, n)` | pull the raw events backing a signal | n ≤ 50 |
-| `enrich_ip(ips)` / `enrich_domain(domains)` | reputation lookups | budget + cache + prefilter enforced here |
-| `get_metric_history(key, days)` | trend series from `state.db` | — |
-| `get_entity_history(entity)` | first_seen, occurrences, prior findings | — |
-| `hunt_history(domain=None, ip=None, days=180)` | long-term retained history for a domain or IP, beyond this run's raw events | exactly one of `domain`/`ip` |
-| `get_device_directory(ip=None)` | full per-device detail (hostname/hardware/OS/uptime/location/sources/roles), one IP or every device known this run | only registered when at least one source contributed a device this run |
-| `add_notebook_entry(text)` | write a note the *next* run's system context will carry, alongside `profile.yml` (§ 12) | only registered when `DAWNPATROL_MCP_NOTEBOOK_ENABLED=true`; text capped at `DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS`; the tool call itself still counts against the shared per-run tool-call budget |
+| `describe_schema()` | event-store columns, kinds present | — |
+| `query_events(sql)` | one read-only SELECT against the run's own database | `agent/sqlguard.py`: single statement, `AGENT_READABLE` allowlist, run_id-value binding required for `events`, injected `LIMIT` |
+| `sample_events(signal_id, n)` | raw events backing a signal | n ≤ 50 |
+| `get_entity_history(value)` | first_seen, occurrences, prior findings for one IP/domain | — |
+| `get_metric_history(key, days)` | one metric's own time series | days ≤ 365 |
+| `hunt_history(domain=None, ip=None, days=180)` | long-term retained history beyond this run's raw events | exactly one of `domain`/`ip` |
+| `get_device_directory(ip=None)` | full per-device detail, one IP or all known this run | only registered if any device was contributed this run |
+| `enrich_ip(ips)` / `enrich_domain(domains)` | reputation lookups | budget + cache + prefilter enforced by the broker; only registered if an enricher covers that subject type |
+| `add_notebook_entry(text)` | write a note next run's context will carry | only registered when `DAWNPATROL_MCP_NOTEBOOK_ENABLED=true`; capped at `DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS` |
+| `submit_analysis(...)` | terminal — ends the loop | parameters ARE the schema (§6.5) |
+
+Every non-terminal call is charged against one shared per-run budget
+(`DAWNPATROL_AI_MAX_TOOL_CALLS`, default 25); the call over budget returns a structured
+message telling the model to submit with what it has rather than erroring the run.
 
 `query_events` as read-only SQL rather than a fixed set of canned queries is a deliberate
-choice: it lets the model chase a hypothesis it forms mid-run ("which clients queried
-this domain, and did any of them also appear in the drop log?") without us having to
-anticipate the question. The safety comes from the connection being genuinely read-only
-(`file:run.db?mode=ro&immutable=1`), single-statement, timed out, and row-capped — not
-from asking the model to behave.
+choice: it lets the model chase a hypothesis it forms mid-run — "which clients queried
+this domain, and did any of them also appear in the drop log?" — without every such
+question having been anticipated in advance. The safety is structural, not behavioral:
+single statement (no semicolons), a forbidden-keyword blocklist, a table allowlist, an
+injected `LIMIT`, and — for `events` specifically — the query must bind `run_id` to an
+exact value, not merely mention the column name (a substring check would let a query read
+raw events from every run still inside the retention window, not just this one). The
+underlying connection is opened read-only regardless, so this is a read-scope guarantee
+layered on top of an actually-enforced one, not the only thing standing between the model
+and a write.
 
-Note what is *not* a tool: there is no shell, no filesystem access, no network fetch, and
-no send-email tool. Delivery happens after adjudication, in code, so nothing here can
-redirect a report. Two tools have effects that outlast this run's own output rather than
-just spending its budget: `enrich_ip`/`enrich_domain` (reputation lookups against two
-specific APIs) and, when enabled, `add_notebook_entry` — the one tool that writes state a
-future run reads back as context. See § 12 for why that one is treated as a materially
-different trust boundary from everything else here.
+Note what is *not* a tool: no shell, no filesystem, no arbitrary network fetch, and no
+delivery tool. Delivery happens after adjudication, entirely in code, to recipients that
+come from environment variables — so no amount of injected text anywhere in a log line
+can redirect where a report goes. Two tools have effects that outlast this run's own
+output: `enrich_ip`/`enrich_domain` (spend against a shared budget, and a cache write) and,
+when enabled, `add_notebook_entry` — the one tool that writes state a *future* run reads
+back as context rather than just this run's own budget. See §12 for why that one gets a
+separate opt-in.
 
-#### The device directory (`dawnpatrol/devices.py`)
+### 6.4 The evidence bundle
 
-A per-run, cross-source registry of network devices, keyed by IP address - built fresh
-every run in memory, no config file to maintain. Any `Source.collect()` can call
-`ctx.devices.update(ip, source=self.name, role=..., hostname=..., ...)` to contribute
-whatever it happens to know about a device: `librenms_syslog` registers hostname,
-hardware, OS, uptime and status for everything LibreNMS manages; `pihole_dns` registers
-every distinct client IP it sees making a query (tagged `dns-client`, with a name if one
-was resolved) - including client-only devices, like a phone or a smart plug, that never
-appear in LibreNMS's own device list at all.
+`agent/bundle.py` assembles the single user-turn message: a `RUN` header (window, whether
+a baseline exists), `SOURCE HEALTH`, a `DEVICE DIRECTORY` summary if any devices were
+seen, up to 60 `ANALYZER SIGNALS` (ranked by severity then confidence, canary signals
+excluded), `METRICS` grouped by report section with prior-value deltas where available,
+`WATCHLIST CARRIED FORWARD` if anything's outstanding, `ENRICHMENT BUDGET` remaining per
+enricher, and up to 40 `ANALYZER NOTES`. Untrusted content — domain names, log messages,
+ISP strings — only ever appears inside this bundle or inside a later tool result, fenced
+between `<<<DATA`/`DATA>>>` markers, with an explicit instruction that content inside them
+is data to analyze, never instructions to follow. It never appears in the system prompt.
 
-Public (globally routable) IPs are declined by `update()` unless
-`DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=true` - this directory describes your own
-network's devices, not a remote host a source happens to monitor (LibreNMS checking a
-personal domain over ping produced exactly this: a public IP sitting in the device list
-next to real LAN hardware). The check is a plain `ipaddress.ip_address(ip).is_private`,
-independent of `profile.yml`'s zones, so it costs nothing to add and needs no profile to
-be correct.
+The device directory (`devices.py`) itself is a per-run, in-memory registry keyed by IP,
+built fresh every run — any source's `collect()` can call `ctx.devices.update(ip,
+source=..., role=..., hostname=..., ...)` to contribute whatever it happens to know.
+Contributions merge rather than overwrite (first non-empty value per field wins, every
+contributing source and role is recorded), and public IPs are declined by default
+(`DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=false`) since this directory describes your own
+network, not a remote host a source happens to monitor. **The human-facing report does
+not render the device list at all** — an earlier version did, and that made a real gap
+look like completeness: a NAT-gated segment with no SNMP presence and no local resolver
+behind it can have real active traffic while contributing zero entries to `ctx.devices`,
+because nothing in that segment's traffic ever registers as a device in the traditional
+sense. `segment_review.py` computes a real **segment population** instead — distinct
+client counts by DNS and by firewall, counted on both sides of a flow specifically
+because some gateways log only `DROP`/`REJECT`, never `ACCEPT` — and that's what actually
+answers "is anything out there," not "what happens to be in the device list." The device
+directory is still fully available through `report.devices` in JSON, the
+`get_device_directory` agent tool, and the MCP tool of the same name — it just isn't the
+thing the report body renders.
 
-Contributions merge, they never overwrite: the first non-empty value for a field wins,
-and every contributing source and role is recorded, so a sparse later contribution can
-never clobber a richer earlier one. `build_bundle` gets a one-line-per-device
-`DEVICE DIRECTORY` summary automatically, every run, in the evidence bundle itself - not
-buried in a per-source `SourceHealth.notes` list that only shows its first four or six
-entries. `get_device_directory` (the tool above) is how the model gets the full record
-for one IP, or every IP, on demand, live, from the run in progress.
+### 6.5 Structured output
 
-No bespoke persistence of its own: `ctx.devices.to_bundle()` becomes `Report.devices`, a
-plain field on the same `Report` every run already produces, written to `latest.json`
-(and `report-<run_id>.json`) by `file_report.py` exactly like everything else in the
-report. That is what the *external* MCP tool of the identical name (§12) reads - the most
-recently *completed* run's directory, off disk, not a live one - deliberately the only
-device-related MCP tool, not one bespoke tool per plugin.
-
-**The human-facing renderers deliberately do not render `report.devices` at all.** An
-earlier revision of this section rendered the full device list under "Data quality and
-caveats" - itself a fix for `SourceHealth.notes[:5-6]` silently capping a per-device
-listing `librenms_syslog` used to put there. That was still the wrong data source: the
-device directory was, at the time, a curated inventory (LibreNMS's SNMP-managed hosts,
-Pi-hole's DNS clients), not a census of every client on the network. A NAT-gated segment
-with no SNMP presence and no local DNS resolver behind it - the IoT and DMZ gateways
-here, each running their own `dnsmasq` rather than forwarding queries to the central
-Pi-hole - had real, active client traffic (confirmed: `10.128.50.0/24` cameras and
-automation gear behind `10.128.10.8`) while contributing zero entries to `ctx.devices`,
-because nothing registered "every distinct IP seen in firewall traffic" as a device. The
-full device list, rendered, made that gap invisible rather than visible: it looked
-complete while quietly excluding an entire segment's population. (DHCP lease parsing,
-added after this decision, has since closed part of that gap - a device that renews its
-lease *within this run's own window* now registers via the `dhcp-client` role, real
-hostname included. It does not close all of it: a device that doesn't happen to renew
-its lease during this specific 24h window is still absent from `ctx.devices`, which is
-exactly why segment population - reading every firewall/DNS event directly, not
-whichever leases happened to renew - remains the reliable, complete-every-run answer to
-"how many clients are actually out there.")
-
-The fix is `SegmentReviewAnalyzer` (`analyzers/segment_review.py`) computing
-`zone.<name>.dns_clients` / `zone.<name>.fw_clients` straight from the events themselves.
-DNS is `EventQuery.distinct_count("client_ip", src_zone=zone)`. Firewall is deliberately
-counted on *both* sides - the union of distinct `src_ip` where `src_zone` matches and
-distinct `dst_ip` where `dst_zone` matches - because the DMZ/IoT gateways in production
-turned out to log only `DROP`/`REJECT` lines, never `ACCEPT`: a device that only ever
-shows up as the target of a rejected inbound session, never as the initiator of an
-outbound one, would otherwise never be counted at all. A NAT gateway's own firewall log
-still carries the client's real private address in `SRC=`/`DST=` even though the gateway
-masks it heading out to the WAN, so this count is accurate regardless of whether the
-client is independently known to any source. Every
-human-facing renderer shows a **segment population** overview built from these metrics
-instead of the device list - one line per zone, distinct client counts by DNS and by
-firewall - which is what actually answers "is anything out there," rather than "what do
-we happen to already have inventoried." `report.devices` itself is untouched and still
-fully available through the JSON export, the internal agent's tool, and the MCP tool of
-the same name - only the *human report* stopped showing it.
-
-### 8.4 Structured output
-
-The agent returns JSON conforming to a schema (`output_config.format`), not prose:
+The agent's final answer arrives as a call to a tool, not as provider-native structured
+output: `submit_analysis` is registered with `terminal=True` and its `parameters` field
+*is* the JSON schema (`agent/schema.py`'s `ANALYSIS_SCHEMA`). Using a tool for the answer
+— rather than each provider's own response-format mechanism — keeps every provider on the
+identical code path and works even against a backend with no native JSON-schema support.
 
 ```jsonc
 {
   "executive_summary": "string, 2-3 sentences",
   "findings": [ { "title": "...", "severity": "HIGH", "confidence": "high",
-                  "signal_ids": ["fw.prober.203.0.113.45.22"],
+                  "taxonomy": "...", "zone": "...",
+                  "signal_ids": ["fw.prober.203.0.113.45.22"],   // REQUIRED, ≥1
                   "evidence_kinds": ["local_behavior", "reputation"],
-                  "what": "...", "why": "...", "not_this": "...", "action": "..." } ],
+                  "what": "...", "why": "...", "not_this": "...", "action": "...",
+                  "entities": [ {"type": "ip", "value": "...", "role": "source"} ] } ],
   "section_narratives": { "perimeter": "...", "dns": "...", "router": "...",
-                          "segments": {"lan": "...", "iot": "...", "dmz": "..."} },
+                          "segments": "...", "correlation": "..." },
   "trend_notes": [ {"kind": "ESCALATING", "text": "...", "signal_ids": [...]} ],
   "recommended_actions": [ {"priority": 1, "text": "...", "command": "..."} ],
   "watchlist_updates": [ {"entity_type": "ip", "entity_value": "...",
@@ -703,146 +661,149 @@ The agent returns JSON conforming to a schema (`output_config.format`), not pros
 }
 ```
 
-`watchlist_updates`/`watchlist_removals`' `entity_type` is `ip`, `domain`, or `host`. In
-practice the model uses `host` for an internal endpoint it wants to track by address, not
-a named hostname string - `Event.device` is not a hostname field for every source (for
-`librenms_syslog` it holds LibreNMS's numeric device_id), so `correlation.py`'s
-`_watchlist_hits()` matches `host` the same way it matches `ip` (`src_ip`/`dst_ip`/DNS
-`client_ip`), checking `Event.device` too only as an additional, harmless path for a
-source that does log real hostnames there.
+`watchlist_updates`/`watchlist_removals`' `entity_type` is `ip`, `domain`, or `host`;
+`correlation.py`'s watchlist matcher treats `host` the same way it matches `ip` (against
+`src_ip`/`dst_ip`/`client_ip`), since `Event.device` isn't a reliable hostname field for
+every source.
 
-The model writes judgment and prose fragments. It never writes headings, never writes
-numbers that belong to a metric, and never writes the report envelope. All the statistics
-sections are rendered from `Metric` objects the analyzers produced, which means **every
-number in the report traces to code by construction** — the current prompt's rule 3
-("numbers must come from the actual parsed datasets") stops being a rule and becomes a
-property of the system.
+The model writes judgment and prose fragments. It never writes headings, never writes a
+number that belongs to a metric, and never writes the report envelope — every statistics
+section is rendered straight from the `Metric` objects the analyzers already produced.
+That's what makes "every number in the report traces to code" a property of the system by
+construction, not a prompt rule the model is asked to follow.
 
-### 8.5 Cost model
+### 6.6 Cost model
 
-Measured against a real deployment (~28k firewall records, ~140k DNS queries per 24h
-window), not projected. Opus 5 at $5/MTok input, $25/MTok output, cache reads at
-$0.50/MTok.
+Measured live against a real deployment (at the time, ~28k firewall records and ~140k DNS
+queries per 24h window — volume scales with network size, and will differ for yours),
+Anthropic Opus 5 pricing ($5/MTok input, $25/MTok output, cache reads at $0.50/MTok):
 
 | Run | Effort | Model calls | Input | Output | Cache read | Cost |
 |---|---|---|---|---|---|---|
 | Scheduled, medium effort | `medium` | 5-6 | ~131k | ~11.8k | ~30.5k | **$0.51-0.56** |
 | Scheduled, high effort | `high` | 6 | ~273k | ~14.4k | ~61k | **$0.97-1.21** |
-| MCP-triggered, one source only | `high` | 5 | - | - | - | $0.56 |
 
-Cache reads are nonzero from the very first multi-turn run - the breakpoint after the
-profile block (§8.2) hits within a single run's tool loop, before a second day ever
-arrives to benefit from cross-run caching. `usage.cache_read_tokens` is asserted nonzero
-in the run record; a regression there is visible immediately rather than showing up as a
-surprise bill at the end of the month.
+At daily cadence that lands around **$15-36/month** for `high`, **$15-17/month** for
+`medium`. Levers, in the order worth reaching for:
 
-At daily cadence, `high` effort lands at roughly **$15-36/month** for this network's
-volume; `medium` roughly **$15-17/month**. Both are well inside the original $12-45/month
-projection. Your own volume will differ - a much larger firewall log or DNS query volume
-raises the evidence-bundle and tool-result token counts proportionally.
-
-Levers, all env vars, in the order worth reaching for:
 1. `DAWNPATROL_AI_EFFORT` — `medium` for routine days.
-2. `DAWNPATROL_AI_MAX_TOOL_CALLS` — caps loop length.
-3. `DAWNPATROL_AI_TASK_BUDGET_TOKENS` — the model paces itself.
-4. `DAWNPATROL_AI_MAX_COST_USD` — hard abort; the run still produces a
-   deterministic-only report rather than nothing.
-5. `DAWNPATROL_AI_MODEL` — Sonnet 5 or Haiku 4.5.
+2. `DAWNPATROL_AI_MAX_TOOL_CALLS` — caps investigation loop length.
+3. `DAWNPATROL_AI_TASK_BUDGET_TOKENS` — the model paces itself against a ceiling.
+4. `DAWNPATROL_AI_MAX_COST_USD` — hard abort (`budget.py`); the run still produces a
+   deterministic-only report, never nothing.
+5. `DAWNPATROL_AI_MODEL` — `claude-sonnet-5` or `claude-haiku-4-5`, or a different
+   provider entirely (§5.5).
 
 A run that trips the cost ceiling degrades to "analyzer signals rendered without agent
-narrative", flagged in the data-quality section. It never produces no report at all.
+narrative," flagged plainly in the data-quality section — it never produces no report at
+all.
 
 ---
 
-## 9. Guardrails and self-validation
+## 7. Guardrails and adjudication
 
-### 9.1 Guardrails enforced in code
-
-`adjudicate.py` runs after the agent and before rendering. Every rule that the current
-prompt states as an instruction becomes a validator:
+`adjudicate.py` runs after the agent (stage 8) and before rendering. Every rule the
+system otherwise depends on the model following becomes a validator here instead — the
+difference is that a validator holds every time, and a clamp or rejection is recorded so
+you can see when the model tried to over-reach.
 
 | Rule | Enforcement |
 |---|---|
-| A finding must trace to real data | `signal_ids` non-empty and all resolvable; else rejected |
-| Reputation alone never creates a finding | `evidence_kinds == {"reputation"}` → rejected |
-| Reputation moves severity by at most one level | clamp against `Signal.severity_hint`; log the clamp |
-| Reputation never produces CRITICAL | CRITICAL requires a signal with `local_behavior` evidence |
-| Country is never a severity input | lint: country-code token in `why` without other justification → warn into data-quality |
-| Overall status rollup | computed: RED if any CRITICAL or ≥2 HIGH; AMBER if any HIGH or ≥3 MEDIUM; else GREEN |
-| No credential ever appears in output | secret-scan the rendered body against all configured secret values; abort delivery on hit |
-| Report is 7-bit ASCII, ≤72 cols (plaintext renderer) | renderer guarantees it; unit test asserts it |
-| Failed vs. suspect source language | renderer selects wording from the health enum |
-| Suppressed findings stay suppressed | matched against `suppressions`; moved to an appendix line, never silently dropped |
+| A finding must trace to real data | `signal_ids` resolves to at least one known `Signal`; a finding citing none is rejected outright |
+| Reputation alone never creates a finding | `evidence_kinds` must intersect `{local_behavior, baseline_delta, correlation, policy_violation}`; a finding backed only by `reputation` is rejected |
+| Severity may exceed its strongest signal's hint by at most one level | clamped; the clamp is recorded as an adjustment |
+| CRITICAL requires local evidence of compromise | a finding whose only non-reputation evidence is `baseline_delta` cannot be CRITICAL on reputation alone — lowered to HIGH with a recorded reason |
+| Country is never treated as a severity input | if a country/region name appears in `why` on a MEDIUM+ finding, a note is appended — the finding itself is not touched, since geography can legitimately appear as *context* |
+| Overall status rollup | `RED` if any CRITICAL, ≥2 HIGH, or a canary failed; `AMBER` if any HIGH or ≥3 MEDIUM; else `GREEN` |
+| No credential ever reaches output | the fully rendered body is scanned against every registered secret value before delivery; a hit aborts the run |
+| Suppressed findings stay visible, not deleted | matched findings move to a one-line appendix; the underlying pattern is never silently dropped |
 
-Clamps and rejections are recorded in the run record and surfaced in the data-quality
-section, so you can see when the model tried to over-reach. That is useful signal about
-whether the prompt needs tuning.
+**Suppression** exists because its absence is how these systems die in practice: a
+finding that turns out to be benign-but-weird gets `dawnpatrol suppress --taxonomy ...
+--entity ... --reason "..." --days 90`, which writes a matcher, not a permanent
+exception — every suppression carries a mandatory expiry that forces periodic
+re-examination, and a match still shows up as one line in the report's appendix rather
+than disappearing. Without that combination, the same false positive either reappears
+every single morning until you stop reading the report, or gets silenced in a way nobody
+revisits — both worse than the noise itself.
 
-**Suppression** gets its own mechanism because its absence is how these systems die. When
-a finding turns out to be benign-but-weird, `dawnpatrol suppress <finding_id> --reason
-"..." --days 90` writes a matcher to `state.db`. Future matching findings move to a
-one-line "suppressed" appendix rather than being deleted — so a tuned-out pattern that
-changes character is still visible — and every suppression carries an expiry that forces
-periodic re-examination. Without this, the same false positive appears every morning
-until you stop reading the report, which is a worse outcome than missing it.
+---
 
-### 9.2 Self-validation (canaries)
+## 8. Self-validation (canaries)
 
 A pipeline that reports GREEN for 200 consecutive days is indistinguishable from a
-pipeline that is silently broken, and both the model and the reader will stop paying
-attention. `canary.py` closes that loop.
-
-Before collection, the canary module injects synthetic signals whose detection is
-deterministic and verifiable — a resolution of a domain placed on a local denylist for
-exactly this purpose, a synthetic beacon cadence, a burst that should trip the spike
-detector. After adjudication, it asserts each one was surfaced.
+pipeline that's silently broken, and both the model and the reader eventually stop
+paying attention. `canary.py` closes that loop by injecting synthetic activity every run
+and asserting it gets detected.
 
 ```python
 class Canary(ABC):
     name: str
-    def inject(self, ctx: RunContext) -> CanaryToken: ...
-    def assert_detected(self, report: Report, token: CanaryToken) -> CanaryResult: ...
+    expect_taxonomy: str
+    requires_kinds: frozenset[EventKind]
+
+    @abstractmethod
+    def inject(self, window: Window) -> tuple[list[Event], CanaryToken]: ...
+    def assert_detected(self, signals: list[Signal], token: CanaryToken) -> CanaryResult: ...
 ```
 
-The result goes in the report header, not buried in section 10:
+Two ship, both using RFC 5737 TEST-NET / RFC 2606 `.invalid` addresses and names so they
+can never collide with real traffic: `BeaconCanary` (`dns_beacon`) injects a perfectly
+periodic DNS pattern the beaconing analyzer must notice (`c2.beacon_candidate`), and
+`ProberCanary` (`persistent_prober`) injects 400 sustained drops to one port from one
+source, the textbook shape `firewall_patterns.py` is built to catch
+(`scan.persistent_prober`). Canary events are injected alongside real collection (stage
+2), analyzed in a completely separate query pass scoped to only the canary source, and
+tagged `is_canary=True` on any signal whose entities match — which is what keeps them out
+of the evidence bundle and the report's own statistics entirely, not just hidden from the
+final text.
+
+The result goes in the report header, not buried in a data-quality footnote:
 
 ```
-Detection self-test        : 3/3 canaries detected
+Detection self-test        : 2/2 canaries detected
 ```
 
-A failed canary is itself a CRITICAL finding: the pipeline is not detecting things it is
-definitionally supposed to detect, which means every GREEN since the last successful
-canary is suspect. Canaries run on a configurable subset of runs
-(`DAWNPATROL_CANARY_EVERY_N_RUNS`, default 1) since they cost almost nothing.
-
-This is the difference between a report that says GREEN and a report that says GREEN and
-demonstrates it was actually looking.
-
-See `docs/components/canaries.md` for the full contract, how canary events stay isolated
-from real statistics, and a worked example of adding a new canary.
+A failed canary is itself a CRITICAL finding and forces `RED`: it means the pipeline
+isn't detecting something it is definitionally supposed to detect, so every GREEN since
+the last successful canary is unverified. `DAWNPATROL_CANARY_EVERY_N_RUNS` (default 1)
+controls how often this runs, since it costs almost nothing. See
+`docs/components/canaries.md` for how canary isolation is implemented and a worked
+example of adding a new one — extending this list currently means editing `canary.py`
+directly and adding to `BUILTIN_CANARIES`, since (unlike the five plugin folders in §5) it
+isn't a discovered package.
 
 ---
 
-## 10. Configuration
+## 9. Configuration
 
-**Secrets and runtime knobs: environment variables.** Every one supports a `_FILE`
-suffix (`DAWNPATROL_SOURCE_LIBRENMS_TOKEN_FILE=/run/secrets/librenms`) for Docker secrets.
+**Runtime knobs and secrets: environment variables**, resolved in `config.py`. Every
+secret-shaped one also accepts a `_FILE` suffix
+(`DAWNPATROL_SOURCE_LIBRENMS_TOKEN_FILE=/run/secrets/librenms`) for Docker/Podman
+secrets, and the `_FILE` form wins when both are set.
 
 ```bash
 # Schedule
 DAWNPATROL_SCHEDULE="0 6 * * *"        # cron; empty = run once and exit
 DAWNPATROL_TZ="UTC"
 DAWNPATROL_RUN_ON_START=true
-DAWNPATROL_WINDOW_HOURS=48
+DAWNPATROL_WINDOW_HOURS=24             # code default; a source's own max_window_hours may clamp it further
 
-# Paths
+# Paths — keep these absolute; a relative value resolves against the
+# container's WORKDIR (/app), not against whatever you bind-mounted at
 DAWNPATROL_DATA_DIR=/var/lib/dawnpatrol
 DAWNPATROL_OUTPUT_DIR=/out
 DAWNPATROL_PROFILE=/etc/dawnpatrol/profile.yml
 
+# Retention
+DAWNPATROL_RETENTION_RAW_DAYS=7
+DAWNPATROL_RETENTION_IOC_DAYS=180
+DAWNPATROL_RETENTION_METRICS_DAYS=730
+
 # AI
-ANTHROPIC_API_KEY=...
+DAWNPATROL_AI_PROVIDER=anthropic       # or openai / openai_compatible
 DAWNPATROL_AI_MODEL=claude-opus-5
+DAWNPATROL_AI_API_KEY=...              # falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
 DAWNPATROL_AI_EFFORT=high
 DAWNPATROL_AI_MAX_COST_USD=3.00
 DAWNPATROL_AI_MAX_TOOL_CALLS=25
@@ -850,13 +811,8 @@ DAWNPATROL_AI_MAX_TOOL_CALLS=25
 # Sources — presence of required vars auto-enables the plugin
 DAWNPATROL_SOURCE_LIBRENMS_URL=http://librenms.example/api/v0
 DAWNPATROL_SOURCE_LIBRENMS_TOKEN=...
-# Optional - unset pulls every device LibreNMS reports, auto-discovered each run.
-#DAWNPATROL_SOURCE_LIBRENMS_DEVICES=3,4,7
 DAWNPATROL_SOURCE_PIHOLE_URL=http://pihole.example/api
 DAWNPATROL_SOURCE_PIHOLE_PASSWORD=...
-
-# Device directory - excludes public IPs by default; see §8.3, "The device directory"
-DAWNPATROL_DEVICES_INCLUDE_PUBLIC_IPS=false
 
 # Enrichment
 DAWNPATROL_ENRICH_ABUSEIPDB_KEY=...
@@ -868,18 +824,20 @@ DAWNPATROL_OUTPUT_SMTP_HOST=...
 DAWNPATROL_OUTPUT_SMTP_TO=...
 DAWNPATROL_OUTPUT_WEBHOOK_URL=...
 DAWNPATROL_OUTPUT_WEBHOOK_RUN_WHEN=AMBER,RED
+
+# MCP — off by default; see §12
+DAWNPATROL_MCP_ENABLED=false
+DAWNPATROL_MCP_PORT=8420
 ```
 
-**Network topology: a mounted YAML profile.** This is everything that is true about *your*
-network and must not be in a public repo. It is data the agent reads, not code.
+**Network topology: a mounted YAML profile**, everything true about *your* network that
+must never land in a public repo. It's data the analyzers and the model read, never
+executable.
 
 ```yaml
 site: { name: "home", timezone: "UTC" }
 
 zones:
-  - name: lan
-    cidrs: ["192.168.1.0/24"]
-    trust: trusted
   - name: iot
     cidrs: ["192.168.50.0/24"]
     trust: untrusted
@@ -888,59 +846,90 @@ zones:
             segment. Expected egress: a small stable set of vendor cloud
             endpoints plus NTP. Anything else is notable."
     expected_egress_domains: ["*.vendor-cloud.example", "*.pool.ntp.org"]
-  - name: dmz
-    cidrs: ["192.168.15.0/24"]
-    trust: semi-trusted
-    gateway: "192.168.1.2"
-    notes: "Windows Server reached via TeamViewer. Inbound RDP/SMB reaching this
-            host is HIGH. Unexpected outbound is HIGH."
-    expected_egress_domains: ["*.teamviewer.com", "*.microsoft.com"]
 
 hosts:
-  - { ip: "192.168.1.1",  role: "router/firewall/vpn", model: "Example RT-1234" }
+  - { ip: "192.168.1.1", role: "router/firewall/vpn", model: "Example RT-1234" }
   - { ip: "192.168.1.53", role: "dns-resolver", authoritative_resolver: true }
-  - { ip: "192.168.1.55", role: "monitoring" }
 
 policy:
-  wan_ip_is_dynamic: true            # a WAN IP change is not an incident
+  wan_ip_is_dynamic: true              # a WAN IP change is not an incident
   approved_resolvers: ["192.168.1.53"]
-  attack_surface_ports: [22, 23, 80, 443, 445, 1194, 3306, 3389, 5060,
-                         5432, 5900, 8080, 8443, 8728]
-  nat_attribution_limited_behind: ["192.168.1.8", "192.168.1.2"]
+  attack_surface_ports: [22, 23, 80, 443, 445, 1194, 3306, 3389, 5060, 5432, 5900, 8080, 8443, 8728]
+  nat_attribution_limited_behind: []   # see caveat below
+  benign_domain_suffixes: [...]        # REPLACES the built-in default list, not additive
 
 known_quirks:
   - "Some consumer router firmware mislabels routine roaming/watchdog chatter
      as 'emerg' severity. Break emerg counts down by program before concluding."
-  - "One IoT client emits malformed DNS-SD names with non-UTF-8 bytes.
-     Client-side quirk, not a security finding."
 ```
 
-`nat_attribution_limited_behind` is how the attribution-limit caveat stops being a prompt
-rule: the renderer emits the "originating from behind the gateway; per-device
-attribution is not possible" language automatically for any finding whose subject is one
-of those gateways. **List a gateway here only if its own logs genuinely cannot reveal
-the originating client - verify against the actual log format first, not every NAT
-gateway qualifies.** A real deployment listed two OpenWrt gateways here on the assumption
-that NAT meant the client was unknowable, then found - once the gateways' own
-kernel/iptables logs were actually inspected - that `SRC=`/`DST=` carried the real
-pre-NAT client IP the whole time. Both entries were removed once that was confirmed; the
-mechanism stayed, the assumption didn't.
+`nat_attribution_limited_behind` is what turns the attribution-limit caveat from a prompt
+rule into automatic renderer behavior — any finding whose subject is one of those
+addresses gets the "traffic is NATed here; per-device attribution is not possible"
+language attached without the model having to say it. **List a gateway here only after
+verifying its own logs genuinely cannot reveal the originating client** — a NAT gateway
+does not automatically mean the client behind it is unknowable. Two OpenWrt gateways in a
+real deployment were listed here on exactly that assumption, then removed once their own
+kernel/iptables logs turned out to carry the real pre-NAT client address in `SRC=`/`DST=`
+the whole time; the mechanism stayed, the assumption that put entries in it didn't.
 
-`known_quirks` gives you a place to record environment truths without editing a prompt —
-the entries are injected into the cached profile block.
+`benign_domain_suffixes` is a **full override**, not an addition — setting it replaces
+the built-in default list rather than extending it, so a deployment that sets it needs to
+re-list anything from the default it still wants. `known_quirks` is a place to record
+environment truths without touching a prompt; every entry is injected into the cached
+profile block verbatim. See `docs/components/profile.md` for every field's effect on
+analysis in detail.
 
-See `docs/components/profile.md` for every field's effect on analysis in detail, and a
-worked example of documenting a new segment.
+---
+
+## 10. CLI and operations
+
+```bash
+dawnpatrol serve                        # scheduler loop (default)
+dawnpatrol run                          # one full run now
+dawnpatrol run --stop-after analyze     # no API spend; dumps the evidence bundle
+dawnpatrol run --dry-run                # everything except real delivery
+dawnpatrol run --ephemeral              # real run, real delivery — deletes its own DB rows/files after
+dawnpatrol delete-run <id> [--force]    # delete one run's rows and report files on demand
+dawnpatrol runs                         # recent run history
+dawnpatrol canary                       # last detection self-test
+dawnpatrol probe                        # connectivity + auth check on every source
+dawnpatrol list-plugins                 # what was discovered and whether it is enabled
+dawnpatrol validate                     # config and profile validation
+dawnpatrol hunt --domain x --days 180   # retrospective IOC search over the long-term store
+dawnpatrol suppress --reason "..." --days 90 --taxonomy scan.persistent_prober
+```
+
+`--ephemeral` and `delete-run` exist so iterating against the real deployment doesn't
+leave months of throwaway history on disk (§4 covers exactly which tables they clear, and
+the one table — `entities` — that neither one can retroactively undo). `--ephemeral`
+still collects, analyzes, and delivers for real against the real database; add
+`--dry-run` too if a test run also shouldn't actually email or POST anywhere.
+`delete-run` does the identical cleanup after the fact against any run still on disk, and
+refuses one that has no recorded finish time (looks still in progress) unless `--force`
+is passed.
+
+`--stop-after <stage>` (any of `collect`/`verify`/`persist`/`analyze`/`investigate`/
+`adjudicate`/`render`/`deliver`) is the fast development loop: `--stop-after analyze`
+gives a full evidence bundle — metrics, signals, source health — with zero API spend,
+which is the right way to develop and sanity-check a new analyzer or source normalizer.
+
+Suppressions carry a mandatory expiry, and matching findings move to a report appendix
+rather than being deleted, so a tuned-out pattern that changes character stays visible
+(§7). Delivery policy is per-output: `DAWNPATROL_OUTPUT_<NAME>_RUN_WHEN=ALWAYS|NEVER|
+IMPORTANT|AMBER,RED`.
 
 ---
 
 ## 11. Container and scheduling
 
-**Scheduling is in-process**, `croniter` plus a sleep loop, rather than cron or
-supercronic. One process, PID 1 is the app, logs go to stdout unmodified, signal handling
-and graceful shutdown are straightforward, and the schedule is a plain env var. Running
-`DAWNPATROL_SCHEDULE=""` executes one run and exits, which is exactly what you want for
-testing and for driving it from an external scheduler instead.
+**Scheduling is in-process** (`scheduler.py`) — `croniter` plus a sleep loop, rather than
+cron or supercronic as a separate process. One process, PID 1 is the app, logs go to
+stdout unmodified, signal handling is straightforward, and the schedule is a plain env
+var. `DAWNPATROL_SCHEDULE=""` runs once and exits — useful for testing, or for driving
+DawnPatrol from an external scheduler instead. The loop wakes at least every 60 seconds
+even during a long gap between runs, purely to keep the heartbeat file fresh and honor a
+stop signal promptly.
 
 ```dockerfile
 FROM python:3.12-slim
@@ -950,6 +939,9 @@ COPY pyproject.toml ./
 RUN pip install --no-cache-dir .
 COPY dawnpatrol/ ./dawnpatrol/
 USER dawnpatrol
+ENV DAWNPATROL_DATA_DIR=/var/lib/dawnpatrol \
+    DAWNPATROL_OUTPUT_DIR=/out \
+    DAWNPATROL_PROFILE=/etc/dawnpatrol/profile.yml
 VOLUME ["/var/lib/dawnpatrol", "/out"]
 HEALTHCHECK --interval=5m CMD python -m dawnpatrol.cli healthcheck
 ENTRYPOINT ["python", "-m", "dawnpatrol.cli"]
@@ -957,249 +949,143 @@ CMD ["serve"]
 ```
 
 Single stage, slim base, non-root, no build toolchain in the final image. `healthcheck`
-reads a heartbeat file the scheduler touches, so a wedged scheduler is visible to Docker.
-
-CLI surface:
-
-```
-dawnpatrol serve                       # scheduler loop (default)
-dawnpatrol run                         # one full run now
-dawnpatrol run --stop-after analyze    # no API spend; dumps the evidence bundle
-dawnpatrol run --dry-run               # everything except delivery
-dawnpatrol run --from-run <id>         # re-analyze stored events, no re-collection
-dawnpatrol probe                       # connectivity + auth check on every source
-dawnpatrol list-plugins                # what was discovered and whether it is enabled
-dawnpatrol validate                    # config and profile validation
-dawnpatrol canary --check              # run the detection self-test standalone
-dawnpatrol suppress <id> --days 90     # tune out a false positive, with an expiry
-dawnpatrol hunt --domain x --days 180  # retrospective IOC search over the long-term store
-dawnpatrol render <run_id> --format md # re-render a stored report
-```
-
-`--from-run` matters for iteration: you can develop analyzers and prompt changes against
-a real captured day without re-pulling 300k records or hammering the APIs.
+reads the same heartbeat file the scheduler touches, so a wedged scheduler is visible to
+Docker without a second monitoring path. The three path variables baked into the image
+(`DATA_DIR`/`OUTPUT_DIR`/`PROFILE`) are absolute and match the `VOLUME` declarations and
+`docker-compose.yml`'s own mount points — overriding any of them with a relative value in
+`.env` resolves against the container's `WORKDIR` (`/app`) instead of wherever you
+actually bind-mounted, which silently sends a run's database and report files into the
+container's ephemeral filesystem. Keep overrides absolute, or don't override them.
 
 ---
 
 ## 12. External agent access (MCP)
 
-Everything above describes one closed loop: collect, reduce, judge, report, deliver,
-once a day. That loop produces a good morning briefing. It is a poor fit for the moment
-a briefing says something worth digging into, because digging in means re-running
+Everything above describes one closed loop: collect, reduce, judge, report, deliver, on a
+schedule. That loop produces a good morning briefing. It's a poor fit for the moment a
+briefing says something worth digging into, because digging in means re-running
 collection with different parameters, writing ad hoc SQL against events the pipeline
-already has, or re-reading the network profile to check a hunch — none of which should
-require SSHing into the box or re-deriving context a second AI system already built.
+already has, or re-checking the network profile against a hunch — none of which should
+require shelling into the box or re-deriving context a second AI system already built.
 
 `dawnpatrol/mcpserver/` answers that with a second, optional interface onto the same
-capabilities: an MCP (Model Context Protocol) server, reachable over streamable HTTP,
-that an external agent — a human's own Claude session, an incident-response bot, a
-SIEM's enrichment step — can call directly. It is not a new capability surface. Every
-tool it exposes is a thin wrapper over something stages 1-10 already do:
+capabilities: an MCP server over streamable HTTP that an external agent — a human's own
+Claude session, an incident-response bot, a SIEM's enrichment step — can call directly.
+It is not a new capability surface; every tool is a thin wrapper over something the
+pipeline already does:
 
 | Tool | Wraps |
 |---|---|
-| `list_reports`, `get_latest_report`, `get_report` | The files `outputs/file_report.py` already writes |
-| `describe_event_schema`, `query_events` | The identical `agent/sqlguard.py` validator the in-run investigation agent's SQL tool uses |
+| `list_reports`, `get_latest_report`, `get_report` | the files `file_report.py` already writes |
+| `describe_event_schema`, `query_events` | the identical `agent/sqlguard.py` validator the in-run agent's SQL tool uses (§6.3) |
 | `get_metric_history` | `Store.metric_history` |
 | `get_network_profile` | `Profile.as_context()` — the same text block cached into the harness system prompt |
-| `list_source_plugins` | `registry.discover` + `env_satisfied`, the same introspection `list-plugins` uses |
-| `get_device_directory` | `Report.devices` in `latest.json` — the same field `outputs/file_report.py` already writes, not a plugin-specific lookup |
+| `list_source_plugins` | `registry.discover` + `env_satisfied` — the same introspection `list-plugins` uses |
+| `get_device_directory` | `Report.devices` in `latest.json` — not a live, plugin-specific lookup |
+| `read_notebook`, `add_notebook_entry`, `delete_notebook_entry` | the `notebook` table — a second, narrower door (below) |
 | `trigger_analysis` | `Runner.run()` — the identical pipeline a scheduled run executes |
 
-Two design decisions carry the actual safety weight:
+Two things carry the actual safety weight. **It's one door onto existing rooms, not a new
+room.** `trigger_analysis` cannot make the pipeline do anything `dawnpatrol run` at a
+terminal couldn't already do, and `query_events` cannot reach a table or bypass a rule
+`agent/sqlguard.py` doesn't already enforce for the in-run investigation agent itself —
+auditing the MCP surface is auditing whether the wrapping is thin, not auditing a second
+implementation of read access. And **it's the one thing in this design that listens, so
+it defaults off and to authenticated**: `DAWNPATROL_MCP_ENABLED` must be set explicitly,
+every request needs `Authorization: Bearer <token>` checked with a constant-time
+comparison (`hmac.compare_digest`) in a small ASGI middleware wrapped *around* the MCP
+app rather than inside it, and the token is either operator-supplied
+(`DAWNPATROL_MCP_TOKEN`, stable across restarts) or generated fresh and logged exactly
+once at startup.
 
-**It is one door onto existing rooms, not a new room.** `trigger_analysis` cannot make
-the pipeline do anything `dawnpatrol run` at a terminal could not already do, and
-`query_events` cannot reach a table or bypass a rule `agent/sqlguard.py` does not already
-enforce for the investigation agent itself. Auditing the MCP surface is auditing whether
-the wrapping is thin, not auditing a second implementation of read access.
+`trigger_analysis` and the scheduled cron job share one real lock
+(`threading.Lock` in `cli.cmd_serve`), so a triggered run arriving mid-cron gets a clean
+"a run is already in progress" response instead of racing the scheduled one. It also
+never sends email — `Runner.run(skip_outputs={"smtp"})` drops that output from the
+delivery list before stage 10 runs at all, the same code path any other output-skip uses,
+not a special case bolted onto the SMTP plugin. File output still happens, so the result
+is retrievable afterward exactly like a scheduled run's.
 
-**It is the one thing in this design that listens, so it defaults to off and to
-authenticated.** `DAWNPATROL_MCP_ENABLED` must be set explicitly. Every request requires
-`Authorization: Bearer <token>`, checked with a constant-time comparison
-(`hmac.compare_digest`) in a small ASGI middleware (`mcpserver/auth.py`) wrapped *around*
-the MCP app rather than implemented inside it — deliberately independent of whatever
-authentication semantics a future `mcp` SDK major version changes. The token is either
-`DAWNPATROL_MCP_TOKEN` (operator-supplied, stable across restarts) or generated fresh at
-startup and logged exactly once, since a generated token that is never displayed again is
-useless and a generated token that is displayed on every log line is a leak waiting to be
-scraped.
-
-**Concurrency is a real, shared lock, not a convention.** `trigger_analysis` and the
-scheduled cron job both go through the same `guarded_run` closure built in
-`cli.cmd_serve`, wrapping a single `threading.Lock`. Two runs writing to `run.db`
-simultaneously is not a scenario worth supporting; a triggered run that arrives mid-cron
-gets a clean `"a run is already in progress"` response instead of silent corruption or a
-long hang.
-
-**`trigger_analysis` never emails**, structurally: it calls `Runner.run(skip_outputs=
-frozenset({"smtp"}))`, which drops the `smtp` output from the delivery list before stage
-10 runs at all — the same code path other outputs use, not a special case bolted onto the
-SMTP plugin. File output still happens, so the result is retrievable afterward through
-`get_report` exactly like a scheduled run's.
-
-**The agent notebook is a second, narrower door, gated separately.** Every tool above is
-read-only except `trigger_analysis`, and even that only runs the existing pipeline - it
-doesn't change what a *future* run believes. `add_notebook_entry` does: text is stored in
-a `notebook` table (`schema.py`) and read back by `agent/harness.py`, appended to
-`system_context` immediately after `profile.as_context()` - alongside the network
-documentation, never in place of it. There are two independent ways a note gets written:
-this MCP tool, called by an external agent, and a *second*, separate `add_notebook_entry`
-tool on the investigate stage's own `ToolBox` (`agent/tools.py`) that lets the
-run-in-progress write to the same table directly, without a human relaying it through
-MCP. Both share the same gate, the same table, and the same injection limits - only the
-caller differs. That is a materially different trust boundary (shaping future judgment,
-not just reading data or spending API budget), so it does not turn on with
-`DAWNPATROL_MCP_ENABLED` - it needs
-its own `DAWNPATROL_MCP_NOTEBOOK_ENABLED`, off by default even when the rest of the MCP
-surface is on. Two bounds keep it from becoming an unbounded cost or context-injection
-surface: `DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS` rejects an over-long single note
-outright, and `DAWNPATROL_MCP_NOTEBOOK_MAX_INJECTED` caps injection to the most recent N
-entries even though the full history stays readable via `read_notebook`. A note still
-cannot fabricate a finding - `adjudicate.py`'s `signal_ids` requirement applies uniformly
-regardless of what the model was told in its system prompt. `delete_notebook_entry`
-removes one permanently by id - immediate, no expiry mechanism, no soft-archive - since a
+**The notebook is a materially different trust boundary, and gated separately.** Every
+other MCP tool is read-only, and even `trigger_analysis` only re-runs the existing
+pipeline — it doesn't change what a *future* run believes going in.
+`add_notebook_entry` does: text lands in the `notebook` table and is read back by
+`agent/harness.py`, appended to the system context right after the profile, on every
+subsequent run. There are two independent writers into that same table — this MCP tool,
+and a second `add_notebook_entry` on the in-run investigation agent's own tool surface
+(§6.3) — sharing the same gate and the same injection limits. Because shaping future
+judgment is a different risk than reading data or spending API budget, it doesn't turn on
+with `DAWNPATROL_MCP_ENABLED` — it needs its own `DAWNPATROL_MCP_NOTEBOOK_ENABLED`, off
+by default even when the rest of the MCP surface is on. Two bounds keep it from becoming
+an unbounded cost or context-injection surface:
+`DAWNPATROL_MCP_NOTEBOOK_MAX_ENTRY_CHARS` rejects an over-long single note outright, and
+`DAWNPATROL_MCP_NOTEBOOK_MAX_INJECTED` (default 50) caps how many of the most recent
+entries actually get injected into any run's context even though the full history stays
+readable via `read_notebook`. A note still cannot fabricate a finding —
+`adjudicate.py`'s `signal_ids` requirement applies regardless of what the model was told
+going in. `delete_notebook_entry` removes one immediately, no expiry mechanism, since a
 note is context an agent retracts when it's stale or wrong, not a tuning rule that needs
 its own audit trail the way a suppression does.
 
-See `docs/components/mcp-server.md` for the tool reference, the notebook's full design
-rationale, deployment guidance, and a worked example of adding a new tool.
+See `docs/components/mcp-server.md` for the full tool reference, deployment guidance, and
+a worked example of adding a new tool.
 
 ---
 
-## 13. Security
+## 13. Security posture
 
-This is security tooling that reads attacker-influenced data and will be published, so:
+This reads attacker-influenced data by design, so a few things are worth stating plainly
+rather than leaving implicit.
 
-**Untrusted content handling.** Domain names, hostnames, ISP strings, and log messages are
-attacker-influenced. They are never interpolated into the system prompt. They arrive only
-inside tool results and the evidence bundle, inside clearly delimited blocks, with a
-standing instruction that content within them is data. More importantly, the structural
-defenses do the real work: the model has no shell, no fetch, no filesystem, and no
-delivery tool, so there is no action for injected text to trigger. Delivery recipients
-come from env vars and cannot be influenced by run content.
+**Untrusted content handling.** Domain names, hostnames, ISP strings, and log messages
+are attacker-influenced and are never interpolated into the system prompt — they arrive
+only inside the evidence bundle and tool results, fenced, with a standing instruction
+that content inside them is data, never instructions (§6.4). The structural defense does
+the real work regardless: the model has no shell, no fetch, no filesystem, and no
+delivery tool, so there's no action for injected text to trigger even if the instruction
+were ignored. Delivery recipients come from environment variables and cannot be
+influenced by run content (§5.4).
 
-**Secret hygiene.** Secrets only from env / `_FILE`. A `SecretStr` wrapper keeps them out
-of reprs and logs. Before any output plugin runs, the rendered body is scanned for every
-configured secret value; a hit aborts delivery loudly. `.env.example` ships with
-placeholders only, and `docs/oldagentfiles/` is gitignored because it contains live
-tokens.
+**Secret hygiene.** Secrets are read only from environment variables or their `_FILE`
+form (`secrets.py`); `SecretStr` keeps them out of `repr()`/logs entirely. Before any
+output plugin runs, the fully rendered report body is scanned against every registered
+secret value, and a hit genuinely aborts delivery — this isn't advisory logging, `Runner`
+returns before the DELIVER stage if a leak is detected. `config/profile.yml` (real
+topology) and `.env` (real credentials) are gitignored; `.env.example` ships with
+placeholders only.
 
-**Immediate action item:** the tokens in `docs/oldagentfiles/` — the LibreNMS token, the
-Pi-hole password, and the ismalicious API key — are now in a gitignored directory and
-were never committed, but they have existed in plaintext in an Open-WebUI skill store.
-Rotate all three before this repo goes public.
+**SQL tool.** Covered in full in §6.3: single statement, table allowlist, an actual
+run_id-value binding requirement (not a substring check) for `events`, injected `LIMIT`,
+and a connection opened read-only regardless.
 
-**SQL tool.** Read-only URI connection, single statement, `LIMIT` injected, statement
-timeout, result byte cap, and `run.db` opened separately from `state.db` so the agent
-cannot read the deliveries or config tables.
-
-**Egress.** The container talks to your monitoring hosts, the two reputation APIs, the
-Anthropic API, and your SMTP/webhook destination. All configurable; documented so it can
-be firewalled to an allowlist.
+**Egress.** The container talks to whatever monitoring hosts are configured, up to two
+reputation APIs, the configured model provider's API, and your SMTP/webhook
+destination — all env-configured, so egress can be firewalled to an explicit allowlist if
+that matters for your deployment.
 
 ---
 
 ## 14. Testing
 
-305 tests, `pytest -q`, fully offline - no network, no API key, no spend - and that
-includes an end-to-end pipeline exercise against a stubbed provider. CI
-(`.github/workflows/ci.yml`) runs the same suite plus `ruff` on every push and pull
-request, across Python 3.11-3.13.
+430 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
+full end-to-end pipeline exercise against a stubbed provider. CI runs the same suite plus
+`ruff` on every push and pull request.
 
-- **Source parsers**, covering the failure modes the original agent skills documented -
-  the epoch-vs-string timestamp trap, cursor-pagination duplication, the 0xc0 poison
-  record, truncated pagination - each as a dedicated test (`tests/test_sources.py`). They
-  are built as synthetic records constructed inline rather than recorded API fixtures on
-  disk: `tests/fixtures/` exists as the on-ramp for that if a future contributor wants to
-  add real (scrubbed) captures, but inline construction already gives every trap a
-  deterministic regression test without the risk of a "scrubbed" fixture someday turning
-  out not to be.
+- **Source parsers** — the failure modes real telemetry produces: an epoch-vs-string
+  timestamp trap, cursor-pagination duplication, a malformed record, truncated
+  pagination — each a dedicated test built from synthetic records constructed inline
+  rather than recorded fixtures on disk, so every trap has a deterministic regression
+  test without depending on a "scrubbed" real capture staying scrubbed.
 - **Analyzers** against synthetic event sets with known-correct expected signals: a
   textbook persistent prober, a /24 sweep, conntrack return traffic, a stepped-TTL probe,
   a DGA burst.
-- **Renderers** - property tests asserting 7-bit ASCII (plaintext) and long paragraphs
-  staying on one line rather than being hard-wrapped, all ten sections present in order,
-  no unsubstituted tokens, every empty section carrying its documented empty-state line -
-  plus, for both HTML renderers, that attacker-influenced finding text is escaped rather
-  than passed through as markup, and, for `html_email` specifically, that no `<style>`
-  block is present (every rule must be inline for a mail client to honor it).
-- **Adjudication** - each guardrail gets a test feeding it a deliberately non-compliant
-  agent response and asserting the clamp or rejection.
-- **The MCP surface** (`tests/test_mcpserver.py`) - every tool's logic against a real
-  temp-directory `Store`, plus the bearer-auth middleware against a raw ASGI scope, with
-  no real HTTP server started.
-- **End-to-end** with a stubbed model returning a canned `Analysis`, so the full pipeline
-  is exercised with zero API spend.
-
----
-
-## 15. Phasing
-
-Every phase below is complete except the two gaps called out explicitly. Nothing here is
-aspirational; each row names the actual files that satisfy it.
-
-| Phase | Scope | Status |
-|---|---|---|
-| 1 | Core models, registry, config, store, CLI, `librenms_syslog` + `pihole_dns` sources, `file_report` output, Dockerfile | **Done.** `dawnpatrol run --stop-after analyze` produces a verified event store from a real network - exercised against a real deployment, not just fixtures. |
-| 2 | Analyzers: volume, patterns, DNS anomalies, segments, correlation, baseline delta | **Done.** All seven ship (`dawnpatrol/analyzers/`); zero API spend at this stage. |
-| 3 | Agent harness, tools, structured output, adjudication, plaintext renderer, SMTP output | **Done.** Validated against a live network with a real model: real findings, real adjudication, real email delivery. |
-| 3.5 | Canary self-validation, suppression, long-term IOC store and `hunt` | **Done.** Both canaries fire in production; a canary excluded by an ad hoc source restriction was observed correctly reporting NOT DETECTED and escalating status, rather than passing silently. |
-| 4 | Enrichment plugins, caching, budgets; webhook output; markdown/html renderers | **Done.** `abuseipdb.py` and `ismalicious.py` ship with caching and budget enforcement (`enrichment/broker.py`); both are now configured with real keys and have been exercised against live traffic in this deployment. `webhook.py` and `markdown.py`/`html.py` all ship. |
-| 4.5 | MCP server: read-only tools plus `trigger_analysis`, bearer auth, shared run lock | **Done.** Deployed and verified end to end: authentication (accept/reject), every registered tool, the shared-lock rejection of a concurrent trigger, and a real `trigger_analysis` call that surfaced a genuine canary failure and RED status. |
-| 5 | Scheduler hardening, healthcheck, docs, fixtures, CI, public release prep | **Mostly done.** Healthcheck, `docs/components/*.md`, and CI (`.github/workflows/ci.yml`) all ship. `tests/fixtures/` remains an empty on-ramp - the traps it was meant to guard against are covered by inline synthetic fixtures instead (§14) - and the repo has not yet been pushed to a public remote. |
-
-The one remaining gap (on-disk recorded fixtures, `tests/fixtures/`) is additive: it
-doesn't block anything else in this list, and closing it needs someone to decide the
-inline-synthetic-fixture tradeoff above is worth revisiting - not a blocker, a choice.
-
----
-
-## 16. Design decisions
-
-Design questions the first draft of this document posed as open. Each is resolved by
-what actually shipped; the reasoning is kept here because the "why" outlives the code
-that embodies it.
-
-1. **Window strategy: per-source native windows, reconciled through `state.db`.**
-   Firewall and DNS keep their own retention-driven windows (48h / ~24h) rather than
-   being clamped to a shared one; `Source.max_window_hours` records the ceiling and the
-   renderer labels each source's actual achieved coverage rather than implying a
-   uniform window. Trend comparison happens through `Baseline`/`state.db`, not through
-   forcing every source onto the same clock.
-
-2. **Raw event retention: 7 days, configurable.** `DAWNPATROL_RETENTION_RAW_DAYS`
-   defaults to 7 (a few hundred MB), giving `run --from-run` multi-day drill-down
-   without real cost. The long-term IOC slice (`ioc_dns`/`ioc_flow`) is the answer for
-   anything past that: 180 days by default, a few bytes per row.
-
-3. **SQL tool scope: read-only SQL, not a fixed query API.** Shipped as designed
-   (`agent/sqlguard.py`): the safety is structural (single `SELECT`, allowlisted
-   tables, injected `LIMIT`, a read-only connection) rather than behavioral, so the
-   capability is real and the risk is bounded regardless of what the model tries. The
-   same validator now backs both the in-run investigation agent's tool and the MCP
-   server's `query_events` (§12) - one implementation, two callers.
-
-4. **Delivery on GREEN: `ALWAYS` by default, per-output override.** Email defaults to
-   daily; a dead-man's-switch ping (`healthchecks_ping`) remains a reasonable future
-   output but was not necessary to ship the core loop - `run_when` already makes silence
-   vs. noise a config decision per destination, not a code one.
-
-5. **Model default: `claude-opus-5`.** Kept, and validated against real cost data rather
-   than an estimate: a full run against this network (~28k firewall records, ~140k DNS
-   queries) costs $0.50-$1.00 depending on `DAWNPATROL_AI_EFFORT`, comfortably inside the
-   $12-45/month range projected in §8.5. The reduction layer is what makes Opus
-   affordable; `claude-sonnet-5` and `claude-haiku-4-5` remain one env var away for a
-   quieter network or a tighter budget.
-
-### Extending source coverage
-
-Which telemetry DawnPatrol consumes was deliberately left open at design time, and stays
-open by construction. The current build ships two sources (`librenms_syslog`,
-`pihole_dns`); `EventKind` already reserves `IDS` and `FLOW` for a future intrusion-
-detection or NetFlow source.
-
-This is the payoff of the plugin design, not a gap in it: adding a source is one file
-implementing `collect()` and `self_test()` (see `docs/components/sources.md`), and every
-analyzer, enrichment path, renderer, and output downstream - plus the MCP server's
-`list_source_plugins`/`trigger_analysis` - picks it up without modification.
+- **Renderers** — property tests asserting 7-bit ASCII output, all sections present in
+  order, no unsubstituted template tokens, every empty section carrying its documented
+  empty-state line, and — for both HTML renderers — that attacker-influenced finding
+  text is escaped rather than passed through as markup.
+- **Adjudication** — each guardrail in §7 gets a test feeding it a deliberately
+  non-compliant agent response and asserting the clamp or rejection actually fires.
+- **The MCP surface** — every tool's logic against a real temp-directory store, plus the
+  bearer-auth middleware against a raw ASGI scope, with no real HTTP server started.
+- **End-to-end** — a stubbed model returning a canned analysis, exercising the full
+  pipeline with zero API spend, including the `--ephemeral`/`delete-run` cleanup path.

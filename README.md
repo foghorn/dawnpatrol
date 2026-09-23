@@ -311,7 +311,9 @@ wall of text with no way to check its work.
 ```bash
 dawnpatrol run --print                  # run now and show the report
 dawnpatrol run --dry-run                # everything except delivery
+dawnpatrol run --ephemeral              # run for real, then delete this run's own trace
 dawnpatrol runs                         # recent run history
+dawnpatrol delete-run <run_id>          # delete one run's data and report files on demand
 dawnpatrol canary                       # last detection self-test
 dawnpatrol hunt --domain x --days 180   # retrospective IOC search
 dawnpatrol suppress --taxonomy scan.persistent_prober \
@@ -322,6 +324,18 @@ dawnpatrol suppressions                 # list active suppressions
 Suppressions carry a mandatory expiry, and matching findings move to a report
 appendix rather than being deleted — so a tuned-out pattern that changes
 character is still visible.
+
+`--ephemeral` and `delete-run` exist for iteration, so testing against the real
+network doesn't leave months of throwaway runs on disk. `--ephemeral` still
+collects, analyzes, and delivers for real against the real database (add
+`--dry-run` too if you also want to skip actually sending it) — it just
+deletes that run's own `events`/`metrics`/`signals`/`findings`/`canaries`/
+`deliveries`/`ioc_dns`/`ioc_flow` rows and report files the moment it finishes,
+success or failure. `delete-run <run_id>` does the same cleanup after the fact,
+against any run still on disk (`--force` if it never recorded a finish time).
+Neither touches the `entities` baseline table — it isn't scoped to a single
+run, and gets updated before that run's own analysis even runs, so there's no
+way to cleanly undo one run's contribution to it.
 
 Delivery policy is per output:
 `DAWNPATROL_OUTPUT_SMTP_RUN_WHEN=ALWAYS|NEVER|IMPORTANT|AMBER,RED`. Email
@@ -437,10 +451,10 @@ and pull request, across Python 3.11-3.13.
 
 ## Documentation
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the full systems-level design: the
-  pipeline stage by stage, the core data model, state and persistence, the AI harness
-  and prompt caching, guardrails, the cost model measured against real production runs,
-  and which design decisions were made and why.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the systems-level reference for how
+  DawnPatrol actually works: the pipeline stage by stage, the core data model,
+  persistence, the plugin contracts, the AI harness and prompt caching, guardrails, the
+  cost model measured against real production runs, and the MCP surface.
 - [`docs/components/`](docs/components/README.md) — a tutorial-style guide per
   component (sources, analyzers, enrichment, outputs, providers, canaries, the network
   profile, the MCP server), each ending with a worked example of building your own.

@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 
 from . import schema as S
 from .config import DatabaseSettings, RetentionSettings
+from .errors import RunDeletionError
 from .models import (
     UTC,
     CanaryResult,
@@ -639,6 +640,45 @@ class Store:
                 S.watchlist.c.expires_at.is_not(None), S.watchlist.c.expires_at < now))
             deleted["watchlist"] = res.rowcount
         return {k: v for k, v in deleted.items() if v}
+
+    #: Tables a single run owns outright - every row in each carries that
+    #: run's run_id and nothing else. Deliberately excludes `entities` (the
+    #: rolling baseline a run has already contributed to by the time this can
+    #: run - see observe_entities() in runner.py, called during PERSIST,
+    #: before ANALYZE even builds a Baseline), `watchlist`, `suppressions`,
+    #: `notebook`, and `enrichment_cache` - none of those are owned by a
+    #: single run, the same boundary purge() above already draws.
+    _RUN_OWNED_TABLES = (
+        S.events, S.metrics, S.signals, S.findings, S.source_health,
+        S.canaries, S.deliveries, S.ioc_dns, S.ioc_flow,
+    )
+
+    def delete_run(self, run_id: str, *, force: bool = False) -> dict[str, int]:
+        """Permanently remove one run's rows. Returns {table: rows_deleted}.
+
+        Refuses a run with no recorded finish time (looks still in progress)
+        unless force=True - deleting out from under an active run would leave
+        a half-written row set.
+        """
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(S.runs.c.finished_at).where(S.runs.c.run_id == run_id)
+            ).first()
+            if row is None:
+                raise RunDeletionError(f"no run recorded with id {run_id!r}")
+            if row[0] is None and not force:
+                raise RunDeletionError(
+                    f"run {run_id!r} has no recorded finish time - it looks "
+                    f"still in progress. Pass force=True to delete it anyway."
+                )
+            deleted: dict[str, int] = {}
+            for table in self._RUN_OWNED_TABLES:
+                res = conn.execute(delete(table).where(table.c.run_id == run_id))
+                if res.rowcount:
+                    deleted[table.name] = res.rowcount
+            conn.execute(delete(S.runs).where(S.runs.c.run_id == run_id))
+            deleted["runs"] = 1
+        return deleted
 
     # ----- read-only SQL for the agent -------------------------------------- #
 

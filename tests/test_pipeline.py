@@ -6,10 +6,12 @@ what makes it safe to iterate on prompts and analyzers.
 
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
 
+from dawnpatrol import cli
 from dawnpatrol.config import AISettings
 from dawnpatrol.context import RunContext
 from dawnpatrol.models import (
@@ -141,6 +143,51 @@ def test_full_pipeline_produces_a_delivered_report(runner, settings):
     body = written[0].read_text(encoding="utf-8")
     body.encode("ascii")
     assert "1. EXECUTIVE SUMMARY" in body
+
+
+def test_ephemeral_run_cleans_up_its_own_trace_but_still_delivers(runner, settings, store, profile):
+    """--ephemeral: delivery still happens for real; DB rows and report files don't survive it."""
+    args = argparse.Namespace(window_hours=None, dry_run=False, ephemeral=True,
+                              stop_after="", do_print=False, format="plaintext")
+
+    code = cli.cmd_run(settings, profile, store, args)
+
+    assert code == 0
+    assert store.recent_runs(10) == []
+    assert list(settings.output_dir.rglob("report-*.json")) == []
+    assert list(settings.output_dir.rglob("report-*.txt")) == []
+    assert not (settings.output_dir / "latest.json").exists()
+    assert not (settings.output_dir / "latest.txt").exists()
+
+
+def test_ephemeral_combines_cleanly_with_dry_run(runner, settings, store, profile):
+    """--dry-run and --ephemeral are independent flags that can be combined."""
+    args = argparse.Namespace(window_hours=None, dry_run=True, ephemeral=True,
+                              stop_after="", do_print=False, format="plaintext")
+
+    code = cli.cmd_run(settings, profile, store, args)
+
+    assert code == 0
+    assert store.recent_runs(10) == []
+    assert list(settings.output_dir.rglob("report-*.json")) == []
+
+
+def test_delete_run_cli_removes_db_rows_and_report_files(runner, settings, store, profile):
+    args = argparse.Namespace(window_hours=None, dry_run=False, ephemeral=False,
+                              stop_after="", do_print=False, format="plaintext")
+    code = cli.cmd_run(settings, profile, store, args)
+    assert code == 0
+    [run_row] = store.recent_runs(10)
+    run_id = run_row["run_id"]
+    assert list(settings.output_dir.rglob(f"report-{run_id}.*")), \
+        "the run should have left report files behind before deletion"
+
+    del_args = argparse.Namespace(run_id=run_id, force=False)
+    code = cli.cmd_delete_run(settings, profile, store, del_args)
+
+    assert code == 0
+    assert store.recent_runs(10) == []
+    assert list(settings.output_dir.rglob(f"report-{run_id}.*")) == []
 
 
 def test_canaries_run_and_pass_in_a_full_run(runner):
@@ -287,6 +334,9 @@ def test_no_sources_enabled_is_a_clear_error(runner, settings):
     outcome = runner.run()
     assert outcome.report is None
     assert "no sources are enabled" in outcome.error
+    # run_id is set even on an early failure - it's the one thing every
+    # outcome has, needed so a caller can always clean up after itself.
+    assert outcome.run_id
 
 
 def test_sources_filter_accepts_a_known_source(runner):

@@ -58,7 +58,7 @@ injected into the harness's cached system-prompt segment (`agent/harness.py`) - 
 that's also exactly what the MCP server's `get_network_profile` tool returns (see
 `docs/components/mcp-server.md`). **Deterministic** is load-bearing: no timestamps, no
 counts, nothing that varies between runs, because this block sits before the prompt
-cache breakpoint (§8.2 of `docs/ARCHITECTURE.md`) and anything volatile there silently
+cache breakpoint (§6.2 of `docs/ARCHITECTURE.md`) and anything volatile there silently
 defeats caching for the entire run.
 
 ## Zone resolution, precisely

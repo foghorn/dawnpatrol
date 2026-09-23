@@ -70,7 +70,7 @@ report `file_report.py` already writes to `latest.json` every run, so this tool 
 that file exactly like `get_latest_report` does. The *internal* stage-7 investigation
 agent gets the identically-named `get_device_directory` tool too (`agent/tools.py`), but
 that one reads the live, in-progress run's directory - this one reads the most recently
-*completed* run's. See `docs/ARCHITECTURE.md` §8.3 and `docs/components/sources.md`.
+*completed* run's. See `docs/ARCHITECTURE.md` §6.4 and `docs/components/sources.md`.
 
 `trigger_analysis` is the one tool with a side effect, and it's worth being precise
 about what "without emailing" means mechanically: it calls

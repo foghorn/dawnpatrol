@@ -35,3 +35,7 @@ class AdjudicationError(DawnPatrolError):
 
 class DeliveryError(DawnPatrolError):
     """An output plugin failed to deliver."""
+
+
+class RunDeletionError(DawnPatrolError):
+    """A run could not be deleted: no such run, or still in progress without force."""

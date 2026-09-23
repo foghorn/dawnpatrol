@@ -33,17 +33,23 @@ will already look familiar.
 
 ## Before you start
 
-Two commands make plugin development fast and free:
+Two commands make plugin development fast and disposable:
 
 ```bash
 dawnpatrol run --stop-after analyze   # full pipeline, no model call, no cost
-dawnpatrol run --from-run <run_id>    # re-analyze events already on disk, no re-collection
+dawnpatrol run --ephemeral            # full pipeline for real, no leftover rows or files
 ```
 
 The first gets you a real evidence bundle - metrics, signals, source health - without
 spending a cent, which is the right way to develop and sanity-check an analyzer, a new
-canary, or a new source's normalizer. The second lets you iterate against a captured
-day without re-pulling hundreds of thousands of records or hammering an upstream API.
+canary, or a new source's normalizer. The second is for iterating past that point,
+against a real model call: it runs and delivers for real (add `--dry-run` too to also
+skip delivery), then deletes that run's own database rows and report files once it
+finishes, so repeated test runs don't pile up months of throwaway history on disk. Delete
+one after the fact instead with `dawnpatrol delete-run <run_id>`. Neither touches the
+`entities` baseline table that [Analyzers](analyzers.md) reads via `baseline.novel()` -
+it isn't scoped to a run, and gets updated before that run's own analysis even runs, so
+a test run's contribution to it can't be cleanly undone.
 
 Every guide below ends with a "wire it up and test it" section that assumes you're using
 one or both of these.
