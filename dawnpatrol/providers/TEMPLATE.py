@@ -18,14 +18,19 @@ from .base import SUBMIT_TOOL, AgentRun, Provider, ToolSpec
 
 
 class TemplateProvider(Provider):
+    #: requires_env isn't checked for provider selection (build_provider matches
+    #: `settings.provider` against `name` only) - leave it empty. This provider
+    #: becomes usable the moment some designator sets
+    #: DAWNPATROL_AI_<NAME>_PROVIDER=template; settings.api_key/model/base_url/
+    #: etc. arrive already resolved for whichever designator is active.
     name = "template"
-    requires_env = frozenset({"DAWNPATROL_AI_API_KEY"})
+    requires_env = frozenset()
     price_input_per_mtok = 0.0
     price_output_per_mtok = 0.0
 
     def available(self) -> tuple[bool, str]:
         if not self.settings.api_key:
-            return False, "DAWNPATROL_AI_API_KEY is not set"
+            return False, "no API key set for the active AI config"
         return True, ""
 
     def run_agent(

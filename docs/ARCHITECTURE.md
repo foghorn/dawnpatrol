@@ -496,8 +496,8 @@ The model backend is a plugin like everything else, discovered the same way. Thr
 built specifically for reasoning-effort control and correct cache-token accounting on
 that endpoint), and `openai_compatible.py` (any `/v1/chat/completions` server — Ollama,
 LM Studio, vLLM, or a hosted OpenAI-shaped API; a local model is one environment variable
-away, not a code change). `DAWNPATROL_AI_PROVIDER`/`DAWNPATROL_AI_MODEL` select the
-combination; nothing else in the pipeline depends on which one is active. See
+away, not a code change). Each one is configured under its own named designator (§9);
+nothing else in the pipeline depends on which one is active. See
 `docs/components/providers.md` for the contract and a worked example of adding a new
 backend, and §6.1 below for what each shipped provider actually does differently.
 
@@ -511,14 +511,16 @@ The default is Claude Opus 5 (`claude-opus-5`) via `anthropic_provider.py`, whic
 a hand-written tool loop rather than the SDK's own tool runner — a deliberate choice: the
 harness needs per-turn budget checks, cost accounting mid-loop, and a terminal-tool break,
 and keeping the loop's shape identical across providers makes them easy to reason about
-side by side. `DAWNPATROL_AI_MODEL` is a plain env var; nothing about the pipeline assumes
-a particular model, and `claude-sonnet-5`/`claude-haiku-4-5` are one variable away for a
-quieter network or a tighter budget.
+side by side. Model and provider are per-designator, not a single global setting (§9) —
+`claude-sonnet-5`/`claude-haiku-4-5` are one designator away for a quieter network or a
+tighter budget, definable and validated (`dawnpatrol validate`) alongside whichever
+config is actually active rather than replacing it.
 
 Per-turn request configuration (Anthropic): `thinking: {"type": "adaptive"}` (this is
-genuinely reasoning-heavy work), `output_config: {"effort": ...}` (`DAWNPATROL_AI_EFFORT`,
-default `high` — the primary cost/quality dial), an optional `output_config.task_budget`
-when `DAWNPATROL_AI_TASK_BUDGET_TOKENS >= 20000` (gives the model a ceiling to pace
+genuinely reasoning-heavy work), `output_config: {"effort": ...}` (that designator's own
+`_EFFORT`, default `high` — the primary cost/quality dial), an optional
+`output_config.task_budget` when that designator's `_TASK_BUDGET_TOKENS >= 20000` (gives
+the model a ceiling to pace
 itself against so it wraps up rather than being cut off mid-investigation), and streaming
 throughout since `max_tokens` is large. Server-side refusal fallback
 (`betas: ["server-side-fallback-2026-07-01"]`, `fallbacks: "default"`) is on by default —
@@ -530,8 +532,8 @@ The OpenAI-facing providers exist because `/v1/chat/completions` compatibility m
 real gaps against reasoning models (rejecting `max_tokens` in favor of
 `max_completion_tokens`, requiring an explicit `reasoning_effort` to keep tool calling and
 reasoning coexisting) — `openai_compatible.py` carries the workarounds as configurable
-settings, while `openai_provider.py` targets `/v1/responses` natively and reuses
-`DAWNPATROL_AI_EFFORT` directly for `reasoning.effort` since the accepted value range
+settings, while `openai_provider.py` targets `/v1/responses` natively and reuses that
+designator's own `_EFFORT` directly for `reasoning.effort` since the accepted value range
 matches. Cache-token accounting differs by convention between the two families and each
 provider's `estimate_cost()` override accounts for it correctly: Anthropic's
 `input_tokens` **excludes** cache reads (additive), OpenAI's `input_tokens` **includes**
@@ -686,13 +688,14 @@ Anthropic Opus 5 pricing ($5/MTok input, $25/MTok output, cache reads at $0.50/M
 At daily cadence that lands around **$15-36/month** for `high`, **$15-17/month** for
 `medium`. Levers, in the order worth reaching for:
 
-1. `DAWNPATROL_AI_EFFORT` — `medium` for routine days.
-2. `DAWNPATROL_AI_MAX_TOOL_CALLS` — caps investigation loop length.
-3. `DAWNPATROL_AI_TASK_BUDGET_TOKENS` — the model paces itself against a ceiling.
-4. `DAWNPATROL_AI_MAX_COST_USD` — hard abort (`budget.py`); the run still produces a
-   deterministic-only report, never nothing.
-5. `DAWNPATROL_AI_MODEL` — `claude-sonnet-5` or `claude-haiku-4-5`, or a different
-   provider entirely (§5.5).
+1. That designator's own `_EFFORT` — `medium` for routine days.
+2. `DAWNPATROL_AI_MAX_TOOL_CALLS` — shared across designators; caps investigation loop length.
+3. That designator's own `_TASK_BUDGET_TOKENS` — the model paces itself against a ceiling.
+4. `DAWNPATROL_AI_MAX_COST_USD` — shared, hard abort (`budget.py`); the run still produces
+   a deterministic-only report, never nothing.
+5. Switch `DAWNPATROL_AI_ACTIVE` to a cheaper designator — `claude-sonnet-5` or
+   `claude-haiku-4-5`, or a different provider entirely (§5.5) — without touching the one
+   you switched away from.
 
 A run that trips the cost ceiling degrades to "analyzer signals rendered without agent
 narrative," flagged plainly in the data-quality section — it never produces no report at
@@ -800,13 +803,14 @@ DAWNPATROL_RETENTION_RAW_DAYS=7
 DAWNPATROL_RETENTION_IOC_DAYS=180
 DAWNPATROL_RETENTION_METRICS_DAYS=730
 
-# AI
-DAWNPATROL_AI_PROVIDER=anthropic       # or openai / openai_compatible
-DAWNPATROL_AI_MODEL=claude-opus-5
-DAWNPATROL_AI_API_KEY=...              # falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
-DAWNPATROL_AI_EFFORT=high
-DAWNPATROL_AI_MAX_COST_USD=3.00
-DAWNPATROL_AI_MAX_TOOL_CALLS=25
+# AI - one block per named designator, DAWNPATROL_AI_ACTIVE picks which runs
+DAWNPATROL_AI_MAX_COST_USD=3.00        # shared across every designator
+DAWNPATROL_AI_MAX_TOOL_CALLS=25        # shared across every designator
+DAWNPATROL_AI_ACTIVE=main
+DAWNPATROL_AI_MAIN_PROVIDER=anthropic  # or openai / openai_compatible
+DAWNPATROL_AI_MAIN_MODEL=claude-opus-5
+DAWNPATROL_AI_MAIN_API_KEY=...         # falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
+DAWNPATROL_AI_MAIN_EFFORT=high
 
 # Sources — presence of required vars auto-enables the plugin
 DAWNPATROL_SOURCE_LIBRENMS_URL=http://librenms.example/api/v0
@@ -829,6 +833,39 @@ DAWNPATROL_OUTPUT_WEBHOOK_RUN_WHEN=AMBER,RED
 DAWNPATROL_MCP_ENABLED=false
 DAWNPATROL_MCP_PORT=8420
 ```
+
+**AI model configs are named and namespaced, not a single flat block.** A model config is
+defined the moment its `DAWNPATROL_AI_<NAME>_PROVIDER` is set (case-insensitive designator,
+same "presence enables it" pattern the plugin folders use) - every other field for that
+designator (`_MODEL`, `_API_KEY`, `_BASE_URL`, `_EFFORT`, `_MAX_TOKENS`, `_TEMPERATURE`,
+`_TIMEOUT`, `_VERIFY_TLS`, `_TASK_BUDGET_TOKENS`, `_REFUSAL_FALLBACK`,
+`_MAX_TOKENS_PARAM`, `_REASONING_EFFORT`, `_PRICE_IN`, `_PRICE_OUT`, `_PRICE_CACHE_READ`,
+`_PRICE_CACHE_WRITE`) lives under that same prefix. Because each designator owns its own
+namespace, any number of them can be fully filled in and left uncommented in `.env` at
+once without conflict - two configs never share a variable, so switching between them is
+never "which block is currently commented out." `DAWNPATROL_AI_ACTIVE=<name>` selects
+which one `Settings.ai` actually resolves to for a run; it can be omitted only while
+exactly one designator is defined, and `Settings.from_env()` raises a `ConfigError`
+naming every discovered designator if it's missing while more than one exists, or if it
+names one that doesn't match any of them.
+
+`DAWNPATROL_AI_ENABLED`, `_MAX_TOOL_CALLS`, `_MAX_TURNS`, and `_MAX_COST_USD` stay flat
+and un-namespaced deliberately - they're run mechanics (whether the AI stage runs at all,
+and how far one investigation is allowed to go), not something that differs by model, so
+`config.py` reads each once and copies it identically into every designator's
+`AISettings`. Every provider-specific setting, including pricing, is a field on
+`AISettings` itself now rather than something a provider's `__init__` reads from the
+environment directly - `openai_provider.py`/`openai_compatible.py` both just copy
+`settings.price_input_per_mtok` etc. at construction, and `anthropic_provider.py` prefers
+an explicit override from settings over its own hardcoded per-model table when one is set.
+
+`Settings.ai_profiles: dict[str, AISettings]` holds every configured designator, not just
+the active one - `dawnpatrol validate` reports each one's readiness (provider found,
+key present, `available()` result) so a typo in a config you aren't currently using still
+gets caught before you switch to it. This also means the data a future feature needs to
+run several models over the same evidence bundle and compare results already exists:
+iterating `settings.ai_profiles` needs no further config-loading work, only a caller that
+does it.
 
 **Network topology: a mounted YAML profile**, everything true about *your* network that
 must never land in a public repo. It's data the analyzers and the model read, never

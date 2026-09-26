@@ -5,9 +5,18 @@ costs money - is a plugin like everything else. Swapping `claude-opus-5` for a l
 Ollama model, or for `claude-sonnet-5` on a tighter budget, is one environment variable,
 never a code change.
 
-Two ship today: `anthropic_provider.py` (the default) and `openai_compatible.py` (any
-server speaking `/v1/chat/completions` with function calling - Ollama, LM Studio, vLLM,
-LiteLLM, Open-WebUI, or the hosted OpenAI API itself).
+Three ship today: `anthropic_provider.py` (the default), `openai_provider.py` (OpenAI's
+native `/v1/responses` endpoint), and `openai_compatible.py` (any server speaking
+`/v1/chat/completions` with function calling - Ollama, LM Studio, vLLM, LiteLLM,
+Open-WebUI, or the hosted OpenAI API itself). See `docs/ARCHITECTURE.md` §6.1 for why
+there are two OpenAI-shaped providers rather than one.
+
+Every model you want configured gets its own name and its own env-var namespace -
+`DAWNPATROL_AI_<NAME>_PROVIDER` defines the designator, and `DAWNPATROL_AI_ACTIVE=<name>`
+picks which one actually runs (`docs/ARCHITECTURE.md` §9). Several fully-configured
+designators can be uncommented at once without conflict; a `Provider` subclass never
+needs to know its own designator name, since `AISettings` arrives already fully resolved
+for whichever one is active.
 
 ## The contract
 
@@ -74,22 +83,25 @@ building a third provider:
 Plain `httpx`, not the `openai` package - local servers vary in small, annoying ways
 (a missing field here, a slightly different error shape there), and a thin client
 tolerates that better than a strict SDK would. Pricing is **zero by default**
-(`DAWNPATROL_AI_PRICE_IN`/`_OUT`), since most self-hosted models are free to run; set
-both if you're pointing at a paid hosted endpoint through this same interface and want
-real cost accounting.
+(that designator's own `_PRICE_IN`/`_PRICE_OUT`), since most self-hosted models are free
+to run; set both if you're pointing at a paid hosted endpoint through this same interface
+and want real cost accounting. `openai_provider.py` follows the identical pattern for
+`/v1/responses` - see its module docstring for the two things it does differently
+(`reasoning.effort`, `store: false`) and why.
 
 ## Build your own
 
 Copy an existing provider rather than starting from a blank file - the loop shape (turn
 counter, tool dispatch, terminal-tool break, usage accounting via `on_turn`) is the part
-worth reusing, and it's nearly identical between the two that ship. The parts that
-actually differ are the wire format (Anthropic's content-block messages vs. OpenAI's
-`tool_calls` array) and how you detect a cache hit in the usage payload.
+worth reusing, and it's nearly identical across the three that ship. The parts that
+actually differ are the wire format (Anthropic's content-block messages, OpenAI's
+`tool_calls` array, `/v1/responses`' flat `input` items) and how you detect a cache hit in
+the usage payload.
 
 ```python
 class MyBackendProvider(Provider):
     name = "my_backend"
-    requires_env = frozenset({"DAWNPATROL_AI_MY_BACKEND_KEY"})
+    requires_env = frozenset()
 
     def run_agent(self, *, system_static, system_context, user_message,
                  tools, max_turns, on_turn=None) -> AgentRun:
@@ -101,13 +113,20 @@ class MyBackendProvider(Provider):
 ```
 
 `build_provider(settings)` (`providers/registry.py`) discovers your class the same way
-every other plugin folder does - no registration list, just `requires_env` presence.
+every other plugin folder does (module import + subclass collection), but selects it
+purely by matching `settings.provider` against `name` - unlike sources/analyzers/
+enrichers/outputs, a provider's `requires_env` isn't checked for selection; `available()`
+is what actually reports whether it can run (SDK installed, key present). Your provider
+becomes usable the moment some designator sets `DAWNPATROL_AI_<NAME>_PROVIDER=my_backend`.
 
 ### Wire it up and test it
 
 ```bash
-DAWNPATROL_AI_PROVIDER=my_backend DAWNPATROL_AI_MODEL=... dawnpatrol validate
-# reports "ready" or the specific reason available() says it isn't
+# .env: DAWNPATROL_AI_TEST_PROVIDER=my_backend, DAWNPATROL_AI_TEST_MODEL=...,
+#       DAWNPATROL_AI_ACTIVE=test (or leave ACTIVE unset if it's the only one defined)
+dawnpatrol validate
+# reports "ready" or the specific reason available() says it isn't, for every
+# configured designator - not just the active one
 dawnpatrol run --dry-run   # exercises the real loop against your real backend, no delivery
 ```
 

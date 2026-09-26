@@ -274,14 +274,22 @@ def cmd_validate(settings, profile, store, args) -> int:
               "until the MCP server itself is also enabled")
     providers = available_providers()
     print(f"\nproviders discovered: {', '.join(sorted(providers)) or 'none'}")
-    if settings.ai.enabled:
-        cls = providers.get(settings.ai.provider)
+    print(f"\nAI models configured (active: {settings.ai_active!r}):")
+    failed = False
+    for name in sorted(settings.ai_profiles):
+        ai = settings.ai_profiles[name]
+        marker = " <- active" if name == settings.ai_active else ""
+        cls = providers.get(ai.provider)
         if cls is None:
-            print(f"  ERROR: configured provider {settings.ai.provider!r} not found")
-            return 1
-        ok, reason = cls(settings.ai).available()
-        print(f"  {settings.ai.provider}: {'ready' if ok else 'NOT READY - ' + reason}")
-    return 0
+            print(f"  {name} ({ai.provider}/{ai.model}): ERROR - provider not found{marker}")
+            failed = failed or name == settings.ai_active
+            continue
+        ok, reason = cls(ai).available() if ai.enabled else (True, "AI disabled")
+        state = "ready" if ok else f"NOT READY - {reason}"
+        print(f"  {name} ({ai.provider}/{ai.model}): {state}{marker}")
+        if not ok and name == settings.ai_active:
+            failed = True
+    return 1 if failed else 0
 
 
 def cmd_list_plugins(settings: Settings) -> int:

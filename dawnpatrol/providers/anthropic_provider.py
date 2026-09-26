@@ -23,8 +23,9 @@ from .base import SUBMIT_TOOL, AgentRun, Provider, ToolCallLog, ToolSpec
 
 log = logging.getLogger(__name__)
 
-#: Published per-MTok pricing, used for the run's cost ceiling. Override per
-#: model with DAWNPATROL_AI_PRICE_IN / _OUT if these drift.
+#: Published per-MTok pricing, used for the run's cost ceiling. A designator
+#: whose model isn't listed here - or whose real rate has drifted from it -
+#: can override via that designator's own _PRICE_IN/_OUT/_PRICE_CACHE_READ.
 _PRICING = {
     "claude-opus-5": (5.0, 25.0, 0.50),
     "claude-opus-4-8": (5.0, 25.0, 0.50),
@@ -41,9 +42,10 @@ class AnthropicProvider(Provider):
     def __init__(self, settings) -> None:
         super().__init__(settings)
         pin, pout, pcache = _PRICING.get(settings.model, (5.0, 25.0, 0.50))
-        self.price_input_per_mtok = pin
-        self.price_output_per_mtok = pout
-        self.price_cache_read_per_mtok = pcache
+        self.price_input_per_mtok = settings.price_input_per_mtok or pin
+        self.price_output_per_mtok = settings.price_output_per_mtok or pout
+        self.price_cache_read_per_mtok = settings.price_cache_read_per_mtok or pcache
+        self.price_cache_write_per_mtok = settings.price_cache_write_per_mtok
 
     def available(self) -> tuple[bool, str]:
         try:
@@ -51,7 +53,7 @@ class AnthropicProvider(Provider):
         except ImportError:
             return False, "the 'anthropic' package is not installed (pip install anthropic)"
         if not self.settings.api_key:
-            return False, "no API key (set DAWNPATROL_AI_API_KEY or ANTHROPIC_API_KEY)"
+            return False, "no API key set for the active AI config"
         return True, ""
 
     # ----- tool translation -------------------------------------------------- #

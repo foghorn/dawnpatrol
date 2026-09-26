@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta
 
 import pytest
 
 from dawnpatrol.config import DatabaseSettings, Settings
-from dawnpatrol.errors import RunDeletionError
+from dawnpatrol.errors import ConfigError, RunDeletionError
 from dawnpatrol.models import UTC, EntityType, Event, EventKind
 from dawnpatrol.profile import Profile
 from dawnpatrol.secrets import SecretRegistry, SecretStr, read_env
@@ -118,6 +119,106 @@ def test_retention_defaults_and_overrides(monkeypatch, tmp_path):
     assert Settings.from_env().retention.raw_days == 7
     monkeypatch.setenv("DAWNPATROL_RETENTION_RAW_DAYS", "30")
     assert Settings.from_env().retention.raw_days == 30
+
+
+def _clear_ai_env(monkeypatch):
+    """Remove every DAWNPATROL_AI_* var this test file might have inherited
+    from the real process environment, so each test starts from zero
+    configured designators."""
+    for key in list(os.environ):
+        if key.startswith("DAWNPATROL_AI"):
+            monkeypatch.delenv(key, raising=False)
+
+
+def test_single_ai_designator_is_auto_selected_without_active(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAWNPATROL_AI_SOLO_PROVIDER", "anthropic")
+    monkeypatch.setenv("DAWNPATROL_AI_SOLO_MODEL", "claude-sonnet-5")
+
+    settings = Settings.from_env()
+
+    assert settings.ai_active == "solo"
+    assert settings.ai.provider == "anthropic"
+    assert settings.ai.model == "claude-sonnet-5"
+    assert list(settings.ai_profiles) == ["solo"]
+
+
+def test_multiple_ai_designators_require_active(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAWNPATROL_AI_ONE_PROVIDER", "anthropic")
+    monkeypatch.setenv("DAWNPATROL_AI_TWO_PROVIDER", "openai")
+
+    with pytest.raises(ConfigError, match="AI_ACTIVE"):
+        Settings.from_env()
+
+
+def test_ai_active_selects_the_named_designator_without_leaking_fields(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAWNPATROL_AI_ONE_PROVIDER", "anthropic")
+    monkeypatch.setenv("DAWNPATROL_AI_ONE_MODEL", "claude-opus-5")
+    monkeypatch.setenv("DAWNPATROL_AI_TWO_PROVIDER", "openai")
+    monkeypatch.setenv("DAWNPATROL_AI_TWO_MODEL", "gpt-6-sol")
+    monkeypatch.setenv("DAWNPATROL_AI_TWO_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("DAWNPATROL_AI_ACTIVE", "two")
+
+    settings = Settings.from_env()
+
+    assert settings.ai_active == "two"
+    assert settings.ai.provider == "openai"
+    assert settings.ai.model == "gpt-6-sol"
+    assert settings.ai.base_url == "https://example.invalid"
+    # the inactive designator is still loaded, untouched, for future use
+    assert settings.ai_profiles["one"].provider == "anthropic"
+    assert settings.ai_profiles["one"].model == "claude-opus-5"
+    assert settings.ai_profiles["one"].base_url == ""
+
+
+def test_unknown_ai_active_is_a_clear_error(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAWNPATROL_AI_ONE_PROVIDER", "anthropic")
+    monkeypatch.setenv("DAWNPATROL_AI_ACTIVE", "typo")
+
+    with pytest.raises(ConfigError, match="typo"):
+        Settings.from_env()
+
+
+def test_no_ai_designators_configured_does_not_crash_startup(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+
+    settings = Settings.from_env()
+
+    assert settings.ai.provider == "anthropic"  # the dataclass default
+    assert not settings.ai.api_key
+
+
+def test_global_run_mechanics_are_shared_across_every_ai_designator(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAWNPATROL_AI_MAX_TOOL_CALLS", "7")
+    monkeypatch.setenv("DAWNPATROL_AI_ONE_PROVIDER", "anthropic")
+    monkeypatch.setenv("DAWNPATROL_AI_TWO_PROVIDER", "openai")
+    monkeypatch.setenv("DAWNPATROL_AI_ACTIVE", "one")
+
+    settings = Settings.from_env()
+
+    assert settings.ai_profiles["one"].max_tool_calls == 7
+    assert settings.ai_profiles["two"].max_tool_calls == 7
+
+
+def test_ai_designator_falls_back_to_the_providers_native_key_var(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fallback")
+    monkeypatch.setenv("DAWNPATROL_AI_SOLO_PROVIDER", "anthropic")
+
+    settings = Settings.from_env()
+
+    assert settings.ai.api_key.get() == "sk-ant-fallback"
 
 
 def test_explicit_allowlist_overrides_auto_enable(settings):

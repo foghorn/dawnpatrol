@@ -5,20 +5,22 @@ Ollama, LM Studio, vLLM, llama.cpp, LiteLLM, Open-WebUI, or the OpenAI API
 itself. Uses httpx rather than the ``openai`` package because local servers vary
 in small ways and a thin client is easier to accommodate than a strict one.
 
-Set ``DAWNPATROL_AI_PROVIDER=openai_compatible`` and ``DAWNPATROL_AI_BASE_URL`` to
-the server root (the ``/v1`` suffix is added when absent).
+Set ``DAWNPATROL_AI_<NAME>_PROVIDER=openai_compatible`` and
+``DAWNPATROL_AI_<NAME>_BASE_URL`` to the server root (the ``/v1`` suffix is
+added when absent), for whichever designator name this config lives under
+(see ``config.py``'s ``_load_ai_profiles``).
 
 Two settings exist only because newer OpenAI reasoning models (the gpt-5.x
 line, confirmed live against ``gpt-5.6-sol``) are not drop-in compatible with
 older OpenAI-compatible servers on this same endpoint shape:
 
-* ``DAWNPATROL_AI_MAX_TOKENS_PARAM`` (default ``max_tokens``) - these models
+* ``_MAX_TOKENS_PARAM`` (default ``max_tokens``) - these models
   reject ``max_tokens`` outright ("Unsupported parameter... Use
   'max_completion_tokens' instead"). Most other backends on this endpoint
   (Ollama, LM Studio, vLLM, llama.cpp, LiteLLM, older OpenAI models) still
   expect ``max_tokens`` and may not recognize the newer name, so this is
   configurable per deployment rather than guessed or auto-detected.
-* ``DAWNPATROL_AI_REASONING_EFFORT`` (unset by default) - these models refuse
+* ``_REASONING_EFFORT`` (unset by default) - these models refuse
   function tools on ``/v1/chat/completions`` entirely unless this is
   explicitly ``none`` ("Function tools with reasoning_effort are not
   supported... use /v1/responses or set reasoning_effort to 'none'" is the
@@ -40,7 +42,6 @@ from typing import Any
 import httpx
 
 from ..models import TokenUsage
-from ..secrets import read_bool, read_env, read_float, read_int
 from .base import SUBMIT_TOOL, AgentRun, Provider, ToolCallLog, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -48,19 +49,17 @@ log = logging.getLogger(__name__)
 
 class OpenAICompatibleProvider(Provider):
     name = "openai_compatible"
-    requires_env = frozenset({"DAWNPATROL_AI_BASE_URL"})
+    requires_env = frozenset()
 
     def __init__(self, settings) -> None:
         super().__init__(settings)
-        # Local models are usually free; hosted ones can be priced via env.
-        self.price_input_per_mtok = read_float("DAWNPATROL_AI_PRICE_IN", 0.0)
-        self.price_output_per_mtok = read_float("DAWNPATROL_AI_PRICE_OUT", 0.0)
-        self.price_cache_read_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_READ", 0.0)
-        self.price_cache_write_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_WRITE", 0.0)
-        self.max_tokens_param = (
-            read_env("DAWNPATROL_AI_MAX_TOKENS_PARAM", "max_tokens") or "max_tokens"
-        )
-        self.reasoning_effort = read_env("DAWNPATROL_AI_REASONING_EFFORT", "") or ""
+        # Local models are usually free; hosted ones can be priced per designator.
+        self.price_input_per_mtok = settings.price_input_per_mtok
+        self.price_output_per_mtok = settings.price_output_per_mtok
+        self.price_cache_read_per_mtok = settings.price_cache_read_per_mtok
+        self.price_cache_write_per_mtok = settings.price_cache_write_per_mtok
+        self.max_tokens_param = settings.max_tokens_param
+        self.reasoning_effort = settings.reasoning_effort
 
     def estimate_cost(self, usage: TokenUsage) -> float:
         """Same fix as openai_provider.py's override, for the same reason:
@@ -90,7 +89,7 @@ class OpenAICompatibleProvider(Provider):
 
     def available(self) -> tuple[bool, str]:
         if not self.settings.base_url:
-            return False, "DAWNPATROL_AI_BASE_URL is not set"
+            return False, "no base URL set for the active AI config"
         return True, ""
 
     @staticmethod
@@ -129,10 +128,8 @@ class OpenAICompatibleProvider(Provider):
             {"role": "system", "content": system_context},
             {"role": "user", "content": user_message},
         ]
-        timeout = read_int("DAWNPATROL_AI_TIMEOUT", 300)
-        verify = read_bool("DAWNPATROL_AI_VERIFY_TLS", True)
-
-        with httpx.Client(timeout=timeout, headers=headers, verify=verify) as client:
+        with httpx.Client(timeout=self.settings.timeout_seconds, headers=headers,
+                          verify=self.settings.verify_tls) as client:
             for turn in range(1, max_turns + 1):
                 run.turns = turn
                 payload: dict[str, Any] = {

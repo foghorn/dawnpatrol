@@ -154,13 +154,32 @@ IOC surfaces next month.
 
 ### Model provider
 
-Providers are plugins. `anthropic` is the default:
+Providers are plugins, and every model you want configured gets its own name
+and its own namespace - `DAWNPATROL_AI_<NAME>_PROVIDER` is what defines the
+designator, and everything else that config needs hangs off the same prefix
+(`_MODEL`, `_API_KEY`, `_BASE_URL`, `_EFFORT`, ...). Every named config can be
+fully filled in and left uncommented at the same time without conflict, since
+none of them share a variable - `DAWNPATROL_AI_ACTIVE=<name>` is what picks
+which one actually runs, not which blocks happen to be commented out. It can
+be left unset only while exactly one designator is defined.
 
 ```bash
-DAWNPATROL_AI_PROVIDER=openai_compatible
-DAWNPATROL_AI_BASE_URL=http://10.0.0.30:11434
-DAWNPATROL_AI_MODEL=qwen2.5:32b
+DAWNPATROL_AI_ACTIVE=local
+
+DAWNPATROL_AI_LOCAL_PROVIDER=openai_compatible
+DAWNPATROL_AI_LOCAL_BASE_URL=http://10.0.0.30:11434
+DAWNPATROL_AI_LOCAL_MODEL=qwen2.5:32b
+
+DAWNPATROL_AI_MAIN_PROVIDER=anthropic
+DAWNPATROL_AI_MAIN_MODEL=claude-opus-5
+DAWNPATROL_AI_MAIN_API_KEY=sk-ant-...
 ```
+
+Both configs above are fully defined and valid at once; only `local` actually
+runs until `DAWNPATROL_AI_ACTIVE` changes to `main` - no other edit needed.
+`dawnpatrol validate` reports every configured designator's readiness, not
+just the active one, so a typo in a config you're not currently using still
+gets caught.
 
 `openai_compatible` points at any server speaking `/v1/chat/completions` —
 Ollama, LM Studio, vLLM, LiteLLM, Open-WebUI, or a compatible gateway that
@@ -171,44 +190,45 @@ settings exist for that case, both no-ops for every other backend on this
 provider:
 
 ```bash
-DAWNPATROL_AI_MAX_TOKENS_PARAM=max_completion_tokens  # these models reject max_tokens outright
-DAWNPATROL_AI_REASONING_EFFORT=none                   # required for tool calling on /v1/chat/completions
+DAWNPATROL_AI_<NAME>_MAX_TOKENS_PARAM=max_completion_tokens  # these models reject max_tokens outright
+DAWNPATROL_AI_<NAME>_REASONING_EFFORT=none                   # required for tool calling on /v1/chat/completions
 ```
 
-`DAWNPATROL_AI_REASONING_EFFORT=none` is not a free lunch: on this endpoint
-it's what makes tool calling work at all for these models, and it runs the
-model with its reasoning effectively off for this task - a real capability
-loss, not a config quirk. That gap is exactly why a second, dedicated provider
-exists:
+`_REASONING_EFFORT=none` is not a free lunch: on this endpoint it's what
+makes tool calling work at all for these models, and it runs the model with
+its reasoning effectively off for this task - a real capability loss, not a
+config quirk. That gap is exactly why a second, dedicated provider exists:
 
 ```bash
-DAWNPATROL_AI_PROVIDER=openai
-DAWNPATROL_AI_MODEL=gpt-5.6-sol
-DAWNPATROL_AI_API_KEY=sk-...
-# DAWNPATROL_AI_BASE_URL defaults to https://api.openai.com
+DAWNPATROL_AI_<NAME>_PROVIDER=openai
+DAWNPATROL_AI_<NAME>_MODEL=gpt-5.6-sol
+DAWNPATROL_AI_<NAME>_API_KEY=sk-...
+# base URL defaults to https://api.openai.com when unset
 ```
 
 `openai` targets OpenAI's native `/v1/responses` endpoint instead, where tool
 calling and reasoning work together with no workaround needed - confirmed
 live (see "Model choice and report quality" below for the before/after this
-made in practice). It reuses `DAWNPATROL_AI_EFFORT` for `reasoning.effort`
-directly - this model's own accepted values are exactly this project's
-existing five-tier scale plus `none` - and always sends `store: false`, since
-OpenAI's Responses API defaults to server-side conversation retention and
-DawnPatrol's prompts carry internal IPs, hostnames, and account names. Use
-`openai` for OpenAI's own models; use `openai_compatible` for local,
-self-hosted, or proxied backends, including ones that happen to route to
-OpenAI models under the hood - the proxy's own compatibility shape is what
-matters there, not the upstream model.
+made in practice). It reuses that designator's `_EFFORT` for
+`reasoning.effort` directly - this model's own accepted values are exactly
+this project's existing five-tier scale plus `none` - and always sends
+`store: false`, since OpenAI's Responses API defaults to server-side
+conversation retention and DawnPatrol's prompts carry internal IPs,
+hostnames, and account names. Use `openai` for OpenAI's own models; use
+`openai_compatible` for local, self-hosted, or proxied backends, including
+ones that happen to route to OpenAI models under the hood - the proxy's own
+compatibility shape is what matters there, not the upstream model.
 
-Cost is bounded by `DAWNPATROL_AI_MAX_COST_USD`, `..._MAX_TOOL_CALLS`, and
-`..._EFFORT`. Tripping a ceiling degrades the run to a statistics-only report —
-never to no report at all. `DAWNPATROL_AI_PRICE_IN`/`..._PRICE_OUT` drive that
-cost accounting (both providers) and default to 0.0 ("unknown/free") — real
-usage against a paid API is billed regardless of what these are set to, so an
-unset price means the report's "est. cost" reads $0.00 while real billing
-still happens. Treat the provider's own usage dashboard as the source of
-truth until real per-token pricing is known and set here.
+Cost is bounded by the shared, non-per-model `DAWNPATROL_AI_MAX_COST_USD` and
+`..._MAX_TOOL_CALLS`, plus each designator's own `_EFFORT`. Tripping the cost
+ceiling degrades the run to a statistics-only report — never to no report at
+all. Each designator's own `_PRICE_IN`/`_PRICE_OUT`/`_PRICE_CACHE_READ`/
+`_PRICE_CACHE_WRITE` drive its cost accounting and default to 0.0
+("unknown/free") — real usage against a paid API is billed regardless of
+what these are set to, so an unset price means the report's "est. cost"
+reads $0.00 while real billing still happens. Treat the provider's own usage
+dashboard as the source of truth until real per-token pricing is known and
+set here.
 
 ### Model choice and report quality
 
@@ -224,8 +244,8 @@ rigorous benchmark:
 | `gpt-5.6-sol` | openai_compatible (`/v1/chat/completions`, reasoning forced `none`) | 4 model calls | 1, correctly scoped | $0.34* | ~0.8 min |
 | `gemma4:e2b` (local, via LiteLLM) | openai_compatible | 1 model call, zero tool use | 4, one materially inaccurate | $0.00 (local hardware) | ~2.4 min |
 
-\* Pricing wasn't configured for OpenAI (`DAWNPATROL_AI_PRICE_IN`/`_OUT`
-above), so these are estimated: the real combined billed cost for both OpenAI
+\* Pricing wasn't configured for OpenAI at the time (that designator's own
+`_PRICE_IN`/`_PRICE_OUT`), so these are estimated: the real combined billed cost for both OpenAI
 runs was $1.02, split between the two rows by each run's share of total
 tokens (input + output).
 

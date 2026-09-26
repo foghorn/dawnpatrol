@@ -84,8 +84,8 @@ def test_max_tokens_param_override_sends_max_completion_tokens(monkeypatch):
             finish_reason="tool_calls",
         ))
 
-    monkeypatch.setenv("DAWNPATROL_AI_MAX_TOKENS_PARAM", "max_completion_tokens")
-    provider = _provider(monkeypatch, _settings(), handler)
+    settings = _settings(max_tokens_param="max_completion_tokens")
+    provider = _provider(monkeypatch, settings, handler)
     provider.run_agent(system_static="s", system_context="c", user_message="u",
                        tools=_tools(), max_turns=3)
     assert captured["body"]["max_completion_tokens"] == 1234
@@ -103,8 +103,8 @@ def test_reasoning_effort_included_only_when_set(monkeypatch):
             finish_reason="tool_calls",
         ))
 
-    monkeypatch.setenv("DAWNPATROL_AI_REASONING_EFFORT", "none")
-    provider = _provider(monkeypatch, _settings(), handler)
+    settings = _settings(reasoning_effort="none")
+    provider = _provider(monkeypatch, settings, handler)
     provider.run_agent(system_static="s", system_context="c", user_message="u",
                        tools=_tools(), max_turns=3)
     assert captured["body"]["reasoning_effort"] == "none"
@@ -239,7 +239,7 @@ def test_openai_provider_unavailable_without_api_key():
     settings = _oa_settings(api_key=SecretStr(""))
     ok, reason = OpenAIProvider(settings).available()
     assert ok is False
-    assert "DAWNPATROL_AI_API_KEY" in reason
+    assert "API key" in reason
 
 
 def test_openai_provider_available_with_api_key():

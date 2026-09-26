@@ -3,8 +3,8 @@ shape ``openai_compatible.py`` targets.
 
 Built after a live trial (see README's "Model choice and report quality")
 against ``gpt-5.6-sol`` found that ``openai_compatible`` needed this
-reasoning-tier model's reasoning disabled entirely
-(``DAWNPATROL_AI_REASONING_EFFORT=none``) just to unlock tool calling on
+reasoning-tier model's reasoning disabled entirely (its designator's own
+``_REASONING_EFFORT=none``) just to unlock tool calling on
 ``/v1/chat/completions`` - a real capability loss, not a config quirk.
 ``/v1/responses`` is OpenAI's own answer to that: tool calling and reasoning
 work together natively there, confirmed live before writing this file (a
@@ -15,16 +15,18 @@ local, self-hosted, or proxied backends (Ollama, LM Studio, vLLM, LiteLLM) -
 including ones that happen to route to OpenAI models, since a proxy's own
 compatibility shape is what matters there, not the upstream model.
 
-Set ``DAWNPATROL_AI_PROVIDER=openai`` and ``DAWNPATROL_AI_API_KEY`` to an
-OpenAI key. ``DAWNPATROL_AI_BASE_URL`` defaults to ``https://api.openai.com``
-and rarely needs setting - it exists for an OpenAI-compatible gateway that
+Set ``DAWNPATROL_AI_<NAME>_PROVIDER=openai`` and
+``DAWNPATROL_AI_<NAME>_API_KEY`` to an OpenAI key, for whichever designator
+name this config lives under (see ``config.py``'s ``_load_ai_profiles``).
+``DAWNPATROL_AI_<NAME>_BASE_URL`` defaults to ``https://api.openai.com`` and
+rarely needs setting - it exists for an OpenAI-compatible gateway that
 specifically implements ``/v1/responses`` too, not for arbitrary local
 servers (those almost never implement this endpoint; use
 ``openai_compatible`` for them).
 
 Two things confirmed live and encoded here rather than left to guesswork:
 
-* ``reasoning.effort`` reuses ``DAWNPATROL_AI_EFFORT`` unchanged - this
+* ``reasoning.effort`` reuses this designator's ``_EFFORT`` unchanged - this
   model's accepted values (confirmed via its own error text: "Supported
   values are: 'none', 'low', 'medium', 'high', 'xhigh', and 'max'") are
   exactly this project's existing five-tier scale, plus "none".
@@ -50,7 +52,6 @@ from typing import Any
 import httpx
 
 from ..models import TokenUsage
-from ..secrets import read_bool, read_float, read_int
 from .base import SUBMIT_TOOL, AgentRun, Provider, ToolCallLog, ToolSpec
 
 log = logging.getLogger(__name__)
@@ -64,16 +65,16 @@ class OpenAIProvider(Provider):
 
     def __init__(self, settings) -> None:
         super().__init__(settings)
-        # Left at 0.0 ("unknown/free") for any model this points at whose
-        # real published rate hasn't been supplied and set here - guessing a
+        # Left at 0.0 ("unknown/free") for any model whose real published
+        # rate hasn't been set on this designator's config - guessing a
         # number would be worse than admitting it's unknown. Real usage is
         # billed by OpenAI regardless of what these are set to; treat the
         # account's own usage dashboard as the source of truth for a model
         # not priced below.
-        self.price_input_per_mtok = read_float("DAWNPATROL_AI_PRICE_IN", 0.0)
-        self.price_output_per_mtok = read_float("DAWNPATROL_AI_PRICE_OUT", 0.0)
-        self.price_cache_read_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_READ", 0.0)
-        self.price_cache_write_per_mtok = read_float("DAWNPATROL_AI_PRICE_CACHE_WRITE", 0.0)
+        self.price_input_per_mtok = settings.price_input_per_mtok
+        self.price_output_per_mtok = settings.price_output_per_mtok
+        self.price_cache_read_per_mtok = settings.price_cache_read_per_mtok
+        self.price_cache_write_per_mtok = settings.price_cache_write_per_mtok
 
     def estimate_cost(self, usage: TokenUsage) -> float:
         """Overrides the base formula, which assumes Anthropic's convention
@@ -108,7 +109,7 @@ class OpenAIProvider(Provider):
 
     def available(self) -> tuple[bool, str]:
         if not self.settings.api_key:
-            return False, "DAWNPATROL_AI_API_KEY is not set"
+            return False, "no API key set for the active AI config"
         return True, ""
 
     @staticmethod
@@ -148,10 +149,8 @@ class OpenAIProvider(Provider):
             {"role": "system", "content": system_context},
             {"role": "user", "content": user_message},
         ]
-        timeout = read_int("DAWNPATROL_AI_TIMEOUT", 300)
-        verify = read_bool("DAWNPATROL_AI_VERIFY_TLS", True)
-
-        with httpx.Client(timeout=timeout, headers=headers, verify=verify) as client:
+        with httpx.Client(timeout=self.settings.timeout_seconds, headers=headers,
+                          verify=self.settings.verify_tls) as client:
             for turn in range(1, max_turns + 1):
                 run.turns = turn
                 payload: dict[str, Any] = {
