@@ -202,21 +202,17 @@ class EventQuery:
             ).all()
         return [r[0] for r in rows]
 
-    def sample(self, n: int = 20, **filters: Any) -> list[dict[str, Any]]:
+    def sample(self, n: int = 20, *, with_id: bool = False,
+               **filters: Any) -> list[dict[str, Any]]:
         with self._engine.connect() as conn:
             rows = conn.execute(
                 select(S.events).where(self._base(**filters))
                 .order_by(S.events.c.ts.desc()).limit(n)
             ).mappings().all()
-        out = []
-        for r in rows:
-            d = {k: v for k, v in dict(r).items() if v is not None and k not in ("raw_json", "id")}
-            if isinstance(d.get("ts"), datetime):
-                d["ts"] = _aware(d["ts"]).strftime("%Y-%m-%d %H:%M:%S")
-            out.append(d)
-        return out
+        return [_sample_row(r, with_id) for r in rows]
 
-    def sample_by_dedup(self, keys: Sequence[str], n: int = 20) -> list[dict[str, Any]]:
+    def sample_by_dedup(self, keys: Sequence[str], n: int = 20, *,
+                        with_id: bool = False) -> list[dict[str, Any]]:
         if not keys:
             return []
         with self._engine.connect() as conn:
@@ -225,13 +221,17 @@ class EventQuery:
                 .where(self._base(), S.events.c.dedup_key.in_(list(keys)[:200]))
                 .limit(n)
             ).mappings().all()
-        out = []
-        for r in rows:
-            d = {k: v for k, v in dict(r).items() if v is not None and k not in ("raw_json", "id")}
-            if isinstance(d.get("ts"), datetime):
-                d["ts"] = _aware(d["ts"]).strftime("%Y-%m-%d %H:%M:%S")
-            out.append(d)
-        return out
+        return [_sample_row(r, with_id) for r in rows]
+
+    def existing_ids(self, ids: Sequence[int]) -> set[int]:
+        """The subset of ``ids`` that are events within this query's scope."""
+        if not ids:
+            return set()
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(S.events.c.id).where(self._base(), S.events.c.id.in_(list(ids)))
+            ).all()
+        return {int(r[0]) for r in rows}
 
     # ----- DNS-specific helpers ---------------------------------------------- #
 
@@ -391,3 +391,13 @@ class EventQuery:
             slot[1] += count
         ranked = sorted(buckets.items(), key=lambda kv: (-kv[1][0], -kv[1][1]))
         return [(p, v[0], v[1]) for p, v in ranked[:n]]
+
+
+def _sample_row(row: Any, with_id: bool) -> dict[str, Any]:
+    """An event row trimmed for display. The id is kept only for callers that
+    need to cite the event later, such as the agent."""
+    skip = {"raw_json"} if with_id else {"raw_json", "id"}
+    d = {k: v for k, v in dict(row).items() if v is not None and k not in skip}
+    if isinstance(d.get("ts"), datetime):
+        d["ts"] = _aware(d["ts"]).strftime("%Y-%m-%d %H:%M:%S")
+    return d

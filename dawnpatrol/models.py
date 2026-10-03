@@ -34,8 +34,15 @@ class EventKind(StrEnum):
 
 
 class Severity(IntEnum):
-    """Ordered so severities can be compared and clamped arithmetically."""
+    """Ordered so severities can be compared and clamped arithmetically.
 
+    ``SUSPECTED`` is not a rating. It marks a finding the agent raised from raw
+    events that no analyzer signal covers: real enough to show the reader, but
+    with no deterministic prior to rate it against. It sorts below INFO so it
+    never counts toward the overall status.
+    """
+
+    SUSPECTED = -1
     INFO = 0
     LOW = 1
     MEDIUM = 2
@@ -476,6 +483,7 @@ class Finding:
     not_this: str = ""
     zone: str = "perimeter"
     signal_ids: list[str] = field(default_factory=list)
+    event_ids: list[int] = field(default_factory=list)
     evidence_kinds: list[str] = field(default_factory=list)
     entities: list[Entity] = field(default_factory=list)
     enrichment: list[EnrichmentRef] = field(default_factory=list)
@@ -484,6 +492,37 @@ class Finding:
     suppressed_reason: str = ""
     adjustments: list[str] = field(default_factory=list)
     attribution_caveat: str = ""
+
+    @property
+    def suspected(self) -> bool:
+        return self.severity == Severity.SUSPECTED
+
+    @property
+    def event_refs(self) -> str:
+        """Cited events as "#12, #13", for display."""
+        return ", ".join(f"#{i}" for i in self.event_ids)
+
+
+#: Shown on every SUSPECTED finding, in every renderer, so the label is never
+#: read as a rating.
+SUSPECTED_NOTE = (
+    "Raised by the AI from raw events that no analyzer signal covers. Unrated, "
+    "and does not affect the overall status. Verify before acting."
+)
+
+
+@dataclass(slots=True)
+class DetectionGap:
+    """Activity the agent saw that no parser or analyzer turned into a signal."""
+
+    what: str
+    suggestion: str = ""
+    event_ids: list[int] = field(default_factory=list)
+
+    def text(self) -> str:
+        if not self.suggestion:
+            return self.what
+        return f"{self.what.rstrip('.')}. Suggested coverage: {self.suggestion}"
 
 
 @dataclass(slots=True)
@@ -568,6 +607,10 @@ class Report:
     trend_notes: list[TrendNote] = field(default_factory=list)
     actions: list[Action] = field(default_factory=list)
     data_quality: list[str] = field(default_factory=list)
+    # Where detection fell short: gaps the agent reported, and the findings the
+    # adjudicator rejected. Each one is a candidate for a new parser or analyzer.
+    detection_gaps: list[DetectionGap] = field(default_factory=list)
+    rejected_findings: list[str] = field(default_factory=list)
     canaries: list[CanaryResult] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
     degraded: bool = False  # agent stage skipped or failed; stats-only report
@@ -641,6 +684,7 @@ class Report:
                     "not": f.not_this,
                     "action": f.action,
                     "signal_ids": f.signal_ids,
+                    "event_ids": f.event_ids,
                     "evidence_kinds": f.evidence_kinds,
                     "entities": [e.to_dict() for e in f.entities],
                     "enrichment": [
@@ -693,6 +737,11 @@ class Report:
                 for a in sorted(self.actions, key=lambda a: a.priority)
             ],
             "data_quality": self.data_quality,
+            "detection_gaps": [
+                {"what": g.what, "suggestion": g.suggestion, "event_ids": g.event_ids}
+                for g in self.detection_gaps
+            ],
+            "rejected_findings": self.rejected_findings,
             "canaries": [
                 {"name": c.name, "detected": c.detected, "detail": c.detail}
                 for c in self.canaries

@@ -12,6 +12,7 @@ import pytest
 from dawnpatrol.adjudicate import (
     Adjudicator,
     parse_actions,
+    parse_detection_gaps,
     parse_trends,
     parse_watchlist,
     parse_watchlist_removals,
@@ -70,6 +71,77 @@ def test_unknown_signal_ids_are_dropped_but_valid_ones_kept(adj):
     assert len(out) == 1
     assert out[0].signal_ids == ["s1"]
     assert any("ghost" in a for a in out[0].adjustments)
+
+
+# --------------------------------------------------------------------------- #
+# Event-only findings (SUSPECTED)
+# --------------------------------------------------------------------------- #
+
+#: Events that exist in the run under test.
+RUN_EVENTS = {101, 102}
+
+
+@pytest.fixture
+def adj_events(profile):
+    return Adjudicator(profile, [signal()],
+                       event_lookup=lambda ids: {i for i in ids if i in RUN_EVENTS})
+
+
+def test_event_only_finding_is_recorded_as_suspected(adj_events):
+    out = adj_events.build_findings([raw(signal_ids=[], event_ids=[101, 102],
+                                         severity="HIGH", taxonomy="auth.ssh_failure")])
+    assert len(out) == 1
+    finding = out[0]
+    assert finding.severity == Severity.SUSPECTED
+    assert finding.suspected
+    assert finding.event_ids == [101, 102]
+    assert finding.signal_ids == []
+    assert any("SUSPECTED rather than HIGH" in a for a in finding.adjustments)
+
+
+def test_event_only_finding_citing_no_real_event_is_rejected(adj_events):
+    out = adj_events.build_findings([raw(signal_ids=[], event_ids=[999])])
+    assert out == []
+    assert any("cites no known analyzer signal or event" in r
+               for r in adj_events.rejections)
+
+
+def test_events_cannot_be_cited_without_a_lookup(adj):
+    assert adj.build_findings([raw(signal_ids=[], event_ids=[101])]) == []
+
+
+def test_unknown_event_ids_are_dropped_but_real_ones_kept(adj_events):
+    out = adj_events.build_findings([raw(signal_ids=[], event_ids=[101, 999, "junk"])])
+    assert out[0].event_ids == [101]
+    assert any("999" in a for a in out[0].adjustments)
+
+
+def test_event_only_finding_still_needs_local_evidence(adj_events):
+    out = adj_events.build_findings([raw(signal_ids=[], event_ids=[101],
+                                         evidence_kinds=["reputation"])])
+    assert out == []
+
+
+def test_signal_backed_finding_keeps_its_rating_when_events_are_also_cited(adj_events):
+    out = adj_events.build_findings([raw(event_ids=[101])])
+    assert out[0].severity == Severity.MEDIUM
+    assert out[0].event_ids == [101]
+
+
+def test_suspected_on_a_signal_backed_finding_is_rated_at_the_signal_hint(adj):
+    out = adj.build_findings([raw(severity="SUSPECTED")])
+    assert out[0].severity == Severity.MEDIUM
+    assert any("reserved for findings no signal supports" in a
+               for a in out[0].adjustments)
+
+
+def test_suspected_findings_never_change_the_status(adj_events):
+    findings = adj_events.build_findings([
+        raw(title=f"s{i}", signal_ids=[], event_ids=[101], severity="CRITICAL")
+        for i in range(5)
+    ])
+    assert len(findings) == 5
+    assert Adjudicator.rollup(findings) == Status.GREEN
 
 
 def test_adjustment_log_is_prefixed_by_finding_id_not_title(adj):
@@ -270,3 +342,15 @@ def test_watchlist_removals_discard_malformed_entries():
     assert len(out) == 1
     assert out[0].entity_type == "host"
     assert out[0].entity_value == "gw-office"
+
+
+def test_detection_gaps_discard_malformed_entries():
+    out = parse_detection_gaps([
+        {"what": "SSH daemon logs are unparsed", "suggestion": "add a parser",
+         "event_ids": [7, "x", 7]},
+        {"what": ""},
+        {"suggestion": "orphaned"},
+    ])
+    assert len(out) == 1
+    assert out[0].event_ids == [7]
+    assert out[0].text() == "SSH daemon logs are unparsed. Suggested coverage: add a parser"

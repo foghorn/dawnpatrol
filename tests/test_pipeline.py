@@ -18,6 +18,7 @@ from dawnpatrol.models import (
     CollectionResult,
     EventKind,
     HealthState,
+    Severity,
     Status,
     TokenUsage,
     Window,
@@ -309,7 +310,39 @@ def test_fabricated_finding_is_rejected_in_a_real_run(runner):
     report = runner.run().report
     assert report.finding_count == 0
     assert report.status == Status.GREEN
-    assert any("cites no known analyzer signal" in n for n in report.data_quality)
+    assert any("cites no known analyzer signal" in n for n in report.rejected_findings)
+
+
+def test_event_only_finding_is_reported_as_suspected_in_a_real_run(runner):
+    StubProvider.analysis = {
+        "executive_summary": "Unparsed failed logins.",
+        "findings": [{
+            "title": "Repeated failed SSH logins in unparsed daemon logs",
+            "severity": "HIGH", "confidence": "medium", "taxonomy": "auth.ssh_failure",
+            "signal_ids": [], "event_ids": [1, 999999],
+            "evidence_kinds": ["local_behavior"],
+            "what": "x", "action": "y",
+        }],
+        "detection_gaps": [{"what": "SSH daemon logs are not parsed",
+                            "suggestion": "add a parser for them", "event_ids": [1]}],
+        "recommended_actions": [],
+    }
+    outcome = runner.run()
+    report = outcome.report
+
+    assert report.finding_count == 1
+    finding = report.findings[0]
+    assert finding.severity == Severity.SUSPECTED
+    assert finding.event_ids == [1]
+    assert report.status == Status.GREEN, "SUSPECTED never moves the status"
+    assert report.detection_gaps[0].suggestion == "add a parser for them"
+
+    body = outcome.rendered["plaintext"]
+    assert "[SUSPECTED] F1" in body
+    assert "Events: #1" in body
+    assert "SSH daemon logs are not parsed" in body
+    _, rows = runner.store.readonly_sql("SELECT severity, event_ids_json FROM findings")
+    assert rows == [[-1, "[1]"]]
 
 
 def test_reputation_only_finding_is_rejected_in_a_real_run(runner):

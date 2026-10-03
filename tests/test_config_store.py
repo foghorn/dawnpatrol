@@ -6,11 +6,22 @@ import os
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import text
 
+from dawnpatrol.canary import CANARY_SOURCE
 from dawnpatrol.config import DatabaseSettings, Settings
 from dawnpatrol.errors import ConfigError, RunDeletionError
-from dawnpatrol.models import UTC, EntityType, Event, EventKind
+from dawnpatrol.models import (
+    UTC,
+    Confidence,
+    EntityType,
+    Event,
+    EventKind,
+    Finding,
+    Severity,
+)
 from dawnpatrol.profile import Profile
+from dawnpatrol.query import EventQuery
 from dawnpatrol.secrets import SecretRegistry, SecretStr, read_env
 
 # --------------------------------------------------------------------------- #
@@ -445,6 +456,38 @@ def test_readonly_sql_executes(store, window):
     store.start_run("r1", 1, window.start, window)
     cols, rows = store.readonly_sql("SELECT 1 AS n")
     assert cols == ["n"] and rows == [[1]]
+
+
+def test_existing_event_ids_are_scoped_to_the_run_and_exclude_canaries(store, window):
+    for run_id in ("r1", "r2"):
+        store.start_run(run_id, 1, window.start, window)
+    store.insert_events("r1", [
+        Event(ts=window.start, source="synthetic", kind=EventKind.FIREWALL, dedup_key="real"),
+        Event(ts=window.start, source=CANARY_SOURCE, kind=EventKind.FIREWALL, dedup_key="fake"),
+    ])
+    store.insert_events("r2", [
+        Event(ts=window.start, source="synthetic", kind=EventKind.FIREWALL, dedup_key="other"),
+    ])
+    _, rows = store.readonly_sql("SELECT id, dedup_key FROM events ORDER BY id")
+    ids = {key: event_id for event_id, key in rows}
+
+    query = EventQuery(store, "r1", exclude_sources={CANARY_SOURCE})
+    assert query.existing_ids([ids["real"], ids["fake"], ids["other"], 9999]) == {ids["real"]}
+
+
+def test_create_all_adds_columns_missing_from_an_older_database(store, window):
+    with store.engine.begin() as conn:
+        conn.execute(text("ALTER TABLE findings DROP COLUMN event_ids_json"))
+
+    store.create_all()
+
+    store.start_run("r1", 1, window.start, window)
+    store.save_findings("r1", window.start, [Finding(
+        id="F1", title="t", severity=Severity.SUSPECTED, confidence=Confidence.LOW,
+        taxonomy="agent.suspected", what="w", event_ids=[3, 4],
+    )])
+    _, rows = store.readonly_sql("SELECT severity, event_ids_json FROM findings")
+    assert rows == [[-1, "[3, 4]"]]
 
 
 # --------------------------------------------------------------------------- #

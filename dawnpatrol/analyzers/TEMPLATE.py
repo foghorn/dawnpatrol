@@ -5,9 +5,10 @@ That is what makes them testable against fixtures and free to iterate on.
 
 Emit two things:
   * Metric - a number that belongs in the report verbatim.
-  * Signal - a candidate finding with the evidence that justifies it. Every
-    Finding the model produces must cite at least one Signal id, so anything
-    you want the model to be *able* to report must originate here.
+  * Signal - a candidate finding with the evidence that justifies it. Only a
+    Signal can give a Finding a severity; the model can cite raw events for
+    activity no Signal covers, but such a finding is only ever SUSPECTED. So
+    anything you want reported with a real severity must originate here.
 """
 
 from __future__ import annotations

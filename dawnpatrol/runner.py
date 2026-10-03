@@ -21,6 +21,7 @@ from . import sources as sources_pkg
 from .adjudicate import (
     Adjudicator,
     parse_actions,
+    parse_detection_gaps,
     parse_trends,
     parse_watchlist,
     parse_watchlist_removals,
@@ -440,7 +441,10 @@ class Runner:
 
     def _adjudicate(self, ctx, analysis, health, metrics, signals, notes,
                     canary_results, usage) -> Report:
-        adjudicator = Adjudicator(self.profile, signals)
+        # Findings may cite raw events, but only real ones from this run:
+        # canary events are synthetic and never count as evidence.
+        real_events = EventQuery(self.store, ctx.run_id, exclude_sources={CANARY_SOURCE})
+        adjudicator = Adjudicator(self.profile, signals, event_lookup=real_events.existing_ids)
         data = analysis or {}
 
         findings = adjudicator.build_findings(data.get("findings") or [])
@@ -454,7 +458,6 @@ class Runner:
 
         quality = list(notes)
         quality.extend(str(n) for n in (data.get("data_quality_notes") or []))
-        quality.extend(adjudicator.rejections)
         quality.extend(adjudicator.adjustments)
         if not canaries_ok:
             failed = [c.name for c in canary_results if not c.detected]
@@ -481,6 +484,8 @@ class Runner:
             trend_notes=parse_trends(data.get("trend_notes")),
             actions=parse_actions(data.get("recommended_actions")),
             data_quality=quality,
+            detection_gaps=parse_detection_gaps(data.get("detection_gaps")),
+            rejected_findings=adjudicator.rejections,
             canaries=canary_results,
             usage=usage,
             degraded=analysis is None,

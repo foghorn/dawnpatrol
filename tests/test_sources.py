@@ -139,12 +139,12 @@ def test_non_firewall_program_becomes_a_system_event(librenms):
 
 
 # --------------------------------------------------------------------------- #
-# Windows Security auditing (device 8, verified against the real feed)
+# Windows Security auditing (verified against a real feed)
 # --------------------------------------------------------------------------- #
 
-#: Captured verbatim from LibreNMS's /logs/syslog/8 API for a real Windows 11
-#: box's service (SYSTEM) logon - `\011` is literal text in the forwarded
-#: message, not a real tab byte.
+#: Captured verbatim from LibreNMS's syslog API for a real Windows 11 host's
+#: service (SYSTEM) logon - `\011` is literal text in the forwarded message,
+#: not a real tab byte.
 _WIN_SERVICE_LOGON = (
     "An account was successfully logged on.    Subject:  \\011Security ID:\\011\\011S-1-5-18  "
     "\\011Account Name:\\011\\011DESKTOP-5K06KTQ$  \\011Account Domain:\\011\\011WORKGROUP  "
@@ -241,8 +241,8 @@ def test_windows_defender_health_report_is_not_a_detection(librenms):
 
 
 @pytest.mark.parametrize("msg", [
-    # Verbatim shapes from LibreNMS's real feed for device 8 - a routine
-    # scheduled Quick Scan, and its housekeeping cleanup of OLD history.
+    # Verbatim shapes from a real LibreNMS feed - a routine scheduled Quick
+    # Scan, and its housekeeping cleanup of OLD history.
     # Neither names a threat or a file path, unlike a real detection - this
     # was a real HIGH-severity false positive on the first live data with
     # any non-heartbeat Defender message.
@@ -263,7 +263,7 @@ def test_windows_defender_scan_lifecycle_is_not_a_detection(librenms, msg):
 
 
 @pytest.mark.parametrize("msg", [
-    # Verbatim shapes from a later production pull for device 8 - a second,
+    # Verbatim shapes from a later production pull - a second,
     # different pair of benign Defender templates (routine config-hash churn
     # from a definitions update, and the definitions update itself) that
     # produced a second false HIGH-severity positive under the old
@@ -303,13 +303,13 @@ def test_windows_defender_detection_is_flagged(librenms):
 
 
 # --------------------------------------------------------------------------- #
-# Linux SSH auth (device 6, verified against the real feed)
+# Linux SSH auth (verified against a real feed)
 # --------------------------------------------------------------------------- #
 
 
 def test_ssh_accepted_password_captures_account_and_source(librenms):
-    """Verbatim shape from LibreNMS's /logs/syslog/6 for a real login on this
-    session's own Fedora host."""
+    """Verbatim shape from a real LibreNMS feed for a real login on a Linux
+    host running OpenSSH."""
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "SSHD-SESSION", "seq": 20,
         "msg": "Accepted password for alice from 10.10.0.35 port 62404 ssh2",
@@ -412,6 +412,84 @@ def test_sshd_program_variant_without_the_session_suffix_is_also_parsed(librenms
 
 
 # --------------------------------------------------------------------------- #
+# Dropbear SSH (a real ASUS-family router, verified against a real feed)
+# --------------------------------------------------------------------------- #
+
+
+def test_dropbear_child_connection_alone_carries_no_auth_outcome(librenms):
+    """Verbatim shape from the real feed. A bare connection, still mid-
+    handshake or about to disconnect without ever attempting a login, must
+    not be reported as an auth event of any kind."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "DROPBEAR", "seq": 30,
+        "msg": "Child connection from 10.8.0.6:60018",
+    }
+    assert librenms._normalize(entry, "2").kind == EventKind.SYSTEM
+
+
+def test_dropbear_exit_before_auth_exited_normally_is_not_a_failure(librenms):
+    """Verbatim shape from the real feed: a connection that closed without
+    ever attempting a login is not a failed auth attempt."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "DROPBEAR", "seq": 31,
+        "msg": "Exit before auth from <10.8.0.6:39652>: Exited normally",
+    }
+    assert librenms._normalize(entry, "2").kind == EventKind.SYSTEM
+
+
+def test_dropbear_max_auth_tries_with_invalid_user_is_ssh_invalid(librenms):
+    """Verbatim shape from the real feed: Dropbear substitutes the literal
+    "is invalid" for the username slot when the attempt never offered a real
+    one."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "DROPBEAR", "seq": 32,
+        "msg": "Exit before auth from <10.8.0.6:60018>: Max auth tries reached - user 'is invalid'",
+    }
+    ev = librenms._normalize(entry, "2")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "ssh_invalid"
+    assert ev.user is None
+    assert ev.src_ip == "10.8.0.6"
+    assert ev.src_port == 60018
+
+
+def test_dropbear_max_auth_tries_with_a_real_username_is_ssh_failed(librenms):
+    """Not observed live here - built from Dropbear's own stable log format,
+    same reasoning as auth_activity.py's other not-yet-occurred cases."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "DROPBEAR", "seq": 33,
+        "msg": "Exit before auth from <203.0.113.5:41123>: Max auth tries reached - user 'root'",
+    }
+    ev = librenms._normalize(entry, "2")
+    assert ev.action == "ssh_failed"
+    assert ev.user == "root"
+
+
+def test_dropbear_accepted_password_is_ssh_accepted(librenms):
+    """Not observed live here - built from Dropbear's own stable log format."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "DROPBEAR", "seq": 34,
+        "msg": "Password auth succeeded for 'root' from 10.10.0.35:62404",
+    }
+    ev = librenms._normalize(entry, "2")
+    assert ev.kind == EventKind.AUTH
+    assert ev.action == "ssh_accepted"
+    assert ev.user == "root"
+    assert ev.src_ip == "10.10.0.35"
+
+
+def test_dropbear_bad_password_attempt_is_ssh_failed(librenms):
+    """Not observed live here - built from Dropbear's own stable log format."""
+    entry = {
+        "timestamp": "2026-06-01 03:14:15", "program": "DROPBEAR", "seq": 35,
+        "msg": "Bad password attempt for 'root' from 203.0.113.5:41123",
+    }
+    ev = librenms._normalize(entry, "2")
+    assert ev.action == "ssh_failed"
+    assert ev.user == "root"
+
+
+# --------------------------------------------------------------------------- #
 # Router/gateway web-UI admin login
 # --------------------------------------------------------------------------- #
 
@@ -437,7 +515,7 @@ def test_luci_failed_login_becomes_an_auth_event(librenms):
 
 
 def test_asus_web_login_successful_becomes_an_auth_event(librenms):
-    """Verbatim shape from LibreNMS's /logs/syslog/3, the ASUS edge router."""
+    """Verbatim shape from a real feed for a real ASUS-family router."""
     entry = {"timestamp": "2026-06-01 03:14:15", "program": "HTTPD", "seq": 32,
              "msg": "[LOGIN][http][Web] successful (10.10.0.35)"}
     ev = librenms._normalize(entry, "3")
@@ -585,8 +663,8 @@ def test_parse_dhcp(message, expected):
 
 # --------------------------------------------------------------------------- #
 # dnsmasq query log (program "DNSMASQ", not "DNSMASQ-DHCP") - a segment
-# gateway resolving for its own clients, format confirmed against the real
-# feed (device 7, the IoT gateway).
+# gateway resolving for its own clients, format confirmed against a real
+# feed from an IoT segment gateway.
 # --------------------------------------------------------------------------- #
 
 

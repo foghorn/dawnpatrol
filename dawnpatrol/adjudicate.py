@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 from .models import (
     Action,
     Confidence,
+    DetectionGap,
     Entity,
     EntityType,
     Finding,
@@ -33,6 +35,12 @@ log = logging.getLogger(__name__)
 #: Kinds of evidence that count as locally observed behaviour.
 LOCAL_EVIDENCE = {"local_behavior", "baseline_delta", "correlation", "policy_violation"}
 
+#: Given cited event ids, returns the subset that are real events of this run.
+EventLookup = Callable[[list[int]], set[int]]
+
+#: A handful of rows proves a point; more only bloats the stored finding.
+MAX_EVENT_IDS = 20
+
 _COUNTRY_RE = re.compile(
     r"\b(russia|russian|china|chinese|iran|iranian|north korea|nigeria|romania|"
     r"ukraine|vietnam|brazil|india)\b",
@@ -41,9 +49,13 @@ _COUNTRY_RE = re.compile(
 
 
 class Adjudicator:
-    def __init__(self, profile: Profile, signals: list[Signal]) -> None:
+    def __init__(self, profile: Profile, signals: list[Signal],
+                 event_lookup: EventLookup | None = None) -> None:
         self.profile = profile
         self.signals = {s.id: s for s in signals}
+        # Without a lookup no event citation can be verified, so findings must
+        # rest on signals alone.
+        self.event_lookup = event_lookup
         self.rejections: list[str] = []
         self.adjustments: list[str] = []
 
@@ -63,27 +75,25 @@ class Adjudicator:
             self.rejections.append(f"finding {index}: no title")
             return None
 
-        # Rule: a finding must trace to at least one real signal.
+        # Rule: a finding must trace to observed data. An analyzer signal is the
+        # normal route; specific events from this run are the fallback for
+        # activity no analyzer covers. Unverifiable citations are dropped.
         cited = [str(s) for s in (raw.get("signal_ids") or [])]
         valid = [s for s in cited if s in self.signals]
-        if not valid:
+        unknown = [s for s in cited if s not in self.signals]
+        cited_events = _event_ids(raw.get("event_ids"))[:MAX_EVENT_IDS]
+        events = self._known_events(cited_events)
+        if not valid and not events:
             self.rejections.append(
-                f"rejected {title!r}: cites no known analyzer signal "
-                f"(cited {cited or 'nothing'}). A finding must trace to observed data."
+                f"rejected {title!r}: cites no known analyzer signal or event of this "
+                f"run (signals: {cited or 'none'}, events: {cited_events or 'none'}). "
+                f"A finding must trace to observed data."
             )
             return None
-        unknown = [s for s in cited if s not in self.signals]
 
         evidence_kinds = [str(k) for k in (raw.get("evidence_kinds") or [])]
         if not evidence_kinds:
             evidence_kinds = ["local_behavior"]
-
-        try:
-            severity = Severity.parse(raw.get("severity", "INFO"))
-        except ValueError:
-            severity = Severity.INFO
-        original = severity
-        adjustments: list[str] = []
 
         # Rule: reputation alone never creates a finding.
         if not (set(evidence_kinds) & LOCAL_EVIDENCE):
@@ -93,23 +103,22 @@ class Adjudicator:
             )
             return None
 
-        # Rule: severity may exceed its strongest signal's hint by at most one level.
-        hint = max((self.signals[s].severity_hint for s in valid), default=Severity.INFO)
-        if int(severity) > int(hint) + 1:
-            severity = Severity(min(4, int(hint) + 1))
-            adjustments.append(
-                f"severity clamped {original.label()} -> {severity.label()}: more than "
-                f"one level above the strongest supporting signal ({hint.label()})"
-            )
-
-        # Rule: CRITICAL requires local evidence of compromise, not reputation.
-        if severity == Severity.CRITICAL and "reputation" in evidence_kinds \
-                and not (set(evidence_kinds) & LOCAL_EVIDENCE - {"baseline_delta"}):
-            severity = Severity.HIGH
-            adjustments.append(
-                "severity lowered CRITICAL -> HIGH: CRITICAL requires local evidence "
-                "of compromise, not external reputation"
-            )
+        try:
+            requested = Severity.parse(raw.get("severity", "INFO"))
+        except ValueError:
+            requested = Severity.INFO
+        adjustments: list[str] = []
+        if valid:
+            severity = self._rate(requested, valid, evidence_kinds, adjustments)
+        else:
+            # Rule: without a signal there is no deterministic prior to rate
+            # against, so the finding is shown but never rated.
+            severity = Severity.SUSPECTED
+            if requested != Severity.SUSPECTED:
+                adjustments.append(
+                    f"recorded as SUSPECTED rather than {requested.label()}: no "
+                    f"analyzer signal supports it, only raw events"
+                )
 
         why = str(raw.get("why") or "")
         # Rule: country is never a severity input.
@@ -140,6 +149,9 @@ class Adjudicator:
 
         if unknown:
             adjustments.append(f"dropped unknown signal id(s): {', '.join(unknown)}")
+        if dropped := [i for i in cited_events if i not in events]:
+            adjustments.append(
+                f"dropped event id(s) not in this run: {', '.join(map(str, dropped))}")
 
         caveat = ""
         for entity in entities:
@@ -158,18 +170,55 @@ class Adjudicator:
             title=title,
             severity=severity,
             confidence=confidence,
-            taxonomy=str(raw.get("taxonomy") or self.signals[valid[0]].taxonomy),
+            taxonomy=str(raw.get("taxonomy")
+                         or (self.signals[valid[0]].taxonomy if valid else "agent.suspected")),
             zone=str(raw.get("zone") or "perimeter"),
             what=str(raw.get("what") or ""),
             why=why,
             not_this=str(raw.get("not_this") or ""),
             action=str(raw.get("action") or ""),
             signal_ids=valid,
+            event_ids=sorted(events),
             evidence_kinds=evidence_kinds,
             entities=entities[:10],
             adjustments=adjustments,
             attribution_caveat=caveat,
         )
+
+    def _known_events(self, cited: list[int]) -> set[int]:
+        if not cited or self.event_lookup is None:
+            return set()
+        return set(self.event_lookup(cited))
+
+    def _rate(self, requested: Severity, valid: list[str], evidence_kinds: list[str],
+              adjustments: list[str]) -> Severity:
+        """Severity for a signal-backed finding, clamped by its signals."""
+        hint = max(self.signals[s].severity_hint for s in valid)
+        if requested == Severity.SUSPECTED:
+            adjustments.append(
+                f"rated {hint.label()} (its strongest signal's hint) rather than "
+                f"SUSPECTED: SUSPECTED is reserved for findings no signal supports"
+            )
+            return hint
+
+        # Rule: severity may exceed its strongest signal's hint by at most one level.
+        severity = requested
+        if int(severity) > int(hint) + 1:
+            severity = Severity(min(4, int(hint) + 1))
+            adjustments.append(
+                f"severity clamped {requested.label()} -> {severity.label()}: more than "
+                f"one level above the strongest supporting signal ({hint.label()})"
+            )
+
+        # Rule: CRITICAL requires local evidence of compromise, not reputation.
+        if severity == Severity.CRITICAL and "reputation" in evidence_kinds \
+                and not (set(evidence_kinds) & LOCAL_EVIDENCE - {"baseline_delta"}):
+            severity = Severity.HIGH
+            adjustments.append(
+                "severity lowered CRITICAL -> HIGH: CRITICAL requires local evidence "
+                "of compromise, not external reputation"
+            )
+        return severity
 
     # ----- suppression -------------------------------------------------------- #
 
@@ -235,6 +284,30 @@ def _first_match(finding: Finding, suppressions: list[dict[str, Any]]) -> dict |
             continue
         return supp
     return None
+
+
+def _event_ids(raw: Any) -> list[int]:
+    """Cited event ids as ints, in order, skipping anything that isn't one."""
+    out: list[int] = []
+    for value in raw or []:
+        try:
+            event_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if event_id not in out:
+            out.append(event_id)
+    return out
+
+
+def parse_detection_gaps(raw: list[dict[str, Any]] | None) -> list[DetectionGap]:
+    out = []
+    for item in raw or []:
+        what = str(item.get("what", "")).strip()
+        if what:
+            out.append(DetectionGap(what=what,
+                                    suggestion=str(item.get("suggestion") or "").strip(),
+                                    event_ids=_event_ids(item.get("event_ids"))[:MAX_EVENT_IDS]))
+    return out
 
 
 def parse_trends(raw: list[dict[str, Any]] | None) -> list[TrendNote]:

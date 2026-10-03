@@ -57,7 +57,8 @@ def build_bundle(
     sections.append(
         f"ANALYZER SIGNALS ({len(ranked)} shown of {len(signals)})\n"
         "Each signal was computed deterministically from the event store. Every\n"
-        "finding you report must cite at least one signal id.\n"
+        "finding you report must cite at least one signal id, or event ids when no\n"
+        "signal covers the activity (such findings are recorded as SUSPECTED).\n"
         + _fence(json.dumps([s.to_bundle() for s in ranked], indent=1, default=str))
     )
 

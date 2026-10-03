@@ -219,7 +219,8 @@ class Finding:                    # produced by the agent, validated by adjudica
     id: str; title: str; severity: Severity; confidence: Confidence
     zone: str; taxonomy: str
     what: str; why: str; not_this: str; action: str
-    signal_ids: list[str]         # REQUIRED — must resolve to at least one real Signal
+    signal_ids: list[str]         # the analyzer Signals it rests on
+    event_ids: list[int]          # specific events of this run; the fallback when no signal fits
     evidence_kinds: list[str]     # {"local_behavior", "reputation", "baseline_delta", ...}
     entities: list[Entity]
     enrichment: list[EnrichmentRef]
@@ -229,12 +230,15 @@ class Report:                     # everything the renderers need, fully assembl
     metrics: list[Metric]; signals: list[Signal]; health: list[SourceHealth]
     devices: list[dict]; executive_summary: str; section_narratives: dict
     trend_notes: list[TrendNote]; actions: list[Action]; data_quality: list[str]
+    detection_gaps: list[DetectionGap]; rejected_findings: list[str]
     canaries: list[CanaryResult]; usage: TokenUsage; degraded: bool
 ```
 
-`Finding.signal_ids` being required and validated is the structural anti-hallucination
-measure: a finding that doesn't trace to at least one deterministically-computed signal is
-rejected by `adjudicate.py`, not merely discouraged by a prompt rule (§7).
+Validated citations are the structural anti-hallucination measure: a finding that cites
+neither a known signal nor a real event of this run is rejected by `adjudicate.py`, not
+merely discouraged by a prompt rule (§7). A finding citing only events gets the severity
+`SUSPECTED`, which is not a rating. With no signal behind it there is no deterministic
+prior to rate against, so it's shown to the reader but never counts toward the status.
 
 ---
 
@@ -243,7 +247,10 @@ rejected by `adjudicate.py`, not merely discouraged by a prompt rule (§7).
 One database — SQLite by default, MySQL when `DAWNPATROL_DB_HOST`/`DAWNPATROL_DB_USER`
 are both set (credential-driven, not a mode flag, so pointing at a shared database is
 purely additive configuration). Every table lives in `schema.py`'s single `MetaData`;
-there is no separate per-run database file.
+there is no separate per-run database file. On startup, `Store.create_all()` creates any
+missing table and adds any nullable column that `schema.py` has gained since the database
+was created, so upgrading needs no manual step. Anything beyond an added nullable column,
+such as a rename or type change, needs a real migration.
 
 | Table | Scope | Purpose |
 |---|---|---|
@@ -272,6 +279,8 @@ specifically so retrospective hunting works: when an IOC surfaces next month,
 `dawnpatrol hunt --domain evil.example --days 180` answers whether anything here ever
 touched it. `metrics` ages out on its own, longer clock
 (`DAWNPATROL_RETENTION_METRICS_DAYS`, default 730 — two years of trend history).
+A finding's `event_ids` therefore outlive the events they cite: once a run's events age
+out, its findings keep their text and ids but the rows behind them are gone.
 
 **Everything else in the table above — `signals`, `findings`, `source_health`,
 `canaries`, `deliveries`, the `runs` row itself, and the rolling tables — has no
@@ -648,7 +657,8 @@ identical code path and works even against a backend with no native JSON-schema 
   "executive_summary": "string, 2-3 sentences",
   "findings": [ { "title": "...", "severity": "HIGH", "confidence": "high",
                   "taxonomy": "...", "zone": "...",
-                  "signal_ids": ["fw.prober.203.0.113.45.22"],   // REQUIRED, ≥1
+                  "signal_ids": ["fw.prober.203.0.113.45.22"],   // or, when none fits:
+                  "event_ids": [18234, 18240],                    // -> SUSPECTED
                   "evidence_kinds": ["local_behavior", "reputation"],
                   "what": "...", "why": "...", "not_this": "...", "action": "...",
                   "entities": [ {"type": "ip", "value": "...", "role": "source"} ] } ],
@@ -659,6 +669,7 @@ identical code path and works even against a backend with no native JSON-schema 
   "watchlist_updates": [ {"entity_type": "ip", "entity_value": "...",
                           "reason": "...", "expires_days": 7} ],
   "watchlist_removals": [ {"entity_type": "ip", "entity_value": "...", "reason": "..."} ],
+  "detection_gaps": [ {"what": "...", "suggestion": "...", "event_ids": [...]} ],
   "data_quality_notes": [ "..." ]
 }
 ```
@@ -712,14 +723,22 @@ you can see when the model tried to over-reach.
 
 | Rule | Enforcement |
 |---|---|
-| A finding must trace to real data | `signal_ids` resolves to at least one known `Signal`; a finding citing none is rejected outright |
+| A finding must trace to real data | it cites at least one known `Signal`, or at least one real, non-canary event of this run via `event_ids`; a finding citing neither is rejected outright, and unverifiable ids are dropped with a recorded adjustment |
+| Only a signal can rate a finding | a finding citing events but no signal is recorded as `SUSPECTED` whatever severity the model asked for (the request is kept as an adjustment); `SUSPECTED` on a signal-backed finding is replaced by its strongest signal's hint |
 | Reputation alone never creates a finding | `evidence_kinds` must intersect `{local_behavior, baseline_delta, correlation, policy_violation}`; a finding backed only by `reputation` is rejected |
 | Severity may exceed its strongest signal's hint by at most one level | clamped; the clamp is recorded as an adjustment |
 | CRITICAL requires local evidence of compromise | a finding whose only non-reputation evidence is `baseline_delta` cannot be CRITICAL on reputation alone — lowered to HIGH with a recorded reason |
 | Country is never treated as a severity input | if a country/region name appears in `why` on a MEDIUM+ finding, a note is appended — the finding itself is not touched, since geography can legitimately appear as *context* |
-| Overall status rollup | `RED` if any CRITICAL, ≥2 HIGH, or a canary failed; `AMBER` if any HIGH or ≥3 MEDIUM; else `GREEN` |
+| Overall status rollup | `RED` if any CRITICAL, ≥2 HIGH, or a canary failed; `AMBER` if any HIGH or ≥3 MEDIUM; else `GREEN`. `SUSPECTED` findings never count |
 | No credential ever reaches output | the fully rendered body is scanned against every registered secret value before delivery; a hit aborts the run |
 | Suppressed findings stay visible, not deleted | matched findings move to a one-line appendix; the underlying pattern is never silently dropped |
+
+**Detection gaps.** A `SUSPECTED` finding means the agent saw something no parser or
+analyzer covers, so it's also a sign that detection is missing. The agent records each
+one in `detection_gaps`: what it saw and what parser or analyzer would have caught it.
+The report shows these in their own section, next to every finding the adjudicator
+rejected. Together they're the list of detection to add, so a gap gets closed in code
+instead of being re-found by the model every run.
 
 **Suppression** exists because its absence is how these systems die in practice: a
 finding that turns out to be benign-but-weird gets `dawnpatrol suppress --taxonomy ...
@@ -1059,8 +1078,8 @@ an unbounded cost or context-injection surface:
 `DAWNPATROL_MCP_NOTEBOOK_MAX_INJECTED` (default 50) caps how many of the most recent
 entries actually get injected into any run's context even though the full history stays
 readable via `read_notebook`. A note still cannot fabricate a finding —
-`adjudicate.py`'s `signal_ids` requirement applies regardless of what the model was told
-going in. `delete_notebook_entry` removes one immediately, no expiry mechanism, since a
+`adjudicate.py`'s citation requirement applies regardless of what the model was told
+going in, and a note is neither a signal nor an event. `delete_notebook_entry` removes one immediately, no expiry mechanism, since a
 note is context an agent retracts when it's stale or wrong, not a tuning rule that needs
 its own audit trail the way a suppression does.
 

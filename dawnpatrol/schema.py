@@ -164,6 +164,7 @@ findings = Table(
     Column("not_this", Text),
     Column("action", Text),
     Column("signal_ids_json", Text),
+    Column("event_ids_json", Text),
     Column("evidence_kinds_json", Text),
     Column("entities_json", Text),
     Column("suppressed", Boolean, default=False),

@@ -143,7 +143,8 @@ wait for it to age out of `notebook_max_injected`.
 
 **What it cannot do.** A note can bias interpretation and supply context - it cannot
 manufacture a finding. `adjudicate.py`'s structural rule still applies uniformly: every
-`Finding` must cite a real analyzer `Signal.id`, and a note is not one. The worst a
+`Finding` must cite a real analyzer `Signal.id` or a real event of the run, and a note is
+neither. The worst a
 malicious or mistaken note can do is bias the model's *narrative* about real signals; it
 cannot make the model report something the deterministic layer never observed.
 

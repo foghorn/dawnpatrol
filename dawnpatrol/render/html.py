@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from html import escape
 
-from ..models import Finding, Report
+from ..models import SUSPECTED_NOTE, Finding, Report
 
 _BADGE_CLASS = {"GREEN": "ok", "AMBER": "warn", "RED": "bad"}
 
@@ -33,6 +33,7 @@ h2{font-size:1.1rem;border-bottom:1px solid #d0d7de;padding-bottom:.3rem;
 .finding.sev-CRITICAL,.finding.sev-HIGH{border-color:#cf222e}
 .finding.sev-MEDIUM{border-color:#9a6700}
 .finding.sev-LOW,.finding.sev-INFO{border-color:#57606a}
+.finding.sev-SUSPECTED{border-color:#8250df;border-style:dashed}
 .finding dt{font-weight:600;color:#57606a;font-size:.85rem}
 .finding dd{margin:0 0 .5rem 0}
 table{border-collapse:collapse;width:100%;font-size:.9rem}
@@ -100,6 +101,16 @@ def render(report: Report) -> str:
             a("</li>")
         a("</ol>")
 
+    if report.detection_gaps or report.rejected_findings:
+        a("<h2>Detection gaps</h2><ul class=\"notes\">")
+        for gap in report.detection_gaps:
+            a(f"<li>{escape(gap.text())}</li>")
+        if report.rejected_findings:
+            rejected = "".join(f"<li>{escape(r)}</li>" for r in report.rejected_findings)
+            a(f"<li>Rejected by the adjudicator, so not reported as findings:"
+              f"<ul>{rejected}</ul></li>")
+        a("</ul>")
+
     a("<h2>Data quality</h2><ul class=\"notes\">")
     for h in report.health:
         a(f"<li><strong>{escape(h.source)}</strong> &mdash; {escape(h.state.value)}, "
@@ -160,6 +171,7 @@ def _finding_html(f: Finding) -> str:
                f"{escape(f.title)}</h3>")
     out.append("<dl>")
     body = [
+        ("Basis", SUSPECTED_NOTE if f.suspected else ""),
         ("Zone", f.zone), ("Confidence", str(f.confidence)),
         ("What", f.what), ("Why", f.why),
         ("Ruled out", f.not_this), ("Action", f.action),
@@ -172,6 +184,8 @@ def _finding_html(f: Finding) -> str:
         out.append(f"<dt>Reputation</dt><dd>{escape(ref.summary)}</dd>")
     if f.attribution_caveat:
         out.append(f"<dt>Attribution</dt><dd>{escape(f.attribution_caveat)}</dd>")
+    if f.event_ids:
+        out.append(f"<dt>Events</dt><dd>{escape(f.event_refs)}</dd>")
     for adj in f.adjustments:
         out.append(f"<dt>Adjusted</dt><dd>{escape(adj)}</dd>")
     out.append("</dl></div>")

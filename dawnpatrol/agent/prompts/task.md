@@ -12,6 +12,8 @@ Work in this order:
    a shallow pass across all.
 5. Enrich only after you have classified behaviourally, and only where it could
    change a decision.
-6. Decide what the reader should actually do.
+6. Note anything that matters but that no signal covers: raise it as a
+   SUSPECTED finding citing its event ids, and record the detection gap.
+7. Decide what the reader should actually do.
 
 Then call `submit_analysis`.

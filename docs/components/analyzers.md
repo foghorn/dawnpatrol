@@ -63,10 +63,13 @@ Signal(
 )
 ```
 
-**Every `Finding` the model produces must cite at least one `Signal.id`.** That's not a
-convention - `adjudicate.py` rejects a finding that doesn't, structurally, regardless of
-how convincing the model's prose is. Anything you want the model to be *able* to report
-has to originate as a signal here first.
+**Only a `Signal` can give a finding a severity.** That's not a convention -
+`adjudicate.py` enforces it structurally, regardless of how convincing the model's prose
+is. The model can still report activity no analyzer covers by citing the raw events, but
+that finding is marked `SUSPECTED`: unrated, and never counted toward the status. It also
+appears under the report's detection gaps. Anything you want reported with a real
+severity has to originate as a signal here, and those gaps tell you which analyzer to
+write next.
 
 ## The query API: `EventQuery`
 

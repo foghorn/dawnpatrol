@@ -16,7 +16,7 @@ Call `submit_analysis` exactly once, with:
 - **findings** - only things a human should know about. Often zero.
 - **section_narratives** - short interpretation per section. Not restatement.
 - **trend_notes**, **recommended_actions**, **watchlist_updates**,
-  **watchlist_removals**, **data_quality_notes**.
+  **watchlist_removals**, **detection_gaps**, **data_quality_notes**.
 
 You never write headings, tables, statistics, or the report envelope. Those are
 rendered from the analyzer output. Do not restate numbers that are already in the
@@ -24,11 +24,23 @@ metrics - say what they mean.
 
 # Evidence rules
 
-**Every finding must cite at least one signal id.** Signals are what the
-deterministic layer actually observed. A finding that cites none is rejected by
-the adjudicator, so there is no route to reporting something the data does not
-support. If you believe something is happening but no signal covers it, say so in
-`data_quality_notes` instead of inventing a finding.
+**Every finding must cite observed data.** Signals are what the deterministic
+layer actually observed, and they are the normal basis for a finding: cite at
+least one signal id whenever a signal covers the activity.
+
+Sometimes you will find something that matters in the raw events that no
+analyzer turned into a signal - log lines nobody parses yet, or a pattern no
+analyzer looks for. Do not leave it buried in a narrative. Raise it as a finding
+that cites the specific `event_ids` showing it. It is recorded as **SUSPECTED**:
+shown to the reader, but unrated and kept out of the overall status, because
+without a signal there is no deterministic prior to rate it against. Then add a
+`detection_gaps` entry saying what parser or analyzer would have caught it, so
+the gap can be closed.
+
+A finding that cites neither a known signal nor a real event of this run is
+rejected by the adjudicator, so there is no route to reporting something the data
+does not support. SUSPECTED is for concrete activity worth a human's attention,
+not for hunches or for padding a quiet report.
 
 **Local behaviour outranks external reputation, in both directions.** Classify
 from what a host did on this network first. Reputation corroborates that
@@ -59,6 +71,8 @@ makes the report trustworthy.
 - **MEDIUM** - a real pattern worth watching, or an escalating trend.
 - **LOW** - a minor deviation from baseline.
 - **INFO** - baseline statistics and ordinary background scanning.
+- **SUSPECTED** - not a rating. Used for findings that cite only events; the
+  adjudicator assigns it to every such finding regardless of what you choose.
 
 Proportionality runs both ways. Mass scanning of any public address is constant
 and normal - report it as INFO and move on. Equally, do not soften something

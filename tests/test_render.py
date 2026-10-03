@@ -15,6 +15,7 @@ from dawnpatrol.models import (
     Action,
     CanaryResult,
     Confidence,
+    DetectionGap,
     Entity,
     EntityType,
     Finding,
@@ -118,13 +119,14 @@ def test_no_trailing_whitespace():
     assert not [ln for ln in body.split("\n") if ln != ln.rstrip()]
 
 
-def test_all_ten_sections_always_present():
+def test_all_eleven_sections_always_present():
     for report in (make_report(), make_report(findings=[sample_finding()])):
         body = render_with("plaintext", report)
         for n, name in enumerate([
             "EXECUTIVE SUMMARY", "KEY STATISTICS", "FINDINGS", "PERIMETER ACTIVITY",
             "ROUTER AND SYSTEM EVENTS", "DNS ACTIVITY", "SEGMENT REVIEW",
-            "TREND WATCH", "RECOMMENDED ACTIONS", "DATA QUALITY AND CAVEATS",
+            "TREND WATCH", "RECOMMENDED ACTIONS", "DETECTION GAPS",
+                "DATA QUALITY AND CAVEATS",
         ], start=1):
             assert f"{n}. {name}" in body, f"section {n} ({name}) missing"
 
@@ -204,6 +206,42 @@ def test_every_renderer_handles_an_empty_report(name):
 def test_every_renderer_handles_a_populated_report(name):
     body = render_with(name, make_report(findings=[sample_finding()]))
     assert "steady-checkin.example.net" in body or "F1" in body
+
+
+def _suspected_report() -> Report:
+    finding = Finding(
+        id="F2", title="Failed SSH logins in unparsed daemon logs",
+        severity=Severity.SUSPECTED, confidence=Confidence.MEDIUM,
+        taxonomy="auth.ssh_failure", what="Two failed logins from one VPN client.",
+        event_ids=[41, 42],
+    )
+    return make_report(
+        findings=[sample_finding(), finding],
+        detection_gaps=[DetectionGap(what="SSH daemon logs are not parsed",
+                                     suggestion="a parser for them")],
+        rejected_findings=["rejected 'Invented': cites no known analyzer signal or event"],
+    )
+
+
+@pytest.mark.parametrize("name", [n for n in RENDERERS if n != "json"])
+def test_suspected_findings_are_labelled_explained_and_cite_their_events(name):
+    body = render_with(name, _suspected_report())
+    assert "SUSPECTED" in body
+    assert "no analyzer signal covers" in body
+    assert "#41, #42" in body
+
+
+@pytest.mark.parametrize("name", sorted(RENDERERS))
+def test_detection_gaps_and_rejections_are_shown(name):
+    body = render_with(name, _suspected_report())
+    assert "SSH daemon logs are not parsed" in body
+    assert "a parser for them" in body
+    assert "Invented" in body
+
+
+def test_suspected_findings_sort_after_rated_ones():
+    report = _suspected_report()
+    assert [f.id for f in report.findings_sorted()] == ["F1", "F2"]
 
 
 def _segment_metrics(**zone_counts: tuple[int, int]) -> list[Metric]:

@@ -136,7 +136,7 @@ never recur:
   `_parse_dnsmasq_query` and the module docstring in `librenms_syslog.py`.
   This also means the *same* DNS resolution can now legitimately appear from
   two sources - here, with the real client IP, and in `pihole_dns.py`'s own
-  query log, attributed to the gateway's IP (10.128.10.8) as its own upstream
+  query log, attributed to the gateway's own IP as its own upstream
   client - documented as a `known_quirks` entry in `profile.yml` rather than
   deduplicated, since they are two different hops of the same lookup, not a
   duplicate record.
@@ -152,6 +152,19 @@ never recur:
   observed live; "failed" is built from LuCI's own stable, symmetric
   dispatcher.lua wording ahead of the first real one, the same reasoning
   already applied to OpenSSH's "Failed"/"Invalid user" lines below.
+- **Dropbear SSH gets its own parser, separate from OpenSSH's.** The IoT-side
+  ASUS node runs Dropbear (program `DROPBEAR`), a different daemon with a
+  completely different log vocabulary from OpenSSH's "Accepted"/"Failed"/
+  "Invalid user" lines - confirmed live: `Child connection from <ip>:<port>`
+  (no auth outcome yet - not classified as an event on its own) and `Exit
+  before auth from <<ip>:<port>>: Max auth tries reached - user 'is invalid'`
+  / `...: Exited normally`. The accepted/bad-password lines aren't observed
+  live here yet, built ahead of the first real occurrence from Dropbear's own
+  stable upstream format instead - see `_parse_dropbear_session` in
+  `librenms_syslog.py`. Both daemons normalize into the identical
+  `EventKind.AUTH` shape (`ssh_accepted`/`ssh_failed`/`ssh_invalid`), so
+  `analyzers/auth_activity.py`'s SSH checks apply to either without caring
+  which one produced the event.
 - **Every device with a private IP is registered in the cross-source device directory**
   (`dawnpatrol/devices.py`, `ARCHITECTURE.md` §6.4) - a per-run registry keyed by IP
   address, not by LibreNMS's own `device_id`, so any other source can contribute to the

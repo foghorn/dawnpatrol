@@ -853,7 +853,7 @@ def test_deauths_spread_across_the_day_are_not_a_mass_burst(q, profile, baseline
 
 
 # --------------------------------------------------------------------------- #
-# Auth activity: Windows endpoint telemetry (device 8, real production shape)
+# Auth activity: Windows endpoint telemetry (real production shape)
 # --------------------------------------------------------------------------- #
 
 
@@ -1009,7 +1009,7 @@ def test_windows_defender_health_heartbeat_produces_no_signal(q, profile, baseli
 
 
 # --------------------------------------------------------------------------- #
-# Auth activity: Linux SSH (device 6, real production shape)
+# Auth activity: Linux SSH (real production shape)
 # --------------------------------------------------------------------------- #
 
 
@@ -1126,6 +1126,24 @@ def test_a_couple_of_ssh_failures_is_not_a_burst(q, profile, baseline, window):
     q.store.insert_events(q.run_id, events)
     result = AuthActivityAnalyzer().run(q, profile, baseline)
     assert not any(s.taxonomy == "auth.ssh_failure_burst" for s in result.signals)
+
+
+def test_ssh_failure_burst_threshold_is_configurable(q, profile, baseline, window, monkeypatch):
+    """The same two attempts as test_a_couple_of_ssh_failures_is_not_a_burst -
+    a lowered threshold must turn them into a signal instead."""
+    from dawnpatrol.models import Event, EventKind
+
+    monkeypatch.setenv("DAWNPATROL_AUTH_SSH_FAILURE_BURST_MIN", "2")
+    events = [
+        Event(ts=window.end, source="librenms_syslog", kind=EventKind.AUTH,
+              dedup_key=f"s9-{i}", action="ssh_failed", user="alice", proto="password",
+              src_ip="10.10.0.35")
+        for i in range(2)
+    ]
+    q.store.insert_events(q.run_id, events)
+    result = AuthActivityAnalyzer().run(q, profile, baseline)
+    signal = next(s for s in result.signals if s.taxonomy == "auth.ssh_failure_burst")
+    assert signal.evidence["failed_attempts"] == 2
 
 
 # --------------------------------------------------------------------------- #

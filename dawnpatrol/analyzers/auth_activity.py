@@ -23,38 +23,43 @@ window (the signature of a deauthentication-flood attack against the AP
 itself, not any one client).
 
 Windows endpoint telemetry: any device forwarding Windows Security auditing
-to this deployment's syslog collector (confirmed live against device 8,
-`10.128.15.135`) gets real per-account logon evidence -
+to this deployment's syslog collector (confirmed live against a real Windows
+host) gets real per-account logon evidence -
 `librenms_syslog._parse_windows_security_audit` turns the rendered event text
 into `EventKind.AUTH` with `user` as the account and `proto` repurposed to
 carry the logon type (interactive/network/rdp/service/...). Four checks:
 a never-seen-before account authenticating on the host, a successful logon
 whose source address is outside this network, a burst of logon failures
-(structurally ready, unverified against real data - none have occurred on
-device 8 yet), and a Windows Defender detection (`EventKind.IDS`, the first
+(structurally ready, unverified against real data - none had occurred at the
+time), and a Windows Defender detection (`EventKind.IDS`, the first
 consumer of that kind) - which is near-binary in value, since the source only
 emits it outside its routine health-heartbeat template when something was
 actually flagged.
 
 Linux SSH: classic OpenSSH auth lines - "Accepted"/"Failed"/"Invalid user",
-unchanged in format across decades of versions - confirmed live against
-device 6 (this session's own Fedora host), which produces ~150k syslog
-lines/day, 63% of it `AUDIT type=BPF` noise this file deliberately does not
+unchanged in format across decades of versions - confirmed live against a
+real Linux host running OpenSSH, producing on the order of 150k syslog
+lines/day, most of it `AUDIT type=BPF` noise this file deliberately does not
 touch. `librenms_syslog._parse_sshd_session` turns the auth-outcome lines
 into the same `EventKind.AUTH` shape as Windows logons (`user` = account,
 `proto` = auth method). Three checks, symmetric to the Windows ones: a new
 account authenticating over SSH, a successful logon from outside this
 network, and a burst of failed/invalid-user attempts - the single most
-standard brute-force signature there is, though none had occurred on this
-device as of when this was built.
+standard brute-force signature there is, though none had occurred on that
+host as of when this was built. Dropbear (the sshd that OpenWRT/embedded
+gateways typically run - a different daemon, different log vocabulary,
+confirmed live) is parsed separately by
+`librenms_syslog._parse_dropbear_session` into this same `EventKind.AUTH`
+shape, so all three SSH checks below apply to it identically without
+knowing which daemon actually produced the event.
 
 Router/gateway web-UI admin login: the highest-value target on a home
 network is the device that controls every other device's traffic, and until
 now nothing watched who administers it. Two confirmed-live formats -
-LuCI's `[info] luci: accepted login on / for root from <ip>` on both OpenWRT
-segment gateways, and the ASUS-family GUI's `[LOGIN][http][Web] successful
-(<ip>)` on the edge router (a firmware translation quirk spells this
-"successed" on one device; matched regardless) -
+LuCI's `[info] luci: accepted login on / for root from <ip>` on an OpenWRT
+segment gateway, and the ASUS-family GUI's `[LOGIN][http][Web] successful
+(<ip>)` on an ASUS-family router (a firmware translation quirk spells this
+"successed" on some devices; matched regardless) -
 `librenms_syslog._parse_router_admin_login` turns both into the same
 `EventKind.AUTH` shape. Two checks, symmetric to the SSH ones: a successful
 login from outside this network, and a burst of failed attempts - no
@@ -70,6 +75,7 @@ from datetime import datetime, timedelta
 from ..models import UTC, AnalyzerResult, Entity, EntityType, EventKind, Metric, Severity, Signal
 from ..profile import Profile
 from ..query import EventQuery
+from ..secrets import read_int
 from .base import Analyzer
 from .baseline import Baseline
 
@@ -99,10 +105,11 @@ _REMOTE_LOGON_TYPES = {"network", "rdp", "net_clear"}
 _LOGON_FAILURE_BURST_MIN = 5
 _WINDOWS_SAMPLE_LIMIT = 500
 
-#: Keep in sync with librenms_syslog._parse_sshd_session's `action` values.
+#: Keep in sync with librenms_syslog._parse_sshd_session's/
+#: _parse_dropbear_session's `action` values.
 _SSH_AUTH_ACTIONS = ["ssh_accepted", "ssh_failed", "ssh_invalid"]
 _SSH_FAILURE_ACTIONS = ["ssh_failed", "ssh_invalid"]
-_SSH_FAILURE_BURST_MIN = 5
+_SSH_FAILURE_BURST_MIN_DEFAULT = 5
 _SSH_SAMPLE_LIMIT = 500
 
 #: Keep in sync with librenms_syslog._parse_router_admin_login's `action`
@@ -116,6 +123,10 @@ class AuthActivityAnalyzer(Analyzer):
     name = "auth_activity"
     requires_kinds = frozenset({EventKind.AUTH, EventKind.IDS})
     order = 45
+
+    @property
+    def ssh_failure_burst_min(self) -> int:
+        return read_int("DAWNPATROL_AUTH_SSH_FAILURE_BURST_MIN", _SSH_FAILURE_BURST_MIN_DEFAULT)
 
     def run(self, q: EventQuery, profile: Profile, baseline: Baseline) -> AnalyzerResult:
         r = AnalyzerResult(analyzer=self.name)
@@ -512,12 +523,12 @@ class AuthActivityAnalyzer(Analyzer):
             ))
 
     def _ssh_failure_burst(self, q: EventQuery, r: AnalyzerResult) -> None:
-        """The single most standard brute-force signature there is - not yet
-        observed on this device (no attempt has occurred), but the format is
-        universal enough across OpenSSH versions to build confidently ahead
-        of the first real one."""
+        """The single most standard brute-force signature there is. The
+        minimum burst size is DAWNPATROL_AUTH_SSH_FAILURE_BURST_MIN (default
+        5) - lower it for a small or IoT-side network where even a handful
+        of failed attempts is worth a signal, not just a data-quality note."""
         total = q.count(kind=EventKind.AUTH, action=_SSH_FAILURE_ACTIONS)
-        if total < _SSH_FAILURE_BURST_MIN:
+        if total < self.ssh_failure_burst_min:
             return
         by_source = q.top("src_ip", n=10, kind=EventKind.AUTH, action=_SSH_FAILURE_ACTIONS)
         by_account = q.top("user", n=10, kind=EventKind.AUTH, action=_SSH_FAILURE_ACTIONS)
@@ -547,8 +558,8 @@ class AuthActivityAnalyzer(Analyzer):
     # ----- Router/gateway web-UI admin login ------------------------------------ #
 
     def _router_admin_logons(self, q: EventQuery, r: AnalyzerResult, profile: Profile) -> None:
-        """LuCI (the OpenWRT segment gateways) and the ASUS-family web GUI
-        (the edge router) both produce real per-login evidence for the
+        """LuCI (on OpenWRT-based gateways) and the ASUS-family web GUI
+        both produce real per-login evidence for the
         single highest-value target on a home network: the device that
         controls every other device's traffic. Two checks, symmetric to the
         SSH ones above: a successful login from outside this network, and a

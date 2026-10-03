@@ -297,8 +297,11 @@ documentation that gives every finding its context is `profile.yml` — see
 Four mechanisms, all structural rather than advisory:
 
 **Findings must trace to data.** Every finding cites at least one analyzer
-signal, and the adjudicator rejects one that does not. There is no path to
-reporting something the deterministic layer never observed.
+signal, or specific events from the run, and the adjudicator rejects one that
+cites neither. Only a signal can rate a finding. One resting on raw events alone
+is marked `SUSPECTED`: it's shown, but it can't move the status. Each one is
+also listed as a detection gap, the place where a new parser or analyzer would
+turn it into a real signal.
 
 **Guardrails are code.** Reputation alone cannot create a finding. Severity
 cannot exceed its strongest supporting signal by more than one level. CRITICAL

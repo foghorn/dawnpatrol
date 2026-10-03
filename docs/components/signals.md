@@ -4,11 +4,12 @@ Every signal any analyzer currently emits, in one place. A **signal** is a deter
 candidate finding — computed from real events, not yet judged (see
 [analyzers.md](analyzers.md) for the full contract). This file is the reference for what
 the model actually sees each run: every `Signal` object here is serialized into the
-evidence bundle (`agent/bundle.py`) and handed to the investigate stage, and **every
-`Finding` the model produces must cite at least one signal id** — `adjudicate.py` rejects
-one that doesn't, structurally. If something isn't listed here, the model has no way to
-report it as a finding, only to notice it in a metric or raw query and say so in
-`data_quality_notes`.
+evidence bundle (`agent/bundle.py`) and handed to the investigate stage. **Only a signal
+can give a finding a severity.** If the model finds something in the raw events that no
+signal here covers, it can still report it by citing those events. The finding is then
+marked `SUSPECTED`, which means unrated and kept out of the overall status, and it's
+listed in the report's detection gaps. A gap that keeps coming back is the cue to add a
+signal for it here.
 
 This is a snapshot, not a spec — it will drift the moment an analyzer changes. Regenerate
 it (or at least re-check it) whenever a signal is added, renamed, retuned, or removed;
@@ -109,7 +110,7 @@ the module's own docstring for the verification history of each subsection).
 | `endpoint.defender_detection` | `endpoint.malware_detection` | HIGH | 0.75 | Windows Defender emitted a message matching its actual detection template ("...has detected malware or other potentially unwanted software") — matched *positively*, not by excluding known-benign wording, after that inverse approach produced two real false positives in production | `count`, `librenms_device_ids` (LibreNMS numeric ids, not hostnames), `messages` (first 300 chars each) |
 | `auth.ssh_new_account` | `auth.ssh_new_account` | MEDIUM | 0.55 | A never-seen-before account authenticated over SSH (accepted) | `accounts` |
 | `auth.ssh_external_logon.<src_ip>` | `auth.ssh_external_logon` | HIGH | 0.7 | A *successful* (accepted) SSH logon whose source address is outside the network | `src_ip`, `account`, `method`, `device` |
-| `auth.ssh_failure_burst` | `auth.ssh_failure_burst` | MEDIUM | 0.6 | ≥5 failed or invalid-user SSH attempts this run — the classic brute-force/spray signature | `failed_attempts`, `by_source`, `by_account` |
+| `auth.ssh_failure_burst` | `auth.ssh_failure_burst` | MEDIUM | 0.6 | ≥`DAWNPATROL_AUTH_SSH_FAILURE_BURST_MIN` (default 5) failed or invalid-user SSH attempts this run, from either OpenSSH or Dropbear — the classic brute-force/spray signature | `failed_attempts`, `by_source`, `by_account` |
 | `auth.router_admin_external_login.<src_ip>` | `auth.router_admin_external_login` | HIGH | 0.7 | A *successful* router/gateway web-UI admin login (LuCI or the ASUS-family GUI) whose source address is outside the network | `src_ip`, `account`, `device` |
 | `auth.router_admin_failure_burst` | `auth.router_admin_failure_burst` | MEDIUM | 0.6 | ≥5 failed router/gateway admin login attempts this run. Structurally ready; unverified against a real burst as of when it was built | `failed_attempts`, `by_source` |
 

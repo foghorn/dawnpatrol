@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..models import Report
+from ..models import SUSPECTED_NOTE, Report
 
 _BADGE = {"GREEN": "OK", "AMBER": "ATTENTION", "RED": "ACTION REQUIRED"}
 
@@ -54,6 +54,9 @@ def render(report: Report) -> str:
         for f in report.findings_sorted():
             a(f"### `{f.severity.label()}` {f.id} - {f.title}")
             a("")
+            if f.suspected:
+                a(f"> {SUSPECTED_NOTE}")
+                a("")
             a(f"- **Zone:** {f.zone}")
             a(f"- **Confidence:** {f.confidence}")
             if f.what:
@@ -68,6 +71,8 @@ def render(report: Report) -> str:
                 a(f"- **Reputation:** {ref.summary}")
             if f.attribution_caveat:
                 a(f"- **Attribution:** {f.attribution_caveat}")
+            if f.event_ids:
+                a(f"- **Events:** {f.event_refs}")
             for adj in f.adjustments:
                 a(f"- _Adjusted: {adj}_")
             a("")
@@ -99,6 +104,17 @@ def render(report: Report) -> str:
             a(f"{i}. {action.text}")
             if action.command:
                 a(f"   ```\n   {action.command}\n   ```")
+        a("")
+
+    if report.detection_gaps or report.rejected_findings:
+        a("## Detection gaps")
+        a("")
+        for gap in report.detection_gaps:
+            a(f"- {gap.text()}")
+        if report.rejected_findings:
+            a("- Rejected by the adjudicator, so not reported as findings:")
+            for rejection in report.rejected_findings:
+                a(f"  - {rejection}")
         a("")
 
     a("## Data quality")

@@ -121,7 +121,8 @@ def describe_schema(run_id: str, dialect: str) -> str:
     return f"""Read-only SQL is available over these tables ({dialect} dialect).
 
 events - one row per normalized observation. Scope to run_id = '{run_id}'.
-  ts, source, kind, dedup_key
+  id, ts, source, kind, dedup_key
+  id is what a finding's event_ids cites
   kind is one of: firewall, dns, system, auth, ids, flow, http, other
   network : src_ip, dst_ip, src_port, dst_port, proto, action,
             iface_in, iface_out, ttl, pkt_len

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "SUSPECTED"]
 CONFIDENCES = ["high", "medium", "low"]
 EVIDENCE_KINDS = ["local_behavior", "baseline_delta", "correlation",
                   "reputation", "policy_violation"]
@@ -27,7 +27,14 @@ FINDING_SCHEMA: dict[str, Any] = {
             "type": "string", "maxLength": 120,
             "description": "One line naming the specific thing observed.",
         },
-        "severity": {"type": "string", "enum": SEVERITIES},
+        "severity": {
+            "type": "string", "enum": SEVERITIES,
+            "description": (
+                "SUSPECTED for a finding that cites only event_ids. It is not a "
+                "rating: without a signal there is nothing to rate against, and "
+                "the adjudicator records any event-only finding as SUSPECTED."
+            ),
+        },
         "confidence": {"type": "string", "enum": CONFIDENCES},
         "taxonomy": {
             "type": "string",
@@ -38,11 +45,19 @@ FINDING_SCHEMA: dict[str, Any] = {
             "description": "Zone name from the site profile, or 'perimeter'.",
         },
         "signal_ids": {
-            "type": "array", "minItems": 1, "items": {"type": "string"},
+            "type": "array", "items": {"type": "string"},
             "description": (
-                "REQUIRED. Ids of the analyzer signals this finding rests on. A "
-                "finding citing no signal is rejected - there is no path to "
-                "reporting something the deterministic layer did not observe."
+                "Ids of the analyzer signals this finding rests on. Cite at least "
+                "one whenever a signal covers the activity."
+            ),
+        },
+        "event_ids": {
+            "type": "array", "maxItems": 20, "items": {"type": "integer"},
+            "description": (
+                "Ids of specific events from this run (the events table's `id` "
+                "column) that show the activity. Use these when no signal covers "
+                "it. A finding citing neither a known signal nor a real event of "
+                "this run is rejected."
             ),
         },
         "evidence_kinds": {
@@ -186,6 +201,28 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
                 "Watchlist entries to close now because they were resolved this run - "
                 "explained, expected, or no longer relevant. Prefer closing an item "
                 "explicitly over letting it recur silently until it expires."
+            ),
+        },
+        "detection_gaps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["what"],
+                "properties": {
+                    "what": {"type": "string",
+                             "description": "The activity no signal covered."},
+                    "suggestion": {"type": "string",
+                                   "description": "What parser or analyzer would have caught it."},
+                    "event_ids": {"type": "array", "maxItems": 20,
+                                  "items": {"type": "integer"}},
+                },
+            },
+            "description": (
+                "Activity worth detecting that no analyzer turned into a signal, "
+                "for example log lines left unparsed or a pattern no analyzer "
+                "looks for. Every SUSPECTED finding implies one. These tell the "
+                "operator what detection to add, so be specific."
             ),
         },
         "data_quality_notes": {

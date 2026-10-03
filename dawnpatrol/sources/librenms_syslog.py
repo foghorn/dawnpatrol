@@ -36,34 +36,33 @@ the real feed on all three devices (main router and both OpenWRT gateways)
 before being encoded here, not assumed from documentation.
 
 ``DNSMASQ`` (no ``-DHCP`` suffix) query-log lines are a third: a segment
-gateway that runs its own local dnsmasq as the resolver for its clients (the
-IoT gateway, 10.128.10.8) can be configured to log every query it answers,
-which is real per-device DNS visibility for a segment `pihole_dns.py` never
-sees directly. Two things confirmed against the real live feed (device 7,
-12/48h pulls via the LibreNMS API) before this was encoded, both classic
+gateway that runs its own local dnsmasq as the resolver for its clients can
+be configured to log every query it answers, which is real per-device DNS
+visibility for a segment `pihole_dns.py` never sees directly. Two things
+confirmed against a real live feed before this was encoded, both classic
 "looks like a query, isn't" traps:
 
   * Every dnsmasq restart logs a bulk self-test sweep - one ``query[PTR]``
     plus a ``config``/``DHCP``/bare-hosts-path answer line, per statically
     known host and DHCP lease, all at one identical timestamp, all from
-    client ``127.0.0.1``. A single observed restart produced 118+80+36+2
-    such lines. None of it is a real device asking to resolve anything;
-    excluding ``client == 127.0.0.1`` unconditionally removes the whole
-    artifact, regardless of verb - every real client query observed live
-    came from a real ``10.128.50.x`` address, never loopback.
+    client ``127.0.0.1``. A single observed restart produced over 200 such
+    lines. None of it is a real device asking to resolve anything; excluding
+    ``client == 127.0.0.1`` unconditionally removes the whole artifact,
+    regardless of verb - every real client query observed live came from a
+    real client address on the segment, never loopback.
   * ``forwarded``/``reply``/``cached`` lines answer a query already logged
     by its ``query[...]`` line - often several ``reply`` lines for one
-    query (one per round-robin A record: a single lookup for
-    ``jnn-pa.googleapis.com`` produced 8). Turning those into events too
-    would multiply one real lookup into many DNS events, so only the
-    ``query[...]`` line becomes an ``Event`` here - one event per lookup,
-    the same shape `pihole_dns.py` already produces.
+    query (one per round-robin A record: a single real-world lookup
+    produced 8). Turning those into events too would multiply one real
+    lookup into many DNS events, so only the ``query[...]`` line becomes an
+    ``Event`` here - one event per lookup, the same shape `pihole_dns.py`
+    already produces.
 
 The double-visibility this creates - the same resolution can now show up
-once here (real IoT client IP) and once more in Pi-hole's own query log
-(client_ip=10.128.10.8, since the gateway is itself a DNS client of
-Pi-hole for its upstream lookups) - is a network fact, not a parsing bug,
-and is documented in `profile.yml`'s `known_quirks` rather than
+once here (the real segment client IP) and once more in Pi-hole's own query
+log (attributed to the gateway's own IP, since the gateway is itself a DNS
+client of Pi-hole for its upstream lookups) - is a network fact, not a
+parsing bug, and is documented in `profile.yml`'s `known_quirks` rather than
 deduplicated here: the two sources are recording two different hops of the
 same lookup, not the same event twice.
 """
@@ -107,33 +106,32 @@ _PROTO_NUMBERS = {"1": "icmp", "2": "igmp", "6": "tcp", "17": "udp",
 #: "STA aa:bb:... IEEE 802.11: deauthenticated ...".
 _MAC_RE = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
 
-#: OpenWRT LuCI web-UI login, format confirmed live on both segment gateways
-#: (devices 4 and 7, 72h pull): "[info] luci: accepted login on / for root
-#: from 10.128.10.35". Only "accepted" was observed live; "failed" is LuCI's
-#: own stable, symmetric wording (dispatcher.lua logs both outcomes through
-#: the same call shape) - built ahead of the first real one, the same
-#: reasoning _parse_sshd_session already applies to OpenSSH's
-#: "Failed"/"Invalid user" lines never having occurred on this deployment.
+#: OpenWRT LuCI web-UI login, format confirmed live on a real OpenWRT-based
+#: gateway: "[info] luci: accepted login on / for root from 10.0.0.35". Only
+#: "accepted" was observed live; "failed" is LuCI's own stable, symmetric
+#: wording (dispatcher.lua logs both outcomes through the same call shape) -
+#: built ahead of the first real one, the same reasoning _parse_sshd_session
+#: already applies to OpenSSH's "Failed"/"Invalid user" lines.
 _LUCI_LOGIN_RE = re.compile(
     r"^\[info\]\s+luci:\s+(?P<result>accepted|failed)\s+login\s+on\s+\S+\s+"
     r"for\s+(?P<user>\S+)\s+from\s+(?P<ip>\S+)",
     re.IGNORECASE,
 )
 
-#: ASUS/Asuswrt-family web-UI login, format confirmed live on the edge router
-#: (device 3): "[LOGIN][http][Web] successful (10.128.10.35)" and
-#: "... failed (...)". The IoT gateway's own HTTPD-tagged web service
-#: produces the identical line shape but spells the success case "successed"
-#: (a firmware translation quirk, not a different outcome) - `success\w*`/
-#: `fail\w*` matches every variant without caring about the exact suffix.
-#: No username in this line - only the ASUS-style bare admin login has one.
+#: ASUS/Asuswrt-family web-UI login, format confirmed live on a real
+#: ASUS-family router: "[LOGIN][http][Web] successful (10.0.0.35)" and
+#: "... failed (...)". Some gateways' web services (under a firmware
+#: translation quirk) spell the success case "successed" instead of
+#: "successful" - not a different outcome - `success\w*`/`fail\w*` matches
+#: every variant without caring about the exact suffix. No username in this
+#: line - only the ASUS-style bare admin login has one.
 _ASUS_WEBLOGIN_RE = re.compile(
     r"^\[LOGIN\]\[http\]\[Web\]\s+(?P<result>success\w*|fail\w*)\s+\((?P<ip>[\d.]+)\)",
     re.IGNORECASE,
 )
 
-#: DNSMASQ-DHCP lines, format confirmed against the real feed on all three
-#: devices (main router + both OpenWRT segment gateways):
+#: DNSMASQ-DHCP lines, format confirmed against a real live feed on more than
+#: one OpenWRT-based gateway:
 #:   DHCPDISCOVER(eth0) aa:bb:cc:dd:ee:ff
 #:   DHCPOFFER(eth0) 10.0.0.5 aa:bb:cc:dd:ee:ff
 #:   DHCPREQUEST(eth0) 10.0.0.5 aa:bb:cc:dd:ee:ff
@@ -147,9 +145,10 @@ _DHCP_VERB_RE = re.compile(
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 #: dnsmasq query-log line (program tag "DNSMASQ", not "DNSMASQ-DHCP"), format
-#: confirmed against the real feed (device 7, the IoT segment gateway):
-#:   119 10.128.50.163/51007 query[A] jnn-pa.googleapis.com from 10.128.50.163
-#:   120 10.128.50.163/53438 query[AAAA] jnn-pa.googleapis.com from 10.128.50.163
+#: confirmed against a real live feed from a segment gateway running its own
+#: local dnsmasq:
+#:   119 10.0.50.163/51007 query[A] jnn-pa.googleapis.com from 10.0.50.163
+#:   120 10.0.50.163/53438 query[AAAA] jnn-pa.googleapis.com from 10.0.50.163
 #: Only the `query[...]` verb ever reaches this pattern - `forwarded`,
 #: `reply`, `cached`, `config`, `DHCP`, and the bare hosts-file-path verb are
 #: deliberately never matched here (see the module docstring for why: they
@@ -221,7 +220,7 @@ def _parse_router_admin_login(program: str, message: str) -> dict[str, Any] | No
 
 #: Windows Security auditing lines, forwarded as the full rendered event text
 #: (not structured XML) by whatever agent is shipping this device's syslog.
-#: Confirmed against the real feed (device 8, a Windows 11 box): fields are
+#: Confirmed against a real feed from a Windows 11 host: fields are
 #: "Label:" followed by one or two literal `\011` escapes (not real tab
 #: bytes - this forwarder writes the octal escape as text) then the value,
 #: blocks separated by two-or-more spaces. Classification is by the event's
@@ -291,11 +290,11 @@ def _parse_windows_defender(message: str, common: dict[str, Any]) -> Event | Non
 
 
 #: Classic OpenSSH auth-outcome lines, unchanged across decades of versions -
-#: confirmed against the real feed (device 6, this session's own Fedora
-#: host): "Accepted password for alice from 10.128.10.35 port 62404 ssh2"
-#: and the pam_unix session lines. "Failed"/"Invalid user" were not observed
-#: live in this deployment (no brute-force attempt has happened), built from
-#: the same universally-stable format instead. IPv4 only, deliberately -
+#: confirmed against a real feed from a Linux host running OpenSSH:
+#: "Accepted password for alice from 10.0.0.35 port 62404 ssh2" and the
+#: pam_unix session lines. "Failed"/"Invalid user" were not observed live
+#: (no brute-force attempt had occurred at the time), built from the same
+#: universally-stable format instead. IPv4 only, deliberately -
 #: an IPv6 source simply will not populate src_ip, rather than risk a loose
 #: pattern matching something it should not.
 _SSH_IPV4 = r"(?P<ip>\d{1,3}(?:\.\d{1,3}){3})"
@@ -312,6 +311,33 @@ _SSH_SESSION_CLOSE_RE = re.compile(r"session closed for user (?P<user>[^\s(]+)")
 #: Windows logon type - see _parse_windows_security_audit).
 _SSH_METHODS = {"password": "password", "publickey": "publickey", "none": "none",
                 "keyboard-interactive": "kbdint", "keyboard-interactive/pam": "kbdint"}
+
+#: Dropbear - the lightweight sshd on OpenWRT/embedded gateways (confirmed
+#: live on a real ASUS-family router, program "DROPBEAR") - is a completely
+#: different daemon from OpenSSH above, with its own log vocabulary. "Child
+#: connection from IP:PORT" and "Exit before auth from <IP:PORT>: Max auth
+#: tries reached - user 'is invalid'" / "...: Exited normally" are confirmed
+#: live; the accepted/bad-password lines are not (no real login attempt had
+#: reached that device at the time), built from Dropbear's own long-stable
+#: upstream log format instead - the same reasoning
+#: _ssh_failure_burst already applies: build ahead of the first real
+#: occurrence rather than waiting for one that might arrive as a live
+#: incident. "Child connection from" alone carries no auth outcome - the
+#: connection may still be mid-handshake, or may disconnect having never
+#: attempted a login at all - so it is deliberately not classified as an
+#: AUTH event; only a line with an actual outcome is.
+_DROPBEAR_ACCEPTED_RE = re.compile(
+    rf"^(?:Password|Pubkey) auth succeeded for '(?P<user>[^']+)'.* from {_SSH_IPV4}:(?P<port>\d+)")
+_DROPBEAR_BAD_PASSWORD_RE = re.compile(
+    rf"^Bad password attempt for '(?P<user>[^']+)' from {_SSH_IPV4}:(?P<port>\d+)")
+_DROPBEAR_EXIT_RE = re.compile(
+    rf"^Exit before auth from <{_SSH_IPV4}:(?P<port>\d+)>: (?P<reason>.+)$")
+#: Dropbear substitutes the literal "is invalid" for the username slot when
+#: the connection never got far enough to offer a real one - confirmed live.
+#: Treated the same as OpenSSH's "Invalid user" case; any other quoted text
+#: in this slot is a real (if wrong) attempted username, treated as a failed
+#: password attempt instead.
+_DROPBEAR_MAX_TRIES_RE = re.compile(r"^Max auth tries reached - user '(?P<user>.+)'$")
 
 
 _DATE_FMT = "%Y-%m-%d %H:%M:%S"
@@ -636,10 +662,10 @@ class LibreNMSSyslogSource(Source):
                     **common,
                 )
 
-        # Router/gateway web-UI admin login - LuCI on the OpenWRT segment
-        # gateways (program "UHTTPD"), the native web GUI on the ASUS edge
-        # router and, with a firmware translation quirk, on the IoT gateway's
-        # own HTTPD-tagged service too (program "HTTPD"). See
+        # Router/gateway web-UI admin login - LuCI on OpenWRT-based gateways
+        # (program "UHTTPD"), the native web GUI on an ASUS-family router and,
+        # with a firmware translation quirk, on some OpenWRT gateways' own
+        # HTTPD-tagged web service too (program "HTTPD"). See
         # _parse_router_admin_login and the module docstring for both
         # confirmed-live formats.
         if program in {"UHTTPD", "HTTPD"}:
@@ -669,9 +695,15 @@ class LibreNMSSyslogSource(Source):
                 return ev
 
         # Classic OpenSSH auth lines - "SSHD-SESSION" on newer systemd-managed
-        # builds (confirmed live, device 6), plain "SSHD" on older ones.
+        # builds (confirmed live), plain "SSHD" on older ones.
         if program.startswith("SSHD"):
             ev = self._parse_sshd_session(message, common)
+            if ev is not None:
+                return ev
+
+        # Dropbear - a different sshd entirely, see _parse_dropbear_session.
+        if program == "DROPBEAR":
+            ev = self._parse_dropbear_session(message, common)
             if ev is not None:
                 return ev
 
@@ -756,6 +788,43 @@ class LibreNMSSyslogSource(Source):
         if m := _SSH_SESSION_CLOSE_RE.search(message):
             return Event(kind=EventKind.AUTH, action="session_close",
                         user=m.group("user"), **common)
+
+        return None
+
+    def _parse_dropbear_session(self, message: str, common: dict[str, Any]) -> Event | None:
+        """Dropbear's log vocabulary has no overlap with OpenSSH's, so this is
+        a separate parser rather than a branch of _parse_sshd_session - see
+        the _DROPBEAR_* patterns' comment for which lines are confirmed live
+        here versus built ahead of a first real occurrence."""
+        if m := _DROPBEAR_ACCEPTED_RE.match(message):
+            kwargs: dict[str, Any] = {
+                **common, "kind": EventKind.AUTH, "action": "ssh_accepted",
+                "user": m.group("user"), "src_port": _as_int(m.group("port")),
+            }
+            kwargs.update(self.assign_zones(src_ip=m.group("ip")))
+            return Event(**kwargs)
+
+        if m := _DROPBEAR_BAD_PASSWORD_RE.match(message):
+            kwargs = {
+                **common, "kind": EventKind.AUTH, "action": "ssh_failed",
+                "user": m.group("user"), "src_port": _as_int(m.group("port")),
+            }
+            kwargs.update(self.assign_zones(src_ip=m.group("ip")))
+            return Event(**kwargs)
+
+        if m := _DROPBEAR_EXIT_RE.match(message):
+            tries = _DROPBEAR_MAX_TRIES_RE.match(m.group("reason"))
+            if tries is None:
+                return None  # "Exited normally" and anything else: no auth was attempted
+            user = tries.group("user")
+            kwargs = {
+                **common, "kind": EventKind.AUTH,
+                "action": "ssh_invalid" if user == "is invalid" else "ssh_failed",
+                "user": None if user == "is invalid" else user,
+                "src_port": _as_int(m.group("port")),
+            }
+            kwargs.update(self.assign_zones(src_ip=m.group("ip")))
+            return Event(**kwargs)
 
         return None
 

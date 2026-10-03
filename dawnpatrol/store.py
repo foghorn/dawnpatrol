@@ -12,7 +12,7 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import create_engine, delete, event, func, insert, select, text, update
+from sqlalchemy import create_engine, delete, event, func, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 
 from . import schema as S
@@ -96,6 +96,32 @@ class Store:
 
     def create_all(self) -> None:
         S.metadata.create_all(self.engine)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """Bring an existing database up to date with columns added since.
+
+        ``create_all`` creates missing tables but never alters existing ones, so
+        a nullable column added to ``schema.py`` would otherwise break every
+        insert into an older database. Only additive, nullable columns are
+        handled; anything more needs a real migration.
+        """
+        inspector = inspect(self.engine)
+        quote = self.engine.dialect.identifier_preparer.quote
+        with self.engine.begin() as conn:
+            for table in S.metadata.sorted_tables:
+                if not inspector.has_table(table.name):
+                    continue
+                present = {c["name"] for c in inspector.get_columns(table.name)}
+                for column in table.columns:
+                    if column.name in present or not column.nullable:
+                        continue
+                    ddl_type = column.type.compile(dialect=self.engine.dialect)
+                    conn.execute(text(
+                        f"ALTER TABLE {quote(table.name)} "
+                        f"ADD COLUMN {quote(column.name)} {ddl_type}"
+                    ))
+                    log.info("added column %s.%s", table.name, column.name)
 
     def dispose(self) -> None:
         self.engine.dispose()
@@ -257,6 +283,7 @@ class Store:
                     "taxonomy": f.taxonomy, "zone": f.zone, "what": f.what, "why": f.why,
                     "not_this": f.not_this, "action": f.action,
                     "signal_ids_json": json.dumps(f.signal_ids),
+                    "event_ids_json": json.dumps(f.event_ids),
                     "evidence_kinds_json": json.dumps(f.evidence_kinds),
                     "entities_json": json.dumps([e.to_dict() for e in f.entities]),
                     "suppressed": f.suppressed, "suppressed_reason": f.suppressed_reason,

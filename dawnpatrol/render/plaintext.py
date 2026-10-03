@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import unicodedata
 
-from ..models import Finding, Report, SourceHealth
+from ..models import SUSPECTED_NOTE, Finding, Report, SourceHealth
 
 INDENT = "  "
 
@@ -150,7 +150,11 @@ def render(report: Report) -> str:
         lines += format_block("No action required. Baseline activity only.", INDENT)
 
     # 10
-    lines += heading(10, "Data quality and caveats")
+    lines += heading(10, "Detection gaps")
+    lines += _detection_gaps(report)
+
+    # 11
+    lines += heading(11, "Data quality and caveats")
     lines += _data_quality(report)
 
     footer = [
@@ -214,6 +218,7 @@ def _finding_block(finding: Finding) -> list[str]:
     lines = [""]
     lines += format_block(f"[{finding.severity.label()}] {finding.id} - {finding.title}", INDENT)
     body = [
+        ("Basis", SUSPECTED_NOTE if finding.suspected else ""),
         ("Zone", finding.zone),
         ("Confidence", str(finding.confidence)),
         ("What", finding.what),
@@ -230,6 +235,8 @@ def _finding_block(finding: Finding) -> list[str]:
             lines += format_block(f"Reputation: {ref.summary}", INDENT * 2)
     if finding.attribution_caveat:
         lines += format_block(f"Attribution: {finding.attribution_caveat}", INDENT * 2)
+    if finding.event_ids:
+        lines += format_block(f"Events: {finding.event_refs}", INDENT * 2)
     for adjustment in finding.adjustments:
         lines += format_block(f"Adjusted: {adjustment}", INDENT * 2)
     return lines
@@ -275,6 +282,19 @@ def _segment_client_counts(report: Report) -> dict[str, dict[str, int]]:
             zone = m.key[len("zone."):-len(".fw_clients")]
             counts.setdefault(zone, {})["fw"] = int(m.value)
     return counts
+
+
+def _detection_gaps(report: Report) -> list[str]:
+    lines: list[str] = []
+    for gap in report.detection_gaps:
+        lines += format_block(f"- {gap.text()}", INDENT)
+    if report.rejected_findings:
+        lines += format_block("Rejected by the adjudicator, so not reported as findings:", INDENT)
+        for rejection in report.rejected_findings:
+            lines += format_block(f"- {rejection}", INDENT * 2)
+    if not lines:
+        lines += format_block("None reported.", INDENT)
+    return lines
 
 
 def _data_quality(report: Report) -> list[str]:

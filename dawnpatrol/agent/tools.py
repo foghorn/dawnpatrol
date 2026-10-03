@@ -111,7 +111,7 @@ class ToolBox:
         if signal is None:
             return (f"unknown signal_id {signal_id!r}. Known ids: "
                     f"{', '.join(sorted(self.signals)[:20])}")
-        rows = self.query.sample_by_dedup(signal.support, n=n) if signal.support else []
+        rows = self.query.sample_by_dedup(signal.support, n=n, with_id=True) if signal.support else []
         if not rows:
             rows = self._sample_from_entities(signal, n)
         return json.dumps({"signal_id": signal_id, "evidence": signal.evidence,
@@ -120,14 +120,14 @@ class ToolBox:
     def _sample_from_entities(self, signal: Signal, n: int) -> list[dict[str, Any]]:
         for entity in signal.entities:
             if entity.type == "ip":
-                rows = self.query.sample(n=n, src_ip=entity.value)
+                rows = self.query.sample(n=n, with_id=True, src_ip=entity.value)
                 if rows:
                     return rows
-                rows = self.query.sample(n=n, client_ip=entity.value)
+                rows = self.query.sample(n=n, with_id=True, client_ip=entity.value)
                 if rows:
                     return rows
             elif entity.type == "domain":
-                rows = self.query.sample(n=n, domain=entity.value)
+                rows = self.query.sample(n=n, with_id=True, domain=entity.value)
                 if rows:
                     return rows
         return []
