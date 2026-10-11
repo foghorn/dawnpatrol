@@ -46,9 +46,10 @@ already in progress"` response.
 |---|---|---|
 | `list_reports` | `(limit=10)` | Recent runs: id, status, findings, cost, window. |
 | `get_latest_report` | `(format="text")` | The most recently delivered report. `format`: `text` \| `json` \| `markdown`. |
-| `get_report` | `(run_id, format="text")` | A specific past report by id (from `list_reports`). |
-| `describe_event_schema` | `()` | The event-store schema and example queries. Call this before `query_events`. |
-| `query_events` | `(sql, limit=200)` | One read-only `SELECT` over events/metrics/signals/entities. Queries against `events` must filter by `run_id`. |
+| `get_report` | `(run_id, format="text")` | A specific past report by id (from `list_reports`), or `latest` for the newest. An unknown id returns the five most recent ids. |
+| `get_events` | `(kind="any", src_ip="", dst_ip="", client_ip="", domain="", action="", dst_port=0, limit=20)` | Raw events from the latest run, newest first, with no SQL. Every filter is an optional exact match; canary events are left out. |
+| `describe_event_schema` | `()` | The current run id, the real column names, and example queries. Call this before `query_events`. |
+| `query_events` | `(sql, limit=200)` | One read-only `SELECT` over events/metrics/signals/entities, for counting and grouping. Queries against `events` must filter by the latest run's `run_id`. |
 | `get_metric_history` | `(key, days=30)` | A metric's time series, for trend questions. |
 | `get_network_profile` | `()` | The zones/hosts/policy/quirks documentation - the same text the analysis agent sees. |
 | `list_source_plugins` | `()` | Which sources are enabled - the valid `sources` values for the next tool. |
@@ -71,6 +72,15 @@ that file exactly like `get_latest_report` does. The *internal* stage-7 investig
 agent gets the identically-named `get_device_directory` tool too (`agent/tools.py`), but
 that one reads the live, in-progress run's directory - this one reads the most recently
 *completed* run's. See `docs/ARCHITECTURE.md` §6.4 and `docs/components/sources.md`.
+
+**Written for weak models as well as strong ones.** Every tool and every parameter
+carries a description, fixed choices are enums (`format`, `kind`), and optional filters
+use flat defaults (`""`, `0`, `"any"`) rather than nullable types, which small models
+often get wrong. A test fails if any tool or parameter is left undescribed. Errors
+are written to be copied from: when `query_events` rejects a query, the response
+includes the current run id and a working example query; when a query fails on a
+column name, it includes every readable table's real columns. `get_events` exists so
+a model that only wants to look at events never has to write SQL at all.
 
 `trigger_analysis` is the one tool with a side effect, and it's worth being precise
 about what "without emailing" means mechanically: it calls
@@ -186,7 +196,7 @@ integration tests) or Claude Code's own MCP connector both work unmodified again
 
 ## Build your own tool
 
-Every tool is a thin function registered in `mcpserver/server.py`'s `build_app()`,
+Every tool is a thin function registered in `mcpserver/server.py`'s `build_server()`,
 backed by a method on `mcpserver.tools.ToolContext`:
 
 ```python
@@ -194,7 +204,7 @@ backed by a method on `mcpserver.tools.ToolContext`:
 def list_suppressions(self) -> dict:
     return {"suppressions": self.store.active_suppressions()}
 
-# server.py, inside build_app()
+# server.py, inside build_server()
 @mcp.tool()
 def list_suppressions() -> dict:
     """List active suppressions - tuned-out false positives, with their expiry."""
@@ -205,7 +215,9 @@ The pattern to keep: **the tool method should be a thin wrapper over something t
 already exists** - a `Store` method, a `Runner` call, a validated query - not new logic
 written for MCP specifically. If what you want to expose doesn't have a non-MCP
 equivalent yet (a CLI command, an internal method), build that first; the MCP tool
-should be the second interface onto it, not the first.
+should be the second interface onto it, not the first. Describe every parameter with
+`Annotated[..., Field(description=...)]`: `test_every_tool_and_parameter_is_described`
+checks it.
 
 ### Wire it up and test it
 

@@ -6,9 +6,9 @@ dozen metrics and signals - the ~25k tokens of dense, numeric evidence the model
 reasons over. They are pure functions: no network, no model calls, which is what makes
 them fast to iterate on and trivial to test against synthetic data.
 
-Ten ship today: `firewall_volume`, `firewall_patterns`, `dns_anomalies`, `novel_clients`,
-`beaconing`, `auth_activity`, `segment_review`, `data_volume`, `correlation`,
-`baseline_delta`. This
+Eleven ship today: `firewall_volume`, `firewall_patterns`, `traceroute`, `dns_anomalies`,
+`novel_clients`, `beaconing`, `auth_activity`, `segment_review`, `data_volume`,
+`correlation`, `baseline_delta`. This
 guide explains the contract and query API, gives a one-paragraph mechanism summary of
 every analyzer, then walks through `firewall_patterns.py` in full because it exercises
 every part of the contract, and finally shows you how to add another.
@@ -149,6 +149,16 @@ more, with enough hours of coverage for that median to mean anything).
 shapes from local evidence alone - reputation is applied later, by the model, and can
 only corroborate. Sweep membership is computed first and excluded from everything after
 it, so one `/24` sweep is never double-reported as forty individual probers.
+
+**`traceroute`** (order 25) finds hosts tracing the route into another internal zone. A
+traceroute leaves the same mark in a firewall log whatever its protocol (ICMP for
+Windows `tracert`, UDP or TCP elsewhere): probes from one source to one destination with
+consecutive TTLs starting at 1. Ordinary traffic arrives with a TTL far above that, so
+the analyzer reads only events with a TTL of 30 or less, which keeps the query small. A
+trace from a less trusted zone into a more trusted one, or to three or more internal
+hosts, is MEDIUM; anything else is LOW. Traces from outside are left to
+`firewall_patterns`' stepped-TTL check, because an internet packet's TTL has already
+fallen by many hops before it reaches the edge.
 
 **`dns_anomalies`** (order 30) does the most real detection of any analyzer, because DNS
 is usually the most compromise-relevant telemetry available without endpoint agents:

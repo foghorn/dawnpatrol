@@ -386,6 +386,7 @@ to connect to directly:
 | Tool | Does |
 |---|---|
 | `list_reports` / `get_latest_report` / `get_report` | Read past reports - the same files the `file` output writes. |
+| `get_events` | Raw events from the latest run, filtered by exact match - no SQL needed. |
 | `describe_event_schema` / `query_events` | The same guarded read-only SQL the investigation agent uses: one `SELECT`, an allowlisted set of tables, a row cap. |
 | `get_metric_history` | A metric's time series, for trend questions. |
 | `get_network_profile` | The zones/hosts/policy/quirks documentation from `profile.yml`. |

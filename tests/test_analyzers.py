@@ -1329,3 +1329,101 @@ def test_internal_to_internal_transfer_never_counts_as_egress(store, profile, wi
     by_key = {m.key: m.value for m in result.metrics}
     assert by_key["fw.bytes.outbound_accepted"] == 1 * MB
     assert result.signals == []
+
+
+# --------------------------------------------------------------------------- #
+# Traceroute
+# --------------------------------------------------------------------------- #
+
+
+def _trace(window, src, dst, ttls, proto="icmp", repeats=3, tag="tr"):
+    """Firewall drops shaped like a traceroute: one probe per TTL, repeated."""
+    from dawnpatrol.models import Event, EventKind
+
+    return [
+        Event(ts=window.end, source="synthetic", kind=EventKind.FIREWALL,
+              dedup_key=f"{tag}-{src}-{dst}-{ttl}-{n}", src_ip=src, dst_ip=dst,
+              proto=proto, ttl=ttl, pkt_len=44, action="drop")
+        for ttl in ttls for n in range(repeats)
+    ]
+
+
+@pytest.mark.parametrize("ttls,expected", [
+    ({1, 2, 3, 4, 5}, 5),
+    ({2, 3, 4, 5, 9}, 4),
+    ({1, 3, 5, 7}, 1),
+    ({5, 6, 7, 8, 9}, 0),
+    (set(), 0),
+])
+def test_ladder_length(ttls, expected):
+    from dawnpatrol.analyzers.traceroute import ladder_length
+
+    assert ladder_length(ttls) == expected
+
+
+def test_fixture_traffic_produces_no_traceroute(q, profile, baseline):
+    from dawnpatrol.analyzers.traceroute import TracerouteAnalyzer
+
+    result = TracerouteAnalyzer().run(q, profile, baseline)
+    assert result.signals == []
+    metric = next(m for m in result.metrics if m.key == "recon.internal_traceroute_sources")
+    assert metric.value == 0
+
+
+def test_traceroute_from_a_less_trusted_zone_into_the_lan_is_medium(
+        q, profile, baseline, window):
+    from dawnpatrol.analyzers.traceroute import TracerouteAnalyzer
+
+    q.store.insert_events(q.run_id, _trace(window, "10.10.15.20", "10.10.0.38",
+                                           range(1, 9)))
+    result = TracerouteAnalyzer().run(q, profile, baseline)
+
+    [signal] = result.signals
+    assert signal.taxonomy == "recon.internal_traceroute"
+    assert signal.severity_hint == Severity.MEDIUM
+    assert signal.evidence["into_more_trusted_zone"] is True
+    [dest] = signal.evidence["destinations"]
+    assert dest["ttl_ladder"] == [1, 8]
+    assert dest["proto"] == "icmp"
+    assert dest["probes"] == 24
+    assert signal.support, "sample_events needs dedup keys to drill into"
+
+
+def test_traceroute_from_the_lan_into_a_less_trusted_zone_is_low(
+        q, profile, baseline, window):
+    from dawnpatrol.analyzers.traceroute import TracerouteAnalyzer
+
+    q.store.insert_events(q.run_id, _trace(window, "10.10.0.38", "10.10.50.7",
+                                           range(1, 6), proto="udp"))
+    [signal] = TracerouteAnalyzer().run(q, profile, baseline).signals
+    assert signal.severity_hint == Severity.LOW
+    assert signal.evidence["into_more_trusted_zone"] is False
+
+
+def test_tracing_several_internal_hosts_is_mapping_and_medium(q, profile, baseline, window):
+    from dawnpatrol.analyzers.traceroute import TracerouteAnalyzer
+
+    events = []
+    for dst in ("10.10.50.7", "10.10.50.8", "10.10.15.9"):
+        events += _trace(window, "10.10.0.38", dst, range(1, 6))
+    q.store.insert_events(q.run_id, events)
+
+    [signal] = TracerouteAnalyzer().run(q, profile, baseline).signals
+    assert signal.severity_hint == Severity.MEDIUM
+    assert signal.evidence["distinct_destinations"] == 3
+    assert "3 hosts" in signal.title
+
+
+@pytest.mark.parametrize("src,dst,ttls", [
+    ("10.10.15.20", "10.10.0.38", [2, 2, 2, 2]),          # constant low TTL
+    ("10.10.15.20", "10.10.0.38", [1, 3, 5, 7, 9]),       # not consecutive
+    ("10.10.15.20", "10.10.0.38", range(6, 12)),          # starts too high
+    ("10.10.15.20", "10.10.15.21", range(1, 9)),          # same zone
+    ("198.51.100.7", "10.10.0.38", range(1, 9)),          # from outside
+])
+def test_shapes_that_are_not_an_internal_traceroute(q, profile, baseline, window,
+                                                    src, dst, ttls):
+    from dawnpatrol.analyzers.traceroute import TracerouteAnalyzer
+
+    q.store.insert_events(q.run_id, _trace(window, src, dst, ttls, repeats=1))
+    assert TracerouteAnalyzer().run(q, profile, baseline).signals == []

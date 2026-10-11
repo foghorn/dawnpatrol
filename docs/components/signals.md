@@ -52,6 +52,17 @@ a note, since it's benign by construction.
 Sweep members are computed first and excluded from prober classification, so one sweep
 is never double-reported as dozens of individual probers.
 
+## `traceroute` (order 25)
+
+Internal hosts tracing the route into another internal zone. Protocol-independent: the
+signature is a ladder of consecutive TTLs from one source to one destination, starting
+at 3 or lower and at least 4 steps long. Same-zone traffic and traces from outside are
+ignored. Emits one metric, `recon.internal_traceroute_sources`, every run.
+
+| Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Key evidence |
+|---|---|---|---|---|---|
+| `recon.traceroute.<src_ip>` | `recon.internal_traceroute` | MEDIUM if the source zone is less trusted than any destination zone, or it traced ≥3 internal hosts; otherwise LOW | 0.8 | An internal host sent a TTL ladder to a host in a different internal zone | `source_zone`, `source_trust`, `into_more_trusted_zone`, `destinations` (zone, protocol, TTL ladder, probes, first and last seen), `distinct_destinations`, `prior_runs_with_this_source` |
+
 ## `dns_anomalies` (order 30)
 
 DNS is usually the most compromise-relevant telemetry available, so this analyzer does

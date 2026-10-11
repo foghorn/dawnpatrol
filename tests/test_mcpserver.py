@@ -78,10 +78,18 @@ def test_get_report_finds_by_run_id_across_date_folders(toolctx, settings):
     assert out["report"]["finding_count"] == 2
 
 
-def test_get_report_unknown_run_id_is_a_clear_error(toolctx):
+def test_get_report_unknown_run_id_is_a_clear_error(toolctx, store, window):
+    store.start_run("20261011T060002Z-3faf83", 1, window.start, window)
     out = toolctx.get_report("does-not-exist")
-    assert "error" in out
     assert "does-not-exist" in out["error"]
+    assert out["recent_run_ids"] == ["20261011T060002Z-3faf83"]
+
+
+@pytest.mark.parametrize("run_id", ["latest", "Latest", " last ", "most recent", ""])
+def test_get_report_treats_latest_as_the_newest_report(toolctx, settings, run_id):
+    """A weak model asked for run_id='latest' rather than calling get_latest_report."""
+    (settings.output_dir / "latest.txt").write_text("NEWEST", encoding="utf-8")
+    assert toolctx.get_report(run_id)["body"] == "NEWEST"
 
 
 # --------------------------------------------------------------------------- #
@@ -123,6 +131,110 @@ def test_query_events_rejects_scoping_to_a_run_other_than_the_current_one(toolct
     out = toolctx.query_events("SELECT * FROM events WHERE run_id='some-other-run'")
     assert "error" in out
     assert "rejected" in out["error"]
+
+
+def _finished_run_with_events(store, window, run_id="20261011T060002Z-3faf83"):
+    from dawnpatrol.canary import CANARY_SOURCE
+    from dawnpatrol.models import Event, EventKind
+
+    store.start_run(run_id, 1, window.start, window)
+    store.finish_run(run_id, finished_at=window.end, status="GREEN", finding_count=0)
+    store.insert_events(run_id, [
+        Event(ts=window.start, source="synthetic", kind=EventKind.FIREWALL,
+              dedup_key="fw1", src_ip="203.0.113.9", dst_ip="10.0.0.5",
+              dst_port=22, action="drop"),
+        Event(ts=window.end, source="synthetic", kind=EventKind.DNS,
+              dedup_key="dns1", client_ip="10.0.0.7", domain="example.com"),
+        Event(ts=window.end, source=CANARY_SOURCE, kind=EventKind.FIREWALL,
+              dedup_key="canary1", src_ip="198.51.100.1", action="drop"),
+    ])
+    return run_id
+
+
+def test_unscoped_query_gets_back_the_run_id_and_a_working_example(toolctx, store, window):
+    """The exact query a weak model sent: no run_id, and guessed column names."""
+    run_id = _finished_run_with_events(store, window)
+    out = toolctx.query_events(
+        "SELECT event_type, message, created_at FROM events ORDER BY created_at DESC LIMIT 20")
+
+    assert "rejected" in out["error"]
+    assert out["current_run_id"] == run_id
+    assert "get_events" in out["tip"]
+    example = toolctx.query_events(out["example_query"])
+    assert "error" not in example, "the suggested fix must itself run"
+    assert example["row_count"] == 3
+
+
+def test_wrong_column_names_get_back_the_real_ones(toolctx, store, window):
+    run_id = _finished_run_with_events(store, window)
+    out = toolctx.query_events(
+        f"SELECT event_type, created_at FROM events WHERE run_id = '{run_id}'")
+
+    assert "failed" in out["error"]
+    assert {"kind", "ts", "message"} <= set(out["valid_columns"]["events"])
+    assert "event_type" not in out["valid_columns"]["events"]
+    assert "example_query" in out
+
+
+def test_describe_event_schema_leads_with_the_current_run_id(toolctx, store, window):
+    run_id = _finished_run_with_events(store, window)
+    first_line = toolctx.describe_event_schema().splitlines()[0]
+    assert first_line == f"CURRENT RUN ID: {run_id}"
+
+
+def test_get_events_needs_no_sql_and_skips_canaries(toolctx, store, window):
+    run_id = _finished_run_with_events(store, window)
+    out = toolctx.get_events()
+
+    assert out["run_id"] == run_id
+    assert out["row_count"] == 2
+    assert all("id" in e and "raw_json" not in e for e in out["events"])
+    assert not any(e.get("src_ip") == "198.51.100.1" for e in out["events"])
+
+
+def test_get_events_filters_exactly(toolctx, store, window):
+    _finished_run_with_events(store, window)
+    out = toolctx.get_events(kind="firewall", dst_port=22)
+    assert [e["src_ip"] for e in out["events"]] == ["203.0.113.9"]
+    assert toolctx.get_events(domain="nope.example")["row_count"] == 0
+    # The tool's flat defaults mean "no filter", exactly like omitting them.
+    defaults = toolctx.get_events(kind="any", src_ip="", dst_port=0)
+    assert defaults["filters"] == {} and defaults["row_count"] == 2
+
+
+def test_get_events_rejects_an_unknown_filter(toolctx, store, window):
+    _finished_run_with_events(store, window)
+    out = toolctx.get_events(event_type="dns")
+    assert "event_type" in out["error"]
+    assert "kind" in out["error"]
+
+
+def test_get_events_before_any_run_is_a_clear_error(toolctx):
+    assert "no run" in toolctx.get_events()["error"]
+
+
+def test_event_kind_filter_matches_the_model():
+    from typing import get_args
+
+    from dawnpatrol.mcpserver.server import EventKindFilter
+    from dawnpatrol.models import EventKind
+
+    assert set(get_args(EventKindFilter)) == {k.value for k in EventKind} | {"any"}
+
+
+def test_every_tool_and_parameter_is_described(settings, profile, store):
+    """Weak models lean on these descriptions; none may be left blank."""
+    from dawnpatrol.mcpserver.server import build_server
+
+    settings.mcp.notebook_enabled = True
+    mcp = build_server(settings, profile, store, trigger_run=lambda **_: (None, None))
+    tools = asyncio.run(mcp.list_tools())
+
+    assert {"get_events", "query_events", "add_notebook_entry"} <= {t.name for t in tools}
+    for tool in tools:
+        assert tool.description, f"{tool.name} has no description"
+        for name, prop in tool.input_schema.get("properties", {}).items():
+            assert prop.get("description"), f"{tool.name}.{name} has no description"
 
 
 def test_get_metric_history_empty_is_not_an_error(toolctx):

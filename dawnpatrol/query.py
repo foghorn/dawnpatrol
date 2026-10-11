@@ -368,6 +368,32 @@ class EventQuery:
             })
         return out
 
+    def low_ttl_pairs(self, max_ttl: int, limit: int = 20000,
+                      **filters: Any) -> list[dict[str, Any]]:
+        """Per (source, destination, protocol, TTL) counts for TTLs at or below
+        ``max_ttl``. Ordinary traffic arrives with TTLs far above this, so the
+        result is small, and a traceroute's TTL ladder shows up in it directly."""
+        ttl = cast(S.events.c.ttl, Integer)
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(
+                    S.events.c.src_ip, S.events.c.dst_ip, S.events.c.proto,
+                    ttl.label("ttl"), func.count().label("n"),
+                    func.min(S.events.c.ts).label("first"),
+                    func.max(S.events.c.ts).label("last"),
+                )
+                .where(self._base(**filters), S.events.c.src_ip.is_not(None),
+                       S.events.c.dst_ip.is_not(None), ttl <= max_ttl)
+                .group_by(S.events.c.src_ip, S.events.c.dst_ip, S.events.c.proto, ttl)
+                .limit(limit)
+            ).mappings().all()
+        return [
+            {"src_ip": r["src_ip"], "dst_ip": r["dst_ip"], "proto": r["proto"],
+             "ttl": int(r["ttl"]), "n": int(r["n"]),
+             "first": _aware(r["first"]), "last": _aware(r["last"])}
+            for r in rows
+        ]
+
     def ports_for_source(self, src_ip: str, n: int = 10) -> list[tuple[int, int]]:
         return [(int(p), c) for p, c in self.top("dst_port", n=n, src_ip=src_ip) if p is not None]
 

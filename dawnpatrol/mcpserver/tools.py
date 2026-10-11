@@ -18,9 +18,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from .. import schema as S
 from ..agent import sqlguard
+from ..canary import CANARY_SOURCE
 from ..config import Settings
 from ..profile import Profile
+from ..query import EventQuery
 from ..store import Store
 
 log = logging.getLogger(__name__)
@@ -29,6 +32,16 @@ log = logging.getLogger(__name__)
 # on-demand look. File output still happens, same as any other run, so the
 # result is discoverable afterwards through get_report / get_latest_report.
 MCP_SKIP_OUTPUTS = frozenset({"smtp"})
+
+#: Words a model reaches for when it means "the newest report" rather than an id.
+LATEST_ALIASES = frozenset({"latest", "last", "newest", "recent", "most recent", "current"})
+
+#: Filters get_events accepts, each an exact match on the events column of the
+#: same name. Kept small so a weak model has few ways to get it wrong.
+EVENT_FILTERS = ("kind", "src_ip", "dst_ip", "client_ip", "domain", "action", "dst_port")
+
+#: Columns left out of get_events rows: bulky, and never needed to read an event.
+_HIDDEN_EVENT_COLUMNS = {"raw_json", "dedup_key", "run_id"}
 
 
 class ToolContext:
@@ -55,34 +68,67 @@ class ToolContext:
 
     def get_report(self, run_id: str, format: str = "text") -> dict[str, Any]:
         run_id = run_id.strip()
-        if not run_id:
-            return {"error": "run_id is required"}
+        if not run_id or run_id.lower() in LATEST_ALIASES:
+            return self.get_latest_report(format)
         suffix = _suffix_for(format)
         matches = glob.glob(str(self.settings.output_dir / "*" / f"report-{run_id}.{suffix}"))
         if not matches:
+            recent = [r["run_id"] for r in self.store.recent_runs(5)]
             return {"error": f"no {suffix} report found on disk for run_id {run_id!r}. "
-                              f"Use list_reports to see available run ids."}
+                             f"Use one of the recent run ids below, or 'latest'.",
+                    "recent_run_ids": recent}
         return _read_report_file(Path(matches[0]))
 
     # ----- raw and aggregate data --------------------------------------------- #
 
-    def describe_event_schema(self) -> str:
+    def _latest_run_id(self) -> str:
         latest = self.store.recent_runs(1)
-        run_id = latest[0]["run_id"] if latest else "<run_id>"
-        return sqlguard.describe_schema(run_id, self.settings.db.dialect)
+        return latest[0]["run_id"] if latest else ""
+
+    def describe_event_schema(self) -> str:
+        run_id = self._latest_run_id() or "<run_id>"
+        return (f"CURRENT RUN ID: {run_id}\n"
+                f"Every query against `events` must contain: WHERE run_id = '{run_id}'\n\n"
+                + sqlguard.describe_schema(run_id, self.settings.db.dialect))
 
     def query_events(self, sql: str, limit: int = 200) -> dict[str, Any]:
-        latest = self.store.recent_runs(1)
-        run_id = latest[0]["run_id"] if latest else ""
+        run_id = self._latest_run_id()
         try:
             safe_sql, cap = sqlguard.validate(sql, run_id, limit)
         except sqlguard.SQLRejected as exc:
-            return {"error": f"query rejected: {exc}"}
+            # The fix goes in the response, not just the rule: a weak model
+            # copies what it is shown far more reliably than it applies advice.
+            return {"error": f"query rejected: {exc}",
+                    "current_run_id": run_id,
+                    "example_query": _example_query(run_id),
+                    "tip": "Or call get_events, which needs no SQL."}
         try:
             columns, rows = self.store.readonly_sql(safe_sql, max_rows=cap)
         except Exception as exc:  # noqa: BLE001 - surface the error to the caller
-            return {"error": f"query failed: {type(exc).__name__}: {exc}"}
+            result: dict[str, Any] = {"error": f"query failed: {type(exc).__name__}: {exc}"}
+            if "column" in str(exc).lower():
+                result["valid_columns"] = readable_columns()
+                result["example_query"] = _example_query(run_id)
+            return result
         return {"columns": columns, "row_count": len(rows), "rows": rows}
+
+    def get_events(self, limit: int = 20, **filters: Any) -> dict[str, Any]:
+        run_id = self._latest_run_id()
+        if not run_id:
+            return {"error": "no run has been recorded yet, so there are no events"}
+        unknown = set(filters) - set(EVENT_FILTERS)
+        if unknown:
+            return {"error": f"unknown filter(s): {', '.join(sorted(unknown))}. "
+                             f"Valid filters: {', '.join(EVENT_FILTERS)}"}
+        # Empty, zero and "any" all mean "no filter": weak models handle flat
+        # defaults far better than optional/nullable parameters.
+        active = {k: v for k, v in filters.items() if v not in (None, "", 0, "any")}
+        # Canary events are synthetic test traffic, never real activity.
+        query = EventQuery(self.store, run_id, exclude_sources={CANARY_SOURCE})
+        rows = query.sample(n=max(1, min(limit, 200)), with_id=True, **active)
+        return {"run_id": run_id, "filters": active, "row_count": len(rows),
+                "events": [{k: v for k, v in row.items() if k not in _HIDDEN_EVENT_COLUMNS}
+                           for row in rows]}
 
     def get_metric_history(self, key: str, days: int = 30) -> dict[str, Any]:
         days = max(1, min(days, 365))
@@ -201,6 +247,17 @@ class ToolContext:
         if report:
             result["executive_summary"] = report.executive_summary
         return result
+
+
+def readable_columns() -> dict[str, list[str]]:
+    """Real column names of every table query_events may read."""
+    return {name: [c.name for c in S.metadata.tables[name].columns]
+            for name in sorted(S.AGENT_READABLE)}
+
+
+def _example_query(run_id: str) -> str:
+    return (f"SELECT ts, kind, src_ip, dst_ip, domain, action, message FROM events "
+            f"WHERE run_id = '{run_id or '<run_id>'}' ORDER BY ts DESC LIMIT 20")
 
 
 def _suffix_for(format: str) -> str:

@@ -43,6 +43,7 @@ known_quirks:
 | Field | Mechanical effect |
 |---|---|
 | `zones[].cidrs` | `Profile.zone_of(ip)` resolves any address to a zone name at normalize time (`Source.assign_zones`), or to the synthetic `"private"`/`"external"` otherwise. Every `src_zone`/`dst_zone` on every `Event` traces back to this. |
+| `zones[].trust` | `untrusted`, `semi-trusted`, `dmz` and `guest` mark a less trusted zone; `unknown` (the default when omitted) is neither; any other value, such as `trusted`, counts as trusted. Raises severity where a less trusted zone is involved: novel clients and accepted inbound sessions there (`novel_clients`, `segment_review`), and traceroutes from it into a more trusted zone (`traceroute`). |
 | `zones[].gateway` | Combined with `policy.nat_attribution_limited_behind` (see below) to generate the "traffic is NATed, per-device attribution isn't possible" caveat automatically, on any finding whose subject is that gateway. |
 | `zones[].expected_egress_domains` | `segment_review.py`'s unexpected-egress check: DNS resolution from that zone to anything not matching this list becomes a signal. An empty list makes every destination "unexpected," which is noisy - fill this in before relying on that analyzer. |
 | `policy.approved_resolvers` | Any internal host resolving DNS elsewhere is a policy violation - a HIGH-severity signal, not a preference. |

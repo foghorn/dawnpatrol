@@ -69,6 +69,7 @@ dawnpatrol/
 │   ├── analyzers/                  # ── PLUGIN FOLDER (discovered, §5.2) ──
 │   │   ├── firewall_volume.py
 │   │   ├── firewall_patterns.py
+│   │   ├── traceroute.py
 │   │   ├── dns_anomalies.py
 │   │   ├── novel_clients.py
 │   │   ├── beaconing.py
@@ -408,8 +409,8 @@ first observes it), `baseline.series(key, days=30)`, `baseline.recurrence(taxono
 entity_value)`, `baseline.watchlist()`. Newly-seen-domain detection is a real database
 query, not a diff against a note.
 
-Ten analyzers ship, run in `order`: `firewall_volume` (10), `firewall_patterns` (20),
-`dns_anomalies` (30), `novel_clients` (35), `beaconing` (40), `auth_activity` (45),
+Eleven analyzers ship, run in `order`: `firewall_volume` (10), `firewall_patterns` (20),
+`traceroute` (25), `dns_anomalies` (30), `novel_clients` (35), `beaconing` (40), `auth_activity` (45),
 `segment_review` (50), `data_volume` (55), `correlation` (60), `baseline_delta` (900, runs
 last deliberately, so it can see what every other analyzer produced). See
 `docs/components/analyzers.md` for what each one does and the full `EventQuery`/`Baseline`
@@ -1034,6 +1035,7 @@ pipeline already does:
 |---|---|
 | `list_reports`, `get_latest_report`, `get_report` | the files `file_report.py` already writes |
 | `describe_event_schema`, `query_events` | the identical `agent/sqlguard.py` validator the in-run agent's SQL tool uses (§6.3) |
+| `get_events` | `EventQuery.sample()` over the latest run, canary events excluded — the same helper the in-run agent's `sample_events` uses |
 | `get_metric_history` | `Store.metric_history` |
 | `get_network_profile` | `Profile.as_context()` — the same text block cached into the harness system prompt |
 | `list_source_plugins` | `registry.discover` + `env_satisfied` — the same introspection `list-plugins` uses |
@@ -1134,7 +1136,7 @@ full end-to-end pipeline exercise against a stubbed provider. CI runs the same s
   test without depending on a "scrubbed" real capture staying scrubbed.
 - **Analyzers** against synthetic event sets with known-correct expected signals: a
   textbook persistent prober, a /24 sweep, conntrack return traffic, a stepped-TTL probe,
-  a DGA burst.
+  an internal traceroute, a DGA burst.
 - **Renderers** — property tests asserting 7-bit ASCII output, all sections present in
   order, no unsubstituted template tokens, every empty section carrying its documented
   empty-state line, and — for both HTML renderers — that attacker-influenced finding
