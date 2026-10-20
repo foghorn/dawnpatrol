@@ -23,7 +23,9 @@ from .tools import ToolContext
 log = logging.getLogger(__name__)
 
 ReportFormat = Annotated[Literal["text", "json", "markdown"], Field(
-    description="text for reading, json for structured fields, markdown for both.")]
+    description="text for reading, json for structured fields, markdown for both. "
+                "If the report was not saved in that format, another saved format "
+                "is returned and a note says which.")]
 
 #: Must match models.EventKind; tests/test_mcpserver.py checks that it does.
 EventKindFilter = Literal["any", "firewall", "dns", "system", "auth", "ids", "flow",

@@ -33,6 +33,11 @@ log = logging.getLogger(__name__)
 # result is discoverable afterwards through get_report / get_latest_report.
 MCP_SKIP_OUTPUTS = frozenset({"smtp"})
 
+#: Report formats in the order to fall back through when the one asked for was
+#: not written. Which formats exist on disk is a deployment choice
+#: (DAWNPATROL_OUTPUT_FILE_FORMATS), so the tools never assume one does.
+_REPORT_SUFFIXES = ("txt", "json", "md")
+
 #: Words a model reaches for when it means "the newest report" rather than an id.
 LATEST_ALIASES = frozenset({"latest", "last", "newest", "recent", "most recent", "current"})
 
@@ -62,22 +67,28 @@ class ToolContext:
         return {"runs": [_jsonable_run(r) for r in rows]}
 
     def get_latest_report(self, format: str = "text") -> dict[str, Any]:
-        suffix = _suffix_for(format)
-        path = self.settings.output_dir / f"latest.{suffix}"
-        return _read_report_file(path)
+        out = self.settings.output_dir
+        result = _read_report_as(format, lambda suffix: out / f"latest.{suffix}")
+        return result or {"error": "no report has been written yet. A report appears "
+                                   "after the first run completes."}
 
     def get_report(self, run_id: str, format: str = "text") -> dict[str, Any]:
         run_id = run_id.strip()
         if not run_id or run_id.lower() in LATEST_ALIASES:
             return self.get_latest_report(format)
-        suffix = _suffix_for(format)
-        matches = glob.glob(str(self.settings.output_dir / "*" / f"report-{run_id}.{suffix}"))
-        if not matches:
+        out = self.settings.output_dir
+
+        def path_for(suffix: str) -> Path | None:
+            matches = glob.glob(str(out / "*" / f"report-{run_id}.{suffix}"))
+            return Path(matches[0]) if matches else None
+
+        result = _read_report_as(format, path_for)
+        if result is None:
             recent = [r["run_id"] for r in self.store.recent_runs(5)]
-            return {"error": f"no {suffix} report found on disk for run_id {run_id!r}. "
+            return {"error": f"no report found on disk for run_id {run_id!r}. "
                              f"Use one of the recent run ids below, or 'latest'.",
                     "recent_run_ids": recent}
-        return _read_report_file(Path(matches[0]))
+        return result
 
     # ----- raw and aggregate data --------------------------------------------- #
 
@@ -266,16 +277,41 @@ def _suffix_for(format: str) -> str:
             "json": "json", "markdown": "md", "md": "md"}.get(fmt, "txt")
 
 
+_FORMAT_NAMES = {"txt": "text", "json": "json", "md": "markdown"}
+
+
+def _read_report_as(format: str,
+                    path_for: Callable[[str], Path | None]) -> dict[str, Any] | None:
+    """Read a report in the requested format, or in the first format that exists.
+
+    Returns None only when no copy exists in any format.
+    """
+    wanted = _suffix_for(format)
+    available = [s for s in _REPORT_SUFFIXES if (p := path_for(s)) and p.is_file()]
+    if not available:
+        return None
+    suffix = wanted if wanted in available else available[0]
+    result = _read_report_file(path_for(suffix))
+    if suffix != wanted:
+        result["note"] = (f"this deployment does not write {_FORMAT_NAMES[wanted]} "
+                          f"reports, so this is the {_FORMAT_NAMES[suffix]} version. "
+                          f"Formats available: "
+                          f"{', '.join(_FORMAT_NAMES[s] for s in available)}.")
+    return result
+
+
 def _read_report_file(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        return {"error": f"no report file at {path}"}
     body = path.read_text(encoding="utf-8")
     if path.suffix == ".json":
         try:
-            return {"run_id": path.stem, "report": json.loads(body)}
+            report = json.loads(body)
         except json.JSONDecodeError:
             pass
-    return {"path": str(path), "body": body}
+        else:
+            # The id comes from the report itself: the file may be latest.json.
+            return {"run_id": report.get("run_id"), "format": "json", "report": report}
+    return {"path": str(path), "format": _FORMAT_NAMES.get(path.suffix.lstrip("."), "text"),
+            "body": body}
 
 
 def _jsonable_run(row: dict[str, Any]) -> dict[str, Any]:

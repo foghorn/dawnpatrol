@@ -69,6 +69,42 @@ def test_get_latest_report_reads_the_written_file(toolctx, settings):
     assert out["body"] == "REPORT BODY"
 
 
+def test_latest_report_in_an_unwritten_format_falls_back_with_a_note(toolctx, settings):
+    """A weak model asked for markdown; this deployment only writes text and json."""
+    (settings.output_dir / "latest.txt").write_text("REPORT BODY", encoding="utf-8")
+    (settings.output_dir / "latest.json").write_text('{"run_id": "r1"}', encoding="utf-8")
+
+    out = toolctx.get_latest_report(format="markdown")
+
+    assert "error" not in out
+    assert out["body"] == "REPORT BODY"
+    assert out["format"] == "text"
+    assert "does not write markdown" in out["note"]
+    assert "text, json" in out["note"]
+
+
+def test_requested_format_is_used_when_it_exists(toolctx, settings):
+    (settings.output_dir / "latest.txt").write_text("TEXT", encoding="utf-8")
+    (settings.output_dir / "latest.md").write_text("# MD", encoding="utf-8")
+    out = toolctx.get_latest_report(format="markdown")
+    assert out["body"] == "# MD" and "note" not in out
+
+
+def test_json_report_carries_its_real_run_id_not_the_file_name(toolctx, settings):
+    (settings.output_dir / "latest.json").write_text(
+        '{"run_id": "20261020T060001Z-129a55"}', encoding="utf-8")
+    out = toolctx.get_latest_report(format="json")
+    assert out["run_id"] == "20261020T060001Z-129a55"
+
+
+def test_past_report_in_an_unwritten_format_falls_back(toolctx, settings):
+    day_dir = settings.output_dir / "2026-01-01"
+    day_dir.mkdir()
+    (day_dir / "report-abc123.txt").write_text("OLD REPORT", encoding="utf-8")
+    out = toolctx.get_report("abc123", format="markdown")
+    assert out["body"] == "OLD REPORT" and "note" in out
+
+
 def test_get_report_finds_by_run_id_across_date_folders(toolctx, settings):
     day_dir = settings.output_dir / "2026-01-01"
     day_dir.mkdir()

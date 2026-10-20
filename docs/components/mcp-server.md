@@ -45,7 +45,7 @@ already in progress"` response.
 | Tool | Signature | What it does |
 |---|---|---|
 | `list_reports` | `(limit=10)` | Recent runs: id, status, findings, cost, window. |
-| `get_latest_report` | `(format="text")` | The most recently delivered report. `format`: `text` \| `json` \| `markdown`. |
+| `get_latest_report` | `(format="text")` | The most recently delivered report. `format`: `text` \| `json` \| `markdown`. If the deployment didn't write that format (see `DAWNPATROL_OUTPUT_FILE_FORMATS`), returns one it did, with a `note` saying so. |
 | `get_report` | `(run_id, format="text")` | A specific past report by id (from `list_reports`), or `latest` for the newest. An unknown id returns the five most recent ids. |
 | `get_events` | `(kind="any", src_ip="", dst_ip="", client_ip="", domain="", action="", dst_port=0, limit=20)` | Raw events from the latest run, newest first, with no SQL. Every filter is an optional exact match; canary events are left out. |
 | `describe_event_schema` | `()` | The current run id, the real column names, and example queries. Call this before `query_events`. |
