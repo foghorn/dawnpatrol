@@ -272,7 +272,7 @@ rigorous benchmark:
 | `claude-sonnet-5` | anthropic | 10 model calls | 2, correctly synthesized | $0.77 | ~3.3 min |
 | `gpt-5.6-sol` | openai (`/v1/responses`, reasoning `high`) | 6 model calls | 4, correctly grounded | $0.68* | ~4.2 min |
 | `gpt-5.6-sol` | openai_compatible (`/v1/chat/completions`, reasoning forced `none`) | 4 model calls | 1, correctly scoped | $0.34* | ~0.8 min |
-| `gemma4:e2b` (local, via LiteLLM) | openai_compatible | 1 model call, zero tool use | 4, one materially inaccurate | $0.00 (local hardware) | ~2.4 min |
+| `bonsai-2:27b-128k` (local, Ollama on an RTX 5060 Ti 16 GB) | openai_compatible | 7 model calls | 4, correctly grounded | $0.00 (local hardware) | ~13.1 min |
 
 \* Pricing wasn't configured for OpenAI at the time (that designator's own
 `_PRICE_IN`/`_PRICE_OUT`), so these are estimated: the real combined billed cost for both OpenAI
@@ -281,11 +281,24 @@ tokens (input + output).
 
 Sonnet and GPT are both more conservative than Opus about promoting a signal
 to a formal `Findings` entry, folding confirmed-benign ones into narrative
-instead — a behavioral difference, not a quality gap. The local model skipped
-investigation entirely and produced one finding that misread its own cited
-evidence; the anti-fabrication guardrail held (it cited a real signal), but
-that guardrail can't catch a wrong interpretation of what was cited. Read a
-new model's first several reports closely before trusting it unattended.
+instead — a behavioral difference, not a quality gap. The local 27B model
+investigated with real tool use and reached findings comparable to the hosted
+models, including two it correctly matched to known quirks in the profile. It
+is slower, but costs nothing per run.
+
+For a local model, fit matters more than context size. The same model's 160k
+context variant needs about 14.2 GiB and spilled about 1.3 GiB onto the CPU on
+this 16 GB card; its investigate stage took ~74 minutes over 17 model calls.
+The 128k variant (about 12.1 GiB) runs entirely on the GPU, and this run peaked
+at about 49k input tokens per call, well inside its window. Pick a context
+variant that fits entirely in VRAM rather than the largest one. One earlier run
+on the 128k variant stopped with `finish_reason=length` and fell back to the
+hosted model; this model reasons at length (up to ~8.5k output tokens in a
+single call here), so its `_MAX_TOKENS` was raised from 16000 to 32000.
+
+Read a new model's first several reports closely before trusting it
+unattended: the anti-fabrication guardrail ensures every finding cites real
+evidence, but it can't catch a wrong interpretation of what was cited.
 
 ---
 
