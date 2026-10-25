@@ -130,8 +130,10 @@ class AISettings:
     model: str = "claude-opus-5"
     effort: str = "high"
     max_tokens: int = 16000
-    #: Run mechanics, not model capability - deliberately identical across
-    #: every profile (copied in once by _load_ai_profiles), not read here.
+    #: How far one investigation may go. Turns and tool calls default to the
+    #: global DAWNPATROL_AI_MAX_* values and a designator may override them
+    #: (a small-context local model wants a shorter loop); the cost ceiling
+    #: always covers the whole run, so it is never per designator.
     max_tool_calls: int = 25
     max_turns: int = 30
     max_cost_usd: float = 3.00
@@ -176,8 +178,8 @@ class AISettings:
             model=read_env(f"{p}MODEL", "claude-opus-5") or "claude-opus-5",
             effort=(read_env(f"{p}EFFORT", "high") or "high").strip().lower(),
             max_tokens=read_int(f"{p}MAX_TOKENS", 16000),
-            max_tool_calls=max_tool_calls,
-            max_turns=max_turns,
+            max_tool_calls=read_int(f"{p}MAX_TOOL_CALLS", max_tool_calls),
+            max_turns=read_int(f"{p}MAX_TURNS", max_turns),
             max_cost_usd=max_cost_usd,
             task_budget_tokens=read_int(f"{p}TASK_BUDGET_TOKENS", 0),
             refusal_fallback=read_bool(f"{p}REFUSAL_FALLBACK", True),
@@ -245,6 +247,31 @@ def _load_ai_profiles(registry: SecretRegistry) -> tuple[dict[str, AISettings], 
             f"at least {ENV_PREFIX}AI_{active.upper()}_PROVIDER set."
         )
     return profiles, active
+
+
+def _load_ai_fallbacks(profiles: dict[str, AISettings], active: str) -> list[str]:
+    """Designators to try, in order, when the active one fails.
+
+    DAWNPATROL_AI_FALLBACK is a comma-separated list of configured designators.
+    Optional: unset means a failed analysis stage degrades to a statistics-only
+    report, as it always has.
+    """
+    raw = read_env(f"{ENV_PREFIX}AI_FALLBACK", "") or ""
+    fallbacks = [name.strip().lower() for name in raw.split(",") if name.strip()]
+    for name in fallbacks:
+        if name not in profiles:
+            raise ConfigError(
+                f"{ENV_PREFIX}AI_FALLBACK names {name!r}, which is not a configured "
+                f"model ({', '.join(sorted(profiles)) or 'none defined'})."
+            )
+        if name == active:
+            raise ConfigError(
+                f"{ENV_PREFIX}AI_FALLBACK names {name!r}, which is already "
+                f"{ENV_PREFIX}AI_ACTIVE - a model cannot be its own fallback."
+            )
+    if len(set(fallbacks)) != len(fallbacks):
+        raise ConfigError(f"{ENV_PREFIX}AI_FALLBACK lists a model more than once: {raw!r}")
+    return fallbacks
 
 
 # --------------------------------------------------------------------------- #
@@ -352,6 +379,8 @@ class Settings:
     #: one model over the same evidence and compares results.
     ai_profiles: dict[str, AISettings] = field(default_factory=dict)
     ai_active: str = ""
+    #: Designators tried in order when the active one fails (DAWNPATROL_AI_FALLBACK).
+    ai_fallbacks: list[str] = field(default_factory=list)
     enabled_sources: list[str] = field(default_factory=list)
     enabled_analyzers: list[str] = field(default_factory=list)
     enabled_enrichers: list[str] = field(default_factory=list)
@@ -377,6 +406,7 @@ class Settings:
             raise ConfigError(f"{ENV_PREFIX}WINDOW_HOURS must be >= 1")
 
         ai_profiles, ai_active = _load_ai_profiles(registry)
+        ai_fallbacks = _load_ai_fallbacks(ai_profiles, ai_active)
 
         return cls(
             data_dir=data_dir,
@@ -387,6 +417,7 @@ class Settings:
             ai=ai_profiles[ai_active],
             ai_profiles=ai_profiles,
             ai_active=ai_active,
+            ai_fallbacks=ai_fallbacks,
             schedule=ScheduleSettings.from_env(),
             retention=RetentionSettings.from_env(),
             mcp=MCPSettings.from_env(registry),
@@ -401,6 +432,12 @@ class Settings:
             enrichment_enabled=read_bool(f"{ENV_PREFIX}ENRICHMENT_ENABLED", True),
             log_level=(read_env(f"{ENV_PREFIX}LOG_LEVEL", "INFO") or "INFO").upper(),
         )
+
+    @property
+    def ai_chain(self) -> list[tuple[str, AISettings]]:
+        """The active model, then each fallback, in the order a run tries them."""
+        return [(self.ai_active or "default", self.ai),
+                *((name, self.ai_profiles[name]) for name in self.ai_fallbacks)]
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -435,6 +472,7 @@ class Settings:
             "ai_model": self.ai.model,
             "ai_enabled": self.ai.enabled,
             "ai_configured": ", ".join(sorted(self.ai_profiles)) or "(none)",
+            "ai_fallback": ", ".join(self.ai_fallbacks) or "(none)",
             "schedule": self.schedule.cron or "(run once)",
             "retention_raw_days": self.retention.raw_days,
             "retention_ioc_days": self.retention.ioc_days,

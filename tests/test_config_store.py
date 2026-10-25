@@ -221,6 +221,65 @@ def test_global_run_mechanics_are_shared_across_every_ai_designator(monkeypatch,
     assert settings.ai_profiles["two"].max_tool_calls == 7
 
 
+def test_a_designator_can_override_turns_and_tool_calls_but_not_cost(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAWNPATROL_AI_MAX_TOOL_CALLS", "40")
+    monkeypatch.setenv("DAWNPATROL_AI_MAX_TURNS", "50")
+    monkeypatch.setenv("DAWNPATROL_AI_MAX_COST_USD", "6.0")
+    monkeypatch.setenv("DAWNPATROL_AI_LOCAL_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("DAWNPATROL_AI_LOCAL_MAX_TOOL_CALLS", "12")
+    monkeypatch.setenv("DAWNPATROL_AI_LOCAL_MAX_TURNS", "15")
+    monkeypatch.setenv("DAWNPATROL_AI_LOCAL_MAX_COST_USD", "99")
+    monkeypatch.setenv("DAWNPATROL_AI_CLOUD_PROVIDER", "openai")
+    monkeypatch.setenv("DAWNPATROL_AI_ACTIVE", "local")
+
+    settings = Settings.from_env()
+
+    local, cloud = settings.ai_profiles["local"], settings.ai_profiles["cloud"]
+    assert (local.max_tool_calls, local.max_turns) == (12, 15)
+    assert (cloud.max_tool_calls, cloud.max_turns) == (40, 50), "unset falls back to global"
+    assert local.max_cost_usd == cloud.max_cost_usd == 6.0, "cost stays one shared ceiling"
+
+
+def _two_ai_designators(monkeypatch, tmp_path):
+    _clear_ai_env(monkeypatch)
+    monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DAWNPATROL_AI_LOCAL_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("DAWNPATROL_AI_CLOUD_PROVIDER", "openai")
+    monkeypatch.setenv("DAWNPATROL_AI_ACTIVE", "local")
+
+
+def test_ai_fallback_orders_the_chain_after_the_active_model(monkeypatch, tmp_path):
+    _two_ai_designators(monkeypatch, tmp_path)
+    monkeypatch.setenv("DAWNPATROL_AI_FALLBACK", " Cloud ")
+
+    settings = Settings.from_env()
+
+    assert settings.ai_fallbacks == ["cloud"]
+    assert [name for name, _ in settings.ai_chain] == ["local", "cloud"]
+    assert settings.ai_chain[1][1].provider == "openai"
+
+
+def test_no_ai_fallback_means_a_chain_of_one(monkeypatch, tmp_path):
+    _two_ai_designators(monkeypatch, tmp_path)
+    settings = Settings.from_env()
+    assert settings.ai_fallbacks == []
+    assert [name for name, _ in settings.ai_chain] == ["local"]
+
+
+@pytest.mark.parametrize("value,match", [
+    ("typo", "not a configured model"),
+    ("local", "its own fallback"),
+    ("cloud,cloud", "more than once"),
+])
+def test_bad_ai_fallback_is_a_clear_error(monkeypatch, tmp_path, value, match):
+    _two_ai_designators(monkeypatch, tmp_path)
+    monkeypatch.setenv("DAWNPATROL_AI_FALLBACK", value)
+    with pytest.raises(ConfigError, match=match):
+        Settings.from_env()
+
+
 def test_ai_designator_falls_back_to_the_providers_native_key_var(monkeypatch, tmp_path):
     _clear_ai_env(monkeypatch)
     monkeypatch.setenv("DAWNPATROL_DATA_DIR", str(tmp_path))

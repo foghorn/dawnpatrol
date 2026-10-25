@@ -124,6 +124,113 @@ def runner(settings, profile, store, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Model fallback
+# --------------------------------------------------------------------------- #
+
+
+class BrokenProvider(Provider):
+    """A model that fails the way a down or misbehaving server does."""
+
+    name = "broken"
+    mode = "error"    # error | unavailable | budget
+    spend = 0.0
+    calls = 0
+
+    def available(self):
+        return (False, "server unreachable") if self.mode == "unavailable" else (True, "")
+
+    def run_agent(self, *, system_static, system_context, user_message,
+                  tools, max_turns, on_turn=None):
+        BrokenProvider.calls += 1
+        usage = TokenUsage(cost_usd=BrokenProvider.spend, calls=1)
+        if self.mode == "budget":
+            from dawnpatrol.errors import BudgetExceeded
+            raise BudgetExceeded("cost ceiling reached")
+        return AgentRun(usage=usage, error="ReadTimeout: model took too long")
+
+
+@pytest.fixture
+def fallback_runner(runner, settings, monkeypatch):
+    """Active model 'local' is broken; 'cloud' is the working stub."""
+    local = AISettings(enabled=True, provider="broken", model="local-1", max_cost_usd=5.0)
+    cloud = AISettings(enabled=True, provider="stub", model="cloud-1", max_cost_usd=5.0)
+    settings.ai, settings.ai_active = local, "local"
+    settings.ai_profiles = {"local": local, "cloud": cloud}
+    settings.ai_fallbacks = ["cloud"]
+    BrokenProvider.mode, BrokenProvider.spend, BrokenProvider.calls = "error", 0.0, 0
+    StubProvider.seen_ceiling = None
+
+    def build(ai):
+        if ai.provider == "broken":
+            return BrokenProvider(ai)
+        StubProvider.seen_ceiling = ai.max_cost_usd
+        return StubProvider(ai)
+
+    monkeypatch.setattr("dawnpatrol.runner.build_provider", build)
+    return runner
+
+
+@pytest.mark.parametrize("mode", ["error", "unavailable"])
+def test_a_failed_model_falls_back_to_the_next_one(fallback_runner, store, mode):
+    BrokenProvider.mode = mode
+    outcome = fallback_runner.run()
+    report = outcome.report
+
+    assert not report.degraded, "the fallback's analysis made it into the report"
+    assert report.finding_count == 1
+    assert any("fallback model cloud (stub/cloud-1)" in n and "local (broken/local-1) failed"
+               in n for n in report.data_quality)
+    run = store.recent_runs(1)[0]
+    assert (run["provider"], run["model"]) == ("stub", "cloud-1")
+
+
+def test_a_fallback_only_gets_what_is_left_of_the_cost_ceiling(fallback_runner):
+    BrokenProvider.spend = 2.0
+    report = fallback_runner.run().report
+    assert StubProvider.seen_ceiling == pytest.approx(3.0)
+    assert report.usage.cost_usd == pytest.approx(2.0), "spend sums over attempts"
+
+
+def test_hitting_the_cost_ceiling_never_falls_back(fallback_runner):
+    BrokenProvider.mode = "budget"
+    report = fallback_runner.run().report
+    assert report.degraded
+    assert StubProvider.seen_ceiling is None, "the fallback must not have been tried"
+
+
+def test_every_model_failing_degrades_and_names_each_failure(fallback_runner, monkeypatch):
+    monkeypatch.setattr("dawnpatrol.runner.build_provider", lambda ai: BrokenProvider(ai))
+    report = fallback_runner.run().report
+    assert report.degraded
+    note = next(n for n in report.data_quality if "did not complete" in n)
+    assert "local (broken/local-1) failed" in note
+    assert "cloud (stub/cloud-1) failed" in note
+
+
+def test_each_model_call_logs_its_own_token_counts(runner, monkeypatch, caplog):
+    def run_agent(self, *, system_static, system_context, user_message,
+                  tools, max_turns, on_turn=None):
+        # Providers report running totals, so the second call here used
+        # 3000 input (2500 cached) and 700 output tokens.
+        usage = TokenUsage()
+        for call in (TokenUsage(input_tokens=1000, output_tokens=200, calls=1),
+                     TokenUsage(input_tokens=3000, cache_read_tokens=2500,
+                                output_tokens=700, calls=1)):
+            usage.add(call)
+            on_turn(usage)
+        return AgentRun(analysis=StubProvider.analysis, usage=usage, turns=2)
+
+    monkeypatch.setattr(StubProvider, "run_agent", run_agent)
+    with caplog.at_level("INFO", logger="dawnpatrol.agent.harness"):
+        runner.run()
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("model call")]
+    assert lines == [
+        "model call 1: 1000 input tokens (0 cached), 200/16000 output tokens",
+        "model call 2: 3000 input tokens (2500 cached), 700/16000 output tokens",
+    ]
+
+
+# --------------------------------------------------------------------------- #
 # Full run
 # --------------------------------------------------------------------------- #
 

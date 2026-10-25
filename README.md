@@ -181,6 +181,35 @@ runs until `DAWNPATROL_AI_ACTIVE` changes to `main` - no other edit needed.
 just the active one, so a typo in a config you're not currently using still
 gets caught.
 
+To fall back to another model when the active one fails (unreachable, erroring,
+timing out, or finishing without an analysis), list it in
+`DAWNPATROL_AI_FALLBACK`. With the configs above, `DAWNPATROL_AI_FALLBACK=main`
+runs `local` first and `main` only if `local` fails. The report says when a
+fallback ran and why. `DAWNPATROL_AI_MAX_COST_USD` covers the whole run, not
+each attempt, and a run stopped by that ceiling never falls back.
+
+Turn and tool-call limits default to `DAWNPATROL_AI_MAX_TURNS` and
+`DAWNPATROL_AI_MAX_TOOL_CALLS`, and any designator can set its own. Every turn
+resends the whole conversation, so a local model with a small context window
+may need a shorter investigation than a hosted one:
+
+```bash
+DAWNPATROL_AI_LOCAL_MAX_TURNS=20
+DAWNPATROL_AI_LOCAL_MAX_TOOL_CALLS=15
+```
+
+Each attempt logs the limits it runs under (`budget: max $3.00, 20 turns, 15 tool
+calls`), and each model call logs its own token counts:
+
+```
+model call 9: 112340 input tokens (98112 cached), 15872/16000 output tokens
+```
+
+If a local model stops with `finish_reason=length`, those lines show which limit
+it hit: input plus output nearing the model's context window (use a variant with a
+larger window, or lower that designator's `_MAX_TURNS`), or output reaching
+`_MAX_TOKENS` (raise it).
+
 `openai_compatible` points at any server speaking `/v1/chat/completions` —
 Ollama, LM Studio, vLLM, LiteLLM, Open-WebUI, or a compatible gateway that
 proxies OpenAI models through that same shape. It also works pointed directly
@@ -219,8 +248,9 @@ hostnames, and account names. Use `openai` for OpenAI's own models; use
 ones that happen to route to OpenAI models under the hood - the proxy's own
 compatibility shape is what matters there, not the upstream model.
 
-Cost is bounded by the shared, non-per-model `DAWNPATROL_AI_MAX_COST_USD` and
-`..._MAX_TOOL_CALLS`, plus each designator's own `_EFFORT`. Tripping the cost
+Cost is bounded by the shared, non-per-model `DAWNPATROL_AI_MAX_COST_USD`, by
+`..._MAX_TOOL_CALLS` and `..._MAX_TURNS` (which a designator can override with its
+own `_MAX_TOOL_CALLS`/`_MAX_TURNS`), and by each designator's own `_EFFORT`. Tripping the cost
 ceiling degrades the run to a statistics-only report — never to no report at
 all. Each designator's own `_PRICE_IN`/`_PRICE_OUT`/`_PRICE_CACHE_READ`/
 `_PRICE_CACHE_WRITE` drive its cost accounting and default to 0.0

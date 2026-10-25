@@ -274,11 +274,15 @@ def cmd_validate(settings, profile, store, args) -> int:
               "until the MCP server itself is also enabled")
     providers = available_providers()
     print(f"\nproviders discovered: {', '.join(sorted(providers)) or 'none'}")
-    print(f"\nAI models configured (active: {settings.ai_active!r}):")
+    fallback = (f", then fallback: {' -> '.join(settings.ai_fallbacks)}"
+                if settings.ai_fallbacks else "")
+    print(f"\nAI models configured (active: {settings.ai_active!r}{fallback}):")
     failed = False
     for name in sorted(settings.ai_profiles):
         ai = settings.ai_profiles[name]
-        marker = " <- active" if name == settings.ai_active else ""
+        marker = (" <- active" if name == settings.ai_active
+                  else f" <- fallback {settings.ai_fallbacks.index(name) + 1}"
+                  if name in settings.ai_fallbacks else "")
         cls = providers.get(ai.provider)
         if cls is None:
             print(f"  {name} ({ai.provider}/{ai.model}): ERROR - provider not found{marker}")

@@ -9,7 +9,7 @@ from typing import Any
 
 from ..analyzers.baseline import Baseline
 from ..budget import Budget
-from ..config import Settings
+from ..config import AISettings, Settings
 from ..context import RunContext
 from ..enrichment.broker import EnrichmentBroker
 from ..errors import BudgetExceeded, ProviderError
@@ -34,6 +34,9 @@ class HarnessResult:
     tool_calls: int = 0
     turns: int = 0
     notes: list[str] = field(default_factory=list)
+    #: The run's cost ceiling stopped the model. Not a provider failure, so it
+    #: never triggers a fallback - that would only spend more.
+    budget_exceeded: bool = False
 
     @property
     def ok(self) -> bool:
@@ -56,9 +59,13 @@ class Harness:
         store: Store,
         profile: Profile,
         broker: EnrichmentBroker,
+        ai: AISettings | None = None,
     ) -> None:
         self.provider = provider
         self.settings = settings
+        # The model config this harness runs: the active one unless the runner
+        # is falling back to another.
+        self.ai = ai or settings.ai
         self.store = store
         self.profile = profile
         self.broker = broker
@@ -89,7 +96,7 @@ class Harness:
             broker=self.broker,
             signals=signals,
             run_id=ctx.run_id,
-            max_calls=self.settings.ai.max_tool_calls,
+            max_calls=self.ai.max_tool_calls,
             devices=ctx.devices,
             notebook_enabled=self.settings.mcp.notebook_enabled,
             notebook_max_injected=self.settings.mcp.notebook_max_injected,
@@ -132,16 +139,27 @@ class Harness:
         ])
 
         budget = Budget(
-            max_cost_usd=self.settings.ai.max_cost_usd,
-            max_turns=self.settings.ai.max_turns,
-            max_tool_calls=self.settings.ai.max_tool_calls,
+            max_cost_usd=self.ai.max_cost_usd,
+            max_turns=self.ai.max_turns,
+            max_tool_calls=self.ai.max_tool_calls,
         )
 
+        seen = TokenUsage()
+
         def on_turn(usage: TokenUsage) -> None:
+            # Providers report running totals; the per-call difference shows
+            # how close each call came to the context window and output limit.
+            log.info("model call %d: %d input tokens (%d cached), %d/%d output tokens",
+                     usage.calls, usage.input_tokens - seen.input_tokens,
+                     usage.cache_read_tokens - seen.cache_read_tokens,
+                     usage.output_tokens - seen.output_tokens, self.ai.max_tokens)
+            seen.input_tokens = usage.input_tokens
+            seen.cache_read_tokens = usage.cache_read_tokens
+            seen.output_tokens = usage.output_tokens
             budget.check(usage)
 
         log.info("running %s (%s), budget: %s", self.provider.name,
-                 self.settings.ai.model, budget.describe())
+                 self.ai.model, budget.describe())
 
         try:
             run: AgentRun = self.provider.run_agent(
@@ -149,11 +167,12 @@ class Harness:
                 system_context=system_context,
                 user_message=user_message,
                 tools=toolbox.specs(),
-                max_turns=self.settings.ai.max_turns,
+                max_turns=self.ai.max_turns,
                 on_turn=on_turn,
             )
         except BudgetExceeded as exc:
             result.error = str(exc)
+            result.budget_exceeded = True
             result.notes.append(
                 "the analysis stage was stopped by its cost ceiling; the report "
                 "below is statistics-only"

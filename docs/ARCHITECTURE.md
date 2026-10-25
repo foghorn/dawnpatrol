@@ -550,6 +550,15 @@ provider's `estimate_cost()` override accounts for it correctly: Anthropic's
 them (inclusive) — a naive shared formula would silently double-bill every cached token
 on one side or the other.
 
+Every provider calls the harness's `on_turn` hook with its running usage after each model
+call. The harness checks the budget there and logs that call's own share, one line per
+call: `model call 9: 112340 input tokens (98112 cached), 15872/16000 output tokens`.
+Because each call resends the whole conversation, these lines show how close a run came
+to the model's context window and to that designator's `_MAX_TOKENS`, which is the first
+thing to read when a model stops with `finish_reason=length`. Input counts follow each
+provider's own convention above, so for Anthropic the cached tokens are additional to the
+input figure rather than part of it.
+
 ### 6.2 Prompt structure and caching
 
 Ordered for maximum cache hit rate — stable content first:
@@ -590,7 +599,8 @@ actually configured this run:
 | `submit_analysis(...)` | terminal — ends the loop | parameters ARE the schema (§6.5) |
 
 Every non-terminal call is charged against one shared per-run budget
-(`DAWNPATROL_AI_MAX_TOOL_CALLS`, default 25); the call over budget returns a structured
+(`DAWNPATROL_AI_MAX_TOOL_CALLS`, default 25, or the active designator's own
+`_MAX_TOOL_CALLS`); the call over budget returns a structured
 message telling the model to submit with what it has rather than erroring the run.
 
 `query_events` as read-only SQL rather than a fixed set of canned queries is a deliberate
@@ -701,7 +711,8 @@ At daily cadence that lands around **$15-36/month** for `high`, **$15-17/month**
 `medium`. Levers, in the order worth reaching for:
 
 1. That designator's own `_EFFORT` — `medium` for routine days.
-2. `DAWNPATROL_AI_MAX_TOOL_CALLS` — shared across designators; caps investigation loop length.
+2. `DAWNPATROL_AI_MAX_TOOL_CALLS` / `_MAX_TURNS` — cap investigation loop length; a
+   designator can override either with its own `_MAX_TOOL_CALLS` / `_MAX_TURNS`.
 3. That designator's own `_TASK_BUDGET_TOKENS` — the model paces itself against a ceiling.
 4. `DAWNPATROL_AI_MAX_COST_USD` — shared, hard abort (`budget.py`); the run still produces
    a deterministic-only report, never nothing.
@@ -825,12 +836,14 @@ DAWNPATROL_RETENTION_METRICS_DAYS=730
 
 # AI - one block per named designator, DAWNPATROL_AI_ACTIVE picks which runs
 DAWNPATROL_AI_MAX_COST_USD=3.00        # shared across every designator
-DAWNPATROL_AI_MAX_TOOL_CALLS=25        # shared across every designator
+DAWNPATROL_AI_MAX_TOOL_CALLS=25        # default; a designator may set its own
 DAWNPATROL_AI_ACTIVE=main
+DAWNPATROL_AI_FALLBACK=backup          # optional: tried in order if main fails
 DAWNPATROL_AI_MAIN_PROVIDER=anthropic  # or openai / openai_compatible
 DAWNPATROL_AI_MAIN_MODEL=claude-opus-5
 DAWNPATROL_AI_MAIN_API_KEY=...         # falls back to ANTHROPIC_API_KEY / OPENAI_API_KEY
 DAWNPATROL_AI_MAIN_EFFORT=high
+DAWNPATROL_AI_MAIN_MAX_TURNS=20        # optional: this designator's own loop limit
 
 # Sources — presence of required vars auto-enables the plugin
 DAWNPATROL_SOURCE_LIBRENMS_URL=http://librenms.example/api/v0
@@ -860,7 +873,7 @@ same "presence enables it" pattern the plugin folders use) - every other field f
 designator (`_MODEL`, `_API_KEY`, `_BASE_URL`, `_EFFORT`, `_MAX_TOKENS`, `_TEMPERATURE`,
 `_TIMEOUT`, `_VERIFY_TLS`, `_TASK_BUDGET_TOKENS`, `_REFUSAL_FALLBACK`,
 `_MAX_TOKENS_PARAM`, `_REASONING_EFFORT`, `_PRICE_IN`, `_PRICE_OUT`, `_PRICE_CACHE_READ`,
-`_PRICE_CACHE_WRITE`) lives under that same prefix. Because each designator owns its own
+`_PRICE_CACHE_WRITE`, and the optional `_MAX_TURNS` / `_MAX_TOOL_CALLS` overrides) lives under that same prefix. Because each designator owns its own
 namespace, any number of them can be fully filled in and left uncommented in `.env` at
 once without conflict - two configs never share a variable, so switching between them is
 never "which block is currently commented out." `DAWNPATROL_AI_ACTIVE=<name>` selects
@@ -869,11 +882,14 @@ exactly one designator is defined, and `Settings.from_env()` raises a `ConfigErr
 naming every discovered designator if it's missing while more than one exists, or if it
 names one that doesn't match any of them.
 
-`DAWNPATROL_AI_ENABLED`, `_MAX_TOOL_CALLS`, `_MAX_TURNS`, and `_MAX_COST_USD` stay flat
-and un-namespaced deliberately - they're run mechanics (whether the AI stage runs at all,
-and how far one investigation is allowed to go), not something that differs by model, so
-`config.py` reads each once and copies it identically into every designator's
-`AISettings`. Every provider-specific setting, including pricing, is a field on
+`DAWNPATROL_AI_ENABLED` and `_MAX_COST_USD` stay flat and un-namespaced deliberately -
+whether the AI stage runs at all, and the most one run may spend across the active model
+and every fallback, are properties of the run, not of a model. `_MAX_TOOL_CALLS` and
+`_MAX_TURNS` are global defaults that a designator can override with its own
+`DAWNPATROL_AI_<NAME>_MAX_TOOL_CALLS` / `_MAX_TURNS`: every turn resends the whole
+conversation, so a local model with a small context window may need a shorter
+investigation than a hosted one. `config.py` copies the global values into every
+designator's `AISettings` unless that designator sets its own. Every provider-specific setting, including pricing, is a field on
 `AISettings` itself now rather than something a provider's `__init__` reads from the
 environment directly - `openai_provider.py`/`openai_compatible.py` both just copy
 `settings.price_input_per_mtok` etc. at construction, and `anthropic_provider.py` prefers
@@ -886,6 +902,23 @@ gets caught before you switch to it. This also means the data a future feature n
 run several models over the same evidence bundle and compare results already exists:
 iterating `settings.ai_profiles` needs no further config-loading work, only a caller that
 does it.
+
+**Fallback.** `DAWNPATROL_AI_FALLBACK` is an optional, comma-separated list of other
+designators to try, in order, when the active one fails. Failing means the provider
+can't be built, reports itself unavailable, errors or times out mid-run, or ends
+without submitting an analysis. Each attempt starts fresh on the same evidence
+bundle. The report and the `runs` row record the model that actually produced the
+analysis, and a data-quality note says which model failed and why. Two limits keep a
+fallback from multiplying cost:
+- **Shared cost ceiling:** `DAWNPATROL_AI_MAX_COST_USD` covers the whole run, so a
+  fallback only gets what the failed attempts left of it.
+- **No fallback after the ceiling:** a run stopped by the ceiling never falls back,
+  because hitting it isn't a provider failure.
+
+A model that is merely slow is not a failure: each call is bounded only by that
+designator's `_TIMEOUT`. If every model in the chain fails, the run degrades to a
+statistics-only report, as it does with no fallback configured. `Settings.ai_chain`
+gives the order; `dawnpatrol validate` marks each fallback's position.
 
 **Network topology: a mounted YAML profile**, everything true about *your* network that
 must never land in a public repo. It's data the analyzers and the model read, never

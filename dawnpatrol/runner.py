@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
@@ -27,7 +27,7 @@ from .adjudicate import (
     parse_watchlist_removals,
     scan_for_secrets,
 )
-from .agent.harness import Harness
+from .agent.harness import Harness, HarnessResult
 from .analyzers.base import Analyzer
 from .analyzers.baseline import Baseline
 from .canary import CANARY_SOURCE, CanaryRunner
@@ -240,7 +240,7 @@ class Runner:
 
             # 7 INVESTIGATE
             with _timed(timings, "investigate"):
-                analysis, harness_notes, usage = self._investigate(
+                analysis, harness_notes, usage, ai_used = self._investigate(
                     ctx, health, metrics, signals, notes, baseline
                 )
 
@@ -298,8 +298,10 @@ class Runner:
                 status=report.status.value,
                 finding_count=report.finding_count,
                 degraded=report.degraded,
-                model=self.settings.ai.model,
-                provider=self.settings.ai.provider,
+                # The model that actually produced the analysis, which differs
+                # from the active one when a fallback ran.
+                model=(ai_used or self.settings.ai).model,
+                provider=(ai_used or self.settings.ai).provider,
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 cache_read_tokens=usage.cache_read_tokens,
@@ -411,33 +413,74 @@ class Runner:
             log.warning("IOC slice persistence failed: %s", exc)
 
     def _investigate(self, ctx, health, metrics, signals, notes, baseline):
+        """Run the analysis on the active model, falling back in order through
+        DAWNPATROL_AI_FALLBACK when one fails.
+
+        Returns the analysis, notes for the report, usage summed over every
+        attempt, and the model config that produced the analysis (None when
+        none did).
+        """
         from .models import TokenUsage
 
         usage = TokenUsage()
         if not self.settings.ai.enabled:
-            return None, ["AI analysis is disabled; this is a statistics-only report."], usage
+            return (None, ["AI analysis is disabled; this is a statistics-only report."],
+                    usage, None)
 
         enrichers = self.load_enrichers()
         broker = EnrichmentBroker(enrichers, self.store, self.profile,
                                   enabled=self.settings.enrichment_enabled)
-        try:
-            provider = build_provider(self.settings.ai)
-        except Exception as exc:  # noqa: BLE001
-            return None, [f"AI provider could not be built: {exc}"], usage
+        chain = self.settings.ai_chain
+        failures: list[str] = []
+        extra: list[str] = []
+        for attempt, (name, ai) in enumerate(chain):
+            # The cost ceiling covers the whole run, so a fallback only gets
+            # what the failed attempts left of it.
+            if ai.max_cost_usd > 0:
+                remaining = ai.max_cost_usd - usage.cost_usd
+                if remaining <= 0:
+                    failures.append(f"{name}: not tried, the run's cost ceiling is spent")
+                    break
+                ai = replace(ai, max_cost_usd=remaining)
+            label = f"{name} ({ai.provider}/{ai.model})"
 
-        harness = Harness(provider=provider, settings=self.settings, store=self.store,
-                          profile=self.profile, broker=broker)
-        result = harness.run(ctx=ctx, health=health, metrics=metrics,
-                             signals=signals, notes=notes, baseline=baseline)
-        extra = list(result.notes)
+            try:
+                provider = build_provider(ai)
+            except Exception as exc:  # noqa: BLE001
+                result = HarnessResult(error=f"provider could not be built: {exc}")
+            else:
+                harness = Harness(provider=provider, settings=self.settings, ai=ai,
+                                  store=self.store, profile=self.profile, broker=broker)
+                result = harness.run(ctx=ctx, health=health, metrics=metrics,
+                                     signals=signals, notes=notes, baseline=baseline)
+            usage.add(result.usage)
+
+            if result.ok:
+                if failures:
+                    extra.append(
+                        f"The analysis below came from fallback model {label}, because "
+                        f"{'; '.join(failures)}."
+                    )
+                extra.extend(result.notes)
+                extra.append(broker.stats.summary())
+                return result.analysis, extra, usage, ai
+
+            failures.append(f"{label} failed: {str(result.error)[:300]}")
+            log.error("analysis on %s failed: %s", label, result.error)
+            if result.budget_exceeded:
+                # Hitting the ceiling is not a provider failure, and falling back
+                # would only spend more.
+                extra.extend(result.notes)
+                break
+            if attempt + 1 < len(chain):
+                log.warning("falling back to AI model %s", chain[attempt + 1][0])
+
         extra.append(broker.stats.summary())
-        if not result.ok:
-            extra.append(
-                f"AI analysis did not complete ({result.error}). The statistics and "
-                f"signals below are unaffected; only the narrative is missing."
-            )
-            log.error("analysis stage failed: %s", result.error)
-        return result.analysis, extra, result.usage
+        extra.append(
+            f"AI analysis did not complete ({'; '.join(failures)}). The statistics and "
+            f"signals below are unaffected; only the narrative is missing."
+        )
+        return None, extra, usage, None
 
     def _adjudicate(self, ctx, analysis, health, metrics, signals, notes,
                     canary_results, usage) -> Report:

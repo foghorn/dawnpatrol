@@ -16,7 +16,10 @@ Every model you want configured gets its own name and its own env-var namespace 
 picks which one actually runs (`docs/ARCHITECTURE.md` §9). Several fully-configured
 designators can be uncommented at once without conflict; a `Provider` subclass never
 needs to know its own designator name, since `AISettings` arrives already fully resolved
-for whichever one is active.
+for whichever one is active. `DAWNPATROL_AI_FALLBACK` lists designators to try in order
+when the active one fails, so a provider's failure path matters. Return an `AgentRun`
+with `error` set, or raise, and the runner moves on to the next model; raise
+`BudgetExceeded` only for a real spend ceiling, since that one never falls back.
 
 ## The contract
 
@@ -88,6 +91,14 @@ to run; set both if you're pointing at a paid hosted endpoint through this same 
 and want real cost accounting. `openai_provider.py` follows the identical pattern for
 `/v1/responses` - see its module docstring for the two things it does differently
 (`reasoning.effort`, `store: false`) and why.
+
+Every call resends the whole conversation, so the prompt grows each turn. The harness
+logs one line per model call - `model call 9: 112340 input tokens (98112 cached),
+15872/16000 output tokens` - for any provider. If a local model fails with
+`finish_reason=length`, those lines tell you which limit it hit: input plus output
+nearing the model's context window (pick a variant with a larger one, or shorten that
+designator's investigation with its own `_MAX_TURNS` / `_MAX_TOOL_CALLS`), or output
+reaching `_MAX_TOKENS` (raise it).
 
 ## Build your own
 
