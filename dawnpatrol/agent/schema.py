@@ -9,7 +9,10 @@ the model is asked to follow.
 
 from __future__ import annotations
 
+import json
 from typing import Any
+
+from jsonschema import Draft202012Validator
 
 SEVERITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", "SUSPECTED"]
 CONFIDENCES = ["high", "medium", "low"]
@@ -234,3 +237,46 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+#: Problems listed back to the model; the rest are summarised as a count.
+MAX_PROBLEMS = 15
+
+_validator: Draft202012Validator | None = None
+
+
+def analysis_problems(data: Any) -> list[str]:
+    """Every way ``data`` departs from ANALYSIS_SCHEMA, as readable lines.
+
+    An empty list means the analysis matches the schema exactly, which is what
+    lets the adjudicator read it without defending against every shape a
+    weaker model might invent.
+    """
+    global _validator
+    if _validator is None:
+        _validator = Draft202012Validator(ANALYSIS_SCHEMA)
+    problems = []
+    for error in sorted(_validator.iter_errors(data), key=lambda e: list(e.path)):
+        where = "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in error.path)
+        problems.append(f"{where.lstrip('.') or 'top level'}: {error.message}")
+    return problems
+
+
+def format_correction(problems: list[str]) -> str:
+    """The follow-up sent to a model whose analysis did not match the schema."""
+    listed = problems[:MAX_PROBLEMS]
+    more = len(problems) - len(listed)
+    lines = "\n".join(f"- {p}" for p in listed)
+    if more > 0:
+        lines += f"\n- ...and {more} more"
+    return (
+        "Your analysis was NOT accepted because it does not match the required "
+        "format:\n"
+        f"{lines}\n\n"
+        "Call submit_analysis again with your complete analysis. Make sure the "
+        "arguments match exactly this JSON schema - every object must have the "
+        "listed properties with the listed types, and no other properties. For "
+        "example, each recommended_actions entry is an object such as "
+        '{"priority": 1, "text": "..."}, not a plain string.\n\n'
+        f"{json.dumps(ANALYSIS_SCHEMA, indent=1)}"
+    )

@@ -21,15 +21,18 @@ from ..devices import DeviceDirectory
 from ..enrichment.broker import EnrichmentBroker
 from ..models import Signal
 from ..profile import Profile
-from ..providers.base import SUBMIT_TOOL, ToolSpec
+from ..providers.base import SUBMIT_TOOL, SubmissionRejected, ToolSpec
 from ..query import EventQuery
 from ..store import Store
 from . import sqlguard
-from .schema import ANALYSIS_SCHEMA
+from .schema import ANALYSIS_SCHEMA, analysis_problems, format_correction
 
 log = logging.getLogger(__name__)
 
 MAX_ENRICH_PER_CALL = 10
+#: Follow-ups a model gets to fix a submission that does not match the schema
+#: before the run moves on to the next model.
+FORMAT_CORRECTIONS = 1
 
 
 class ToolBox:
@@ -65,6 +68,7 @@ class ToolBox:
         self.notebook_max_entry_chars = notebook_max_entry_chars
         self.calls_made = 0
         self.call_log: list[str] = []
+        self.format_corrections = 0
 
     # ----- budget ----------------------------------------------------------- #
 
@@ -438,7 +442,26 @@ class ToolBox:
                 "done investigating. This ends the run."
             ),
             parameters=ANALYSIS_SCHEMA,
-            handler=lambda args: args,
+            handler=self.check_submission,
             terminal=True,
         ))
         return tools
+
+    def check_submission(self, args: dict[str, Any]) -> str | None:
+        """Accept an analysis only if it matches the schema exactly.
+
+        The first mismatch earns one follow-up spelling out the format; a
+        second ends this model's attempt, so the runner can try the next one.
+        """
+        problems = analysis_problems(args)
+        if not problems:
+            return None
+        if self.format_corrections >= FORMAT_CORRECTIONS:
+            raise SubmissionRejected(
+                f"analysis still did not match the required format after "
+                f"{self.format_corrections} correction(s): {'; '.join(problems[:3])}"
+            )
+        self.format_corrections += 1
+        log.warning("analysis did not match the required format, asking for a "
+                    "correction: %s", "; ".join(problems[:3]))
+        return format_correction(problems)

@@ -15,7 +15,7 @@ from ..enrichment.broker import EnrichmentBroker
 from ..errors import BudgetExceeded, ProviderError
 from ..models import Metric, Signal, SourceHealth, TokenUsage
 from ..profile import Profile
-from ..providers.base import AgentRun, Provider
+from ..providers.base import SUBMIT_TOOL, AgentRun, Provider
 from ..query import EventQuery
 from ..store import Store
 from .bundle import build_bundle, build_task_message
@@ -186,10 +186,17 @@ class Harness:
         result.tool_calls = len(run.tool_calls)
         result.turns = run.turns
 
+        if toolbox.format_corrections and run.ok:
+            result.notes.append(
+                "the model's first analysis did not match the required format; it "
+                "was asked to correct it and the corrected version was accepted"
+            )
+
         if run.transcript_note:
             result.notes.append(run.transcript_note)
 
-        failed_tools = [t for t in run.tool_calls if not t.ok]
+        # Format corrections are reported above, not as failed tools.
+        failed_tools = [t for t in run.tool_calls if not t.ok and t.name != SUBMIT_TOOL]
         if failed_tools:
             result.notes.append(
                 f"{len(failed_tools)} tool call(s) failed during analysis: "

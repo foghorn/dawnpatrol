@@ -12,6 +12,7 @@ import json
 import pytest
 
 from dawnpatrol import cli
+from dawnpatrol.agent.schema import analysis_problems
 from dawnpatrol.config import AISettings
 from dawnpatrol.context import RunContext
 from dawnpatrol.models import (
@@ -23,7 +24,13 @@ from dawnpatrol.models import (
     TokenUsage,
     Window,
 )
-from dawnpatrol.providers.base import SUBMIT_TOOL, AgentRun, Provider, ToolCallLog
+from dawnpatrol.providers.base import (
+    SUBMIT_TOOL,
+    AgentRun,
+    Provider,
+    SubmissionRejected,
+    ToolCallLog,
+)
 from dawnpatrol.runner import Runner
 from dawnpatrol.sources.base import Source
 from tests.conftest import make_events
@@ -205,6 +212,101 @@ def test_every_model_failing_degrades_and_names_each_failure(fallback_runner, mo
     note = next(n for n in report.data_quality if "did not complete" in n)
     assert "local (broken/local-1) failed" in note
     assert "cloud (stub/cloud-1) failed" in note
+
+
+# --------------------------------------------------------------------------- #
+# Analysis format check
+# --------------------------------------------------------------------------- #
+
+
+class SloppyProvider(Provider):
+    """Submits recommended_actions as plain strings, the way a weaker model
+    does, through the real submit tool's check. ``fixes`` decides whether it
+    gets the format right once corrected."""
+
+    name = "sloppy"
+    fixes = False
+
+    def run_agent(self, *, system_static, system_context, user_message,
+                  tools, max_turns, on_turn=None):
+        submit = next(t for t in tools if t.terminal)
+        bad = {**GOOD_ANALYSIS, "recommended_actions": ["Block 203.0.113.45"]}
+        run = AgentRun(usage=TokenUsage(calls=1))
+        try:
+            if submit.handler(bad) is None:
+                run.analysis = bad
+            elif self.fixes and submit.handler(GOOD_ANALYSIS) is None:
+                run.analysis = GOOD_ANALYSIS
+            else:
+                submit.handler(bad)
+        except SubmissionRejected as exc:
+            run.error = str(exc)
+        return run
+
+
+@pytest.fixture
+def sloppy_runner(fallback_runner, monkeypatch):
+    """Active model 'local' is sloppy about format; 'cloud' is the working stub."""
+    SloppyProvider.fixes = False
+
+    def build(ai):
+        return SloppyProvider(ai) if ai.provider == "broken" else StubProvider(ai)
+
+    monkeypatch.setattr("dawnpatrol.runner.build_provider", build)
+    return fallback_runner
+
+
+def test_the_canned_analysis_matches_the_schema():
+    assert analysis_problems(GOOD_ANALYSIS) == []
+
+
+def test_a_model_that_fixes_its_format_when_asked_is_used(sloppy_runner):
+    SloppyProvider.fixes = True
+    report = sloppy_runner.run().report
+    assert not report.degraded
+    assert report.finding_count == 1
+    assert any("asked to correct it and the corrected version was accepted" in n
+               for n in report.data_quality)
+    assert not any("fallback model" in n for n in report.data_quality)
+
+
+def test_a_model_that_keeps_the_wrong_format_falls_back_to_the_next(sloppy_runner, store):
+    report = sloppy_runner.run().report
+    assert not report.degraded
+    assert report.finding_count == 1
+    note = next(n for n in report.data_quality if "fallback model cloud" in n)
+    assert "still did not match the required format" in note
+    assert store.recent_runs(1)[0]["model"] == "cloud-1"
+
+
+def test_no_model_matching_the_format_sends_the_statistics_only_report(
+        sloppy_runner, settings, monkeypatch):
+    monkeypatch.setattr("dawnpatrol.runner.build_provider", lambda ai: SloppyProvider(ai))
+    outcome = sloppy_runner.run()
+    assert outcome.error is None
+    assert outcome.report.degraded
+    assert outcome.report.metrics, "statistics survive"
+    note = next(n for n in outcome.report.data_quality if "did not complete" in n)
+    assert note.count("still did not match the required format") == 2
+    assert outcome.deliveries and all(d.ok for d in outcome.deliveries)
+
+
+def test_a_report_that_fails_to_build_degrades_to_statistics_only(runner, monkeypatch):
+    calls = {"n": 0}
+
+    def first_call_breaks(raw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise AttributeError("'str' object has no attribute 'get'")
+        return []
+
+    monkeypatch.setattr("dawnpatrol.runner.parse_actions", first_call_breaks)
+    outcome = runner.run()
+    assert outcome.error is None
+    assert outcome.report.degraded
+    assert any("could not be processed (AttributeError" in n
+               for n in outcome.report.data_quality)
+    assert outcome.deliveries and all(d.ok for d in outcome.deliveries)
 
 
 def test_each_model_call_logs_its_own_token_counts(runner, monkeypatch, caplog):

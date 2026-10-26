@@ -52,7 +52,14 @@ from typing import Any
 import httpx
 
 from ..models import TokenUsage
-from .base import SUBMIT_TOOL, AgentRun, Provider, ToolCallLog, ToolSpec
+from .base import (
+    SUBMIT_TOOL,
+    AgentRun,
+    Provider,
+    SubmissionRejected,
+    ToolCallLog,
+    ToolSpec,
+)
 
 log = logging.getLogger(__name__)
 
@@ -206,12 +213,20 @@ class OpenAIProvider(Provider):
                     text = _output_text(output)
                     parsed = _try_parse_json(text)
                     if parsed is not None and "findings" in parsed:
-                        run.analysis = parsed
-                        run.transcript_note = (
-                            f"model returned the analysis as content rather than "
-                            f"calling {SUBMIT_TOOL}"
-                        )
-                        return run
+                        try:
+                            correction = by_name[SUBMIT_TOOL].handler(parsed)
+                        except SubmissionRejected as exc:
+                            run.error = str(exc)
+                            return run
+                        if correction is None:
+                            run.analysis = parsed
+                            run.transcript_note = (
+                                f"model returned the analysis as content rather than "
+                                f"calling {SUBMIT_TOOL}"
+                            )
+                            return run
+                        input_items.append({"role": "user", "content": correction})
+                        continue
                     run.error = (f"model stopped without calling {SUBMIT_TOOL} "
                                  f"(status={run.stop_reason})")
                     return run
@@ -227,9 +242,20 @@ class OpenAIProvider(Provider):
                         run.tool_calls.append(ToolCallLog(tool_name, args, False, "unknown"))
                         continue
                     if spec.terminal:
-                        run.analysis = args
-                        run.tool_calls.append(ToolCallLog(tool_name, {}, True, "terminal"))
-                        return run
+                        try:
+                            correction = spec.handler(args)
+                        except SubmissionRejected as exc:
+                            run.error = str(exc)
+                            run.tool_calls.append(ToolCallLog(tool_name, {}, False, "rejected"))
+                            return run
+                        if correction is None:
+                            run.analysis = args
+                            run.tool_calls.append(ToolCallLog(tool_name, {}, True, "terminal"))
+                            return run
+                        input_items.append(_call_output(call_id, correction))
+                        run.tool_calls.append(ToolCallLog(tool_name, {}, False,
+                                                          "format correction requested"))
+                        continue
                     try:
                         result = spec.handler(args)
                         text = result if isinstance(result, str) else json.dumps(

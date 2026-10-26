@@ -663,6 +663,22 @@ output: `submit_analysis` is registered with `terminal=True` and its `parameters
 — rather than each provider's own response-format mechanism — keeps every provider on the
 identical code path and works even against a backend with no native JSON-schema support.
 
+Since nothing on the wire enforces that schema, the harness checks every submission
+against it (`ToolBox.check_submission`, using `jsonschema`) before accepting it. A
+submission that doesn't match gets one follow-up: the tool result lists each problem
+by field (`recommended_actions[0]: 'Block 203.0.113.45' is not of type 'object'`),
+includes the full schema, and asks the model to submit again in exactly that format.
+A second mismatch ends that model's attempt with the problems as its error, so the
+runner falls back to the next model (§9), and if none is left the run sends the
+statistics-only report. A model that corrects itself is used, with a data-quality note
+saying a correction was needed. An analysis returned as content instead of a tool call
+goes through the same check. This is what lets the adjudicator read the analysis
+without defending against every shape a weaker model invents: before the check, one
+model returning actions as plain strings crashed a run outright. As a backstop, if
+building the report from an accepted analysis still fails, the run degrades to the
+statistics-only report with the error in a data-quality note rather than producing
+nothing.
+
 ```jsonc
 {
   "executive_summary": "string, 2-3 sentences",
@@ -905,8 +921,9 @@ does it.
 
 **Fallback.** `DAWNPATROL_AI_FALLBACK` is an optional, comma-separated list of other
 designators to try, in order, when the active one fails. Failing means the provider
-can't be built, reports itself unavailable, errors or times out mid-run, or ends
-without submitting an analysis. Each attempt starts fresh on the same evidence
+can't be built, reports itself unavailable, errors or times out mid-run, ends
+without submitting an analysis, or still submits one that doesn't match the schema after
+being asked to correct it (§6.5). Each attempt starts fresh on the same evidence
 bundle. The report and the `runs` row record the model that actually produced the
 analysis, and a data-quality note says which model failed and why. Two limits keep a
 fallback from multiplying cost:

@@ -46,6 +46,9 @@ class TemplateProvider(Provider):
         run = AgentRun()
         _by_name = {t.name: t for t in tools}
         # ... build the request, loop on tool calls, dispatch through by_name ...
-        # When the model calls SUBMIT_TOOL, set run.analysis and break.
+        # When the model calls SUBMIT_TOOL, pass its arguments to that spec's
+        # handler: None means accepted (set run.analysis and return), text is a
+        # correction to send back as the tool result before looping again, and
+        # SubmissionRejected means set run.error to its message and return.
         run.error = f"{self.name} provider is a template and does not implement {SUBMIT_TOOL}"
         return run

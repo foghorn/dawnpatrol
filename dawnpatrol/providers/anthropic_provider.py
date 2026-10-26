@@ -19,7 +19,14 @@ from collections.abc import Callable
 from typing import Any
 
 from ..models import TokenUsage
-from .base import SUBMIT_TOOL, AgentRun, Provider, ToolCallLog, ToolSpec
+from .base import (
+    SUBMIT_TOOL,
+    AgentRun,
+    Provider,
+    SubmissionRejected,
+    ToolCallLog,
+    ToolSpec,
+)
 
 log = logging.getLogger(__name__)
 
@@ -155,9 +162,20 @@ class AnthropicProvider(Provider):
                     run.tool_calls.append(ToolCallLog(block.name, args, False, "unknown tool"))
                     continue
                 if spec.terminal:
-                    run.analysis = args
-                    run.tool_calls.append(ToolCallLog(block.name, {}, True, "terminal"))
-                    return run
+                    try:
+                        correction = spec.handler(args)
+                    except SubmissionRejected as exc:
+                        run.error = str(exc)
+                        run.tool_calls.append(ToolCallLog(block.name, {}, False, "rejected"))
+                        return run
+                    if correction is None:
+                        run.analysis = args
+                        run.tool_calls.append(ToolCallLog(block.name, {}, True, "terminal"))
+                        return run
+                    results.append(_tool_result(block.id, correction, True))
+                    run.tool_calls.append(ToolCallLog(block.name, {}, False,
+                                                      "format correction requested"))
+                    continue
                 try:
                     output = spec.handler(args)
                     payload = output if isinstance(output, str) else json.dumps(

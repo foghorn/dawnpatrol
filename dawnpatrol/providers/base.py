@@ -25,13 +25,22 @@ log = logging.getLogger(__name__)
 SUBMIT_TOOL = "submit_analysis"
 
 
+class SubmissionRejected(Exception):
+    """Raised by a terminal tool's handler when a submission is refused for
+    good. The provider ends its run with this as the error, so the runner can
+    try the next model."""
+
+
 @dataclass(slots=True)
 class ToolSpec:
     name: str
     description: str
     parameters: dict[str, Any]
     handler: Callable[[dict[str, Any]], Any]
-    #: When true, calling this tool ends the loop.
+    #: When true, calling this tool ends the loop. A terminal tool's handler
+    #: checks the submission instead of producing output: it returns None to
+    #: accept it, returns text to send back to the model as a correction (the
+    #: loop continues), or raises SubmissionRejected to end the run with an error.
     terminal: bool = False
 
 

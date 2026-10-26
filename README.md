@@ -188,6 +188,12 @@ runs `local` first and `main` only if `local` fails. The report says when a
 fallback ran and why. `DAWNPATROL_AI_MAX_COST_USD` covers the whole run, not
 each attempt, and a run stopped by that ceiling never falls back.
 
+Every analysis is checked against the expected format before it's used. A model
+that gets the format wrong is told exactly what was wrong, shown the format, and
+asked to submit again. If its second attempt is still wrong, the run falls back
+to the next model; if no model gets it right, you get the statistics-only
+report, never no report. Weaker local models need this most.
+
 Turn and tool-call limits default to `DAWNPATROL_AI_MAX_TURNS` and
 `DAWNPATROL_AI_MAX_TOOL_CALLS`, and any designator can set its own. Every turn
 resends the whole conversation, so a local model with a small context window

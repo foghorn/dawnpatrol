@@ -13,7 +13,7 @@ import httpx
 import pytest
 
 from dawnpatrol.config import AISettings
-from dawnpatrol.providers.base import SUBMIT_TOOL, ToolSpec
+from dawnpatrol.providers.base import SUBMIT_TOOL, SubmissionRejected, ToolSpec
 from dawnpatrol.providers.openai_compatible import OpenAICompatibleProvider
 from dawnpatrol.providers.openai_provider import OpenAIProvider
 from dawnpatrol.secrets import SecretStr
@@ -43,7 +43,7 @@ def _tools() -> list[ToolSpec]:
         ToolSpec(name="describe_schema", description="d", parameters={"type": "object"},
                  handler=lambda args: "schema info"),
         ToolSpec(name=SUBMIT_TOOL, description="submit", parameters={"type": "object"},
-                 handler=lambda args: args, terminal=True),
+                 handler=lambda args: None, terminal=True),  # None accepts
     ]
 
 
@@ -398,3 +398,91 @@ def test_openai_provider_cost_does_not_double_count_cached_tokens(monkeypatch):
     naive_double_counted = (3014 / 1_000_000 * 4.00 + 3004 / 1_000_000 * 0.40
                             + 7 / 1_000_000 * 20.00 + 7 / 1_000_000 * 5.00)
     assert run.usage.cost_usd < naive_double_counted
+
+
+# --------------------------------------------------------------------------- #
+# Submission format check
+# --------------------------------------------------------------------------- #
+
+
+def _checking_tools(verdicts: list) -> list[ToolSpec]:
+    """A submit tool whose check returns each verdict in turn: None accepts,
+    text asks for a correction, an exception rejects for good."""
+    def check(args):
+        verdict = verdicts.pop(0)
+        if isinstance(verdict, Exception):
+            raise verdict
+        return verdict
+
+    return [_tools()[0], ToolSpec(name=SUBMIT_TOOL, description="submit",
+                                  parameters={"type": "object"}, handler=check,
+                                  terminal=True)]
+
+
+def _submit_completion(call_id: str, arguments: dict) -> dict:
+    return _completion(content=None, finish_reason="tool_calls", tool_calls=[
+        {"id": call_id, "type": "function",
+         "function": {"name": SUBMIT_TOOL, "arguments": json.dumps(arguments)}}])
+
+
+def test_a_correction_goes_back_as_the_tool_result_and_the_retry_is_accepted(monkeypatch):
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_submit_completion(
+            str(len(bodies)), {"attempt": len(bodies)}))
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_checking_tools(["use objects", None]), max_turns=5)
+    assert run.error is None
+    assert run.analysis == {"attempt": 2}
+    assert bodies[1]["messages"][-1] == {"role": "tool", "tool_call_id": "1",
+                                         "name": SUBMIT_TOOL, "content": "use objects"}
+
+
+def test_a_rejected_submission_ends_the_run_with_its_reason(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_submit_completion("1", {"findings": "bad"}))
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(
+        system_static="s", system_context="c", user_message="u", max_turns=5,
+        tools=_checking_tools(["fix it", SubmissionRejected("still wrong")]))
+    assert run.analysis is None
+    assert run.error == "still wrong"
+
+
+def test_an_analysis_returned_as_content_is_checked_too(monkeypatch):
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(200, json=_completion(
+                content=json.dumps({"findings": ["not an object"]})))
+        return httpx.Response(200, json=_submit_completion("2", {"findings": []}))
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_checking_tools(["use objects", None]), max_turns=5)
+    assert run.analysis == {"findings": []}
+    assert bodies[1]["messages"][-1] == {"role": "user", "content": "use objects"}
+
+
+def test_openai_provider_sends_a_correction_as_the_call_output(monkeypatch):
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        n = len(bodies)
+        return httpx.Response(200, json=_oa_response(
+            [_oa_function_call(SUBMIT_TOOL, json.dumps({"attempt": n}), call_id=f"c{n}")]))
+
+    provider = _oa_provider(monkeypatch, _oa_settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_checking_tools(["use objects", None]), max_turns=5)
+    assert run.analysis == {"attempt": 2}
+    assert bodies[1]["input"][-1] == {"type": "function_call_output", "call_id": "c1",
+                                      "output": "use objects"}

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from dawnpatrol.agent.bundle import build_bundle
+from dawnpatrol.agent.schema import analysis_problems
 from dawnpatrol.agent.tools import ToolBox
 from dawnpatrol.analyzers.baseline import Baseline
 from dawnpatrol.devices import DeviceDirectory
 from dawnpatrol.enrichment.broker import EnrichmentBroker
+from dawnpatrol.providers.base import SubmissionRejected
 from dawnpatrol.query import EventQuery
 
 
@@ -153,3 +157,40 @@ def test_bundle_works_without_devices_argument_at_all(window, profile):
         run_id="r1",
     )
     assert "DEVICE DIRECTORY" not in bundle
+
+
+# --------------------------------------------------------------------------- #
+# ToolBox.check_submission
+# --------------------------------------------------------------------------- #
+
+VALID_ANALYSIS = {
+    "executive_summary": "Quiet night.",
+    "findings": [],
+    "recommended_actions": [{"priority": 1, "text": "Nothing to do."}],
+}
+STRING_ACTIONS = {**VALID_ANALYSIS, "recommended_actions": ["Block 203.0.113.45"]}
+
+
+def test_an_analysis_matching_the_schema_is_accepted(store, profile):
+    assert _toolbox(store, profile).check_submission(VALID_ANALYSIS) is None
+
+
+def test_schema_problems_name_the_field_and_what_was_wrong():
+    assert analysis_problems(STRING_ACTIONS) == [
+        "recommended_actions[0]: 'Block 203.0.113.45' is not of type 'object'"]
+    assert analysis_problems("text") == ["top level: 'text' is not of type 'object'"]
+
+
+def test_a_malformed_analysis_gets_one_correction_spelling_out_the_format(store, profile):
+    toolbox = _toolbox(store, profile)
+    correction = toolbox.check_submission(STRING_ACTIONS)
+    assert "'Block 203.0.113.45' is not of type 'object'" in correction
+    assert '"recommended_actions"' in correction, "the full schema is included"
+    with pytest.raises(SubmissionRejected, match="still did not match"):
+        toolbox.check_submission(STRING_ACTIONS)
+
+
+def test_a_corrected_analysis_is_accepted_after_the_follow_up(store, profile):
+    toolbox = _toolbox(store, profile)
+    assert toolbox.check_submission(STRING_ACTIONS) is not None
+    assert toolbox.check_submission(VALID_ANALYSIS) is None

@@ -63,6 +63,20 @@ support at all - `openai_compatible.py` even falls back to parsing the model's r
 content as JSON if it forgets to call the tool, rather than discarding a complete,
 usable analysis over a protocol nicety.
 
+**The terminal tool's handler checks the submission.** When the model calls the
+terminal tool (or returns its analysis as content), pass the arguments to that spec's
+`handler` and act on the result:
+
+| Handler result | What the provider does |
+|---|---|
+| `None` | Accepted: set `run.analysis` and return. |
+| text | A format correction: send it back as that call's tool result (or, for an analysis returned as content, as a user message) and keep looping. |
+| raises `SubmissionRejected` | Set `run.error` to its message and return; the runner tries the next model. |
+
+The harness's handler accepts an analysis only when it matches `ANALYSIS_SCHEMA`
+exactly, and allows one correction before rejecting. Your provider only has to route
+the three outcomes; it never inspects the analysis itself.
+
 ## Walkthrough: `anthropic_provider.py`
 
 Drives a **hand-written loop**, not the SDK's beta tool runner - a deliberate choice: the
@@ -118,8 +132,9 @@ class MyBackendProvider(Provider):
                  tools, max_turns, on_turn=None) -> AgentRun:
         run = AgentRun()
         by_name = {t.name: t for t in tools}
-        # ... build the request, loop on tool calls, dispatch through by_name,
-        #     break on the terminal tool (spec.terminal) ...
+        # ... build the request, loop on tool calls, dispatch through by_name.
+        #     On the terminal tool (spec.terminal), route spec.handler(args):
+        #     None -> accept, text -> send back and loop, SubmissionRejected -> error.
         return run
 ```
 

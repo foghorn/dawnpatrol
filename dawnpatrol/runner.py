@@ -246,10 +246,26 @@ class Runner:
 
             # 8 ADJUDICATE
             with _timed(timings, "adjudicate"):
-                report = self._adjudicate(
-                    ctx, analysis, health, metrics, signals,
-                    notes + harness_notes, canary_results, usage,
-                )
+                try:
+                    report = self._adjudicate(
+                        ctx, analysis, health, metrics, signals,
+                        notes + harness_notes, canary_results, usage,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # The analysis already passed the format check, so this is a
+                    # bug here rather than the model's doing. A statistics-only
+                    # report still beats no report.
+                    log.exception("could not build the report from the analysis")
+                    analysis = None
+                    report = self._adjudicate(
+                        ctx, None, health, metrics, signals,
+                        notes + harness_notes + [
+                            f"The model's analysis could not be processed "
+                            f"({type(exc).__name__}: {exc}), so this report is "
+                            f"statistics-only."
+                        ],
+                        canary_results, usage,
+                    )
                 outcome.report = report
                 self.store.save_findings(run_id, started,
                                          report.findings + report.suppressed_findings)
