@@ -277,7 +277,7 @@ def _json_of_type(value: Any, wanted: Any) -> list | dict | None:
 
     Two slips a local model was seen making are repaired: a string missing
     only its final ``]`` or ``}``, and a complete value followed by stray
-    closing brackets. Nothing else is repaired.
+    closing brackets or commas. Nothing else is repaired.
     """
     if not isinstance(value, str) or wanted not in ("array", "object"):
         return None
@@ -292,7 +292,7 @@ def _json_of_type(value: Any, wanted: Any) -> list | dict | None:
         parsed, end = json.JSONDecoder().raw_decode(value.lstrip())
     except ValueError:
         return None
-    if isinstance(parsed, kind) and not value.lstrip()[end:].strip(" \t\r\n]}"):
+    if isinstance(parsed, kind) and not value.lstrip()[end:].strip(" \t\r\n]},"):
         return parsed
     return None
 

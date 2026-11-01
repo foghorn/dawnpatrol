@@ -191,7 +191,7 @@ each attempt, and a run stopped by that ceiling never falls back.
 Every analysis is checked against the expected format before it's used. A part
 sent as JSON text instead of structured data (a common local-model habit, such
 as a `findings` list wrapped in quotes, sometimes missing its final bracket or
-with a stray extra one) is parsed first and used if it has the right shape. A
+with stray brackets or commas after it) is parsed first and used if it has the right shape. A
 model that gets the format wrong is told exactly what was wrong, shown the
 format, and asked to submit again. If its second attempt is still wrong, the run
 falls back to the next model; if no model gets it right, you get the

@@ -677,7 +677,7 @@ This happens in response to the submission, never as an instruction in the promp
 a report note records it. A string that doesn't parse, or parses to the wrong type, is
 left for the check to report, with two exceptions a local model was seen needing: a
 string missing only its final `]` or `}` is parsed with that closer added, and a complete
-value followed only by stray closing brackets is parsed without them. A submission that still doesn't match gets one follow-up: the tool result lists each problem
+value followed only by stray closing brackets or commas is parsed without them. A submission that still doesn't match gets one follow-up: the tool result lists each problem
 by field (`recommended_actions[0]: 'Block 203.0.113.45' is not of type 'object'`),
 includes the full schema, and asks the model to submit again in exactly that format.
 A second mismatch ends that model's attempt with the problems as its error, so the

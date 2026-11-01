@@ -233,10 +233,13 @@ def test_a_model_that_stops_without_submitting_is_reminded_once(store, profile):
     assert toolbox.stop_reminders == 1
 
 
-def test_json_text_with_stray_closing_brackets_after_it_is_parsed():
+def test_json_text_with_stray_closers_or_commas_after_it_is_parsed():
     data = {"findings": '[{"title": "x"}]\n]',
-            "section_narratives": '{"perimeter": "Quiet."} }'}
-    assert sorted(unwrap_json_strings(data)) == ["findings", "section_narratives"]
+            "section_narratives": '{"perimeter": "Quiet."} }',
+            "recommended_actions": '[{"priority": 1, "text": "Block it."}],'}
+    assert sorted(unwrap_json_strings(data)) == ["findings", "recommended_actions",
+                                                 "section_narratives"]
+    assert data["recommended_actions"] == [{"priority": 1, "text": "Block it."}]
     assert data["findings"] == [{"title": "x"}]
     assert data["section_narratives"] == {"perimeter": "Quiet."}
     trailing_text = {"findings": '[{"title": "x"}] and more'}
