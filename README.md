@@ -188,11 +188,16 @@ runs `local` first and `main` only if `local` fails. The report says when a
 fallback ran and why. `DAWNPATROL_AI_MAX_COST_USD` covers the whole run, not
 each attempt, and a run stopped by that ceiling never falls back.
 
-Every analysis is checked against the expected format before it's used. A model
-that gets the format wrong is told exactly what was wrong, shown the format, and
-asked to submit again. If its second attempt is still wrong, the run falls back
-to the next model; if no model gets it right, you get the statistics-only
-report, never no report. Weaker local models need this most.
+Every analysis is checked against the expected format before it's used. A part
+sent as JSON text instead of structured data (a common local-model habit, such
+as a `findings` list wrapped in quotes, sometimes missing its final bracket or
+with a stray extra one) is parsed first and used if it has the right shape. A
+model that gets the format wrong is told exactly what was wrong, shown the
+format, and asked to submit again. If its second attempt is still wrong, the run
+falls back to the next model; if no model gets it right, you get the
+statistics-only report, never no report. A model that ends its turn without
+submitting at all is reminded once to submit, and falls back the same way if it
+stops again. Weaker local models need this most.
 
 Turn and tool-call limits default to `DAWNPATROL_AI_MAX_TURNS` and
 `DAWNPATROL_AI_MAX_TOOL_CALLS`, and any designator can set its own. Every turn
@@ -203,6 +208,13 @@ may need a shorter investigation than a hosted one:
 DAWNPATROL_AI_LOCAL_MAX_TURNS=20
 DAWNPATROL_AI_LOCAL_MAX_TOOL_CALLS=15
 ```
+
+Every tool result tells the model how much of its tool-call budget it has
+used (`[tool calls used: 12 of 35]`), and with three or fewer calls left asks it
+to spend them on its most important open question. When choosing a limit for a
+local model, leave room in its context window for the final reply
+(`_MAX_TOKENS`): each tool call adds roughly a thousand tokens to every later
+turn, and occasionally ten times that.
 
 Each attempt logs the limits it runs under (`budget: max $3.00, 20 turns, 15 tool
 calls`), and each model call logs its own token counts:

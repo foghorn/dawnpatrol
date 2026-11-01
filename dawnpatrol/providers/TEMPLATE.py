@@ -50,5 +50,8 @@ class TemplateProvider(Provider):
         # handler: None means accepted (set run.analysis and return), text is a
         # correction to send back as the tool result before looping again, and
         # SubmissionRejected means set run.error to its message and return.
+        # When the model ends its turn without calling it, send
+        # stop_reminder(tools) as a user message and loop, or end with an
+        # error if that returns None.
         run.error = f"{self.name} provider is a template and does not implement {SUBMIT_TOOL}"
         return run

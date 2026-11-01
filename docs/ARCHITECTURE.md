@@ -602,6 +602,11 @@ Every non-terminal call is charged against one shared per-run budget
 (`DAWNPATROL_AI_MAX_TOOL_CALLS`, default 25, or the active designator's own
 `_MAX_TOOL_CALLS`); the call over budget returns a structured
 message telling the model to submit with what it has rather than erroring the run.
+Each result within budget ends with `[tool calls used: N of M]`, and with three or
+fewer left it also asks the model to spend them on its most important open question.
+The model learns its budget from what it spends, not from the prompt, so the cached
+system prompt stays identical for models whose budgets differ, and a model that would
+otherwise discover the limit only when a planned query is refused can prioritise.
 
 `query_events` as read-only SQL rather than a fixed set of canned queries is a deliberate
 choice: it lets the model chase a hypothesis it forms mid-run — "which clients queried
@@ -664,15 +669,25 @@ output: `submit_analysis` is registered with `terminal=True` and its `parameters
 identical code path and works even against a backend with no native JSON-schema support.
 
 Since nothing on the wire enforces that schema, the harness checks every submission
-against it (`ToolBox.check_submission`, using `jsonschema`) before accepting it. A
-submission that doesn't match gets one follow-up: the tool result lists each problem
+against it (`ToolBox.check_submission`, using `jsonschema`) before accepting it. First,
+any field the schema types as an array or object but which arrives as a string holding
+JSON of that type is parsed in place (`schema.unwrap_json_strings`); local models often
+send a nested `findings` list that way, and the parsed value is plainly what they meant.
+This happens in response to the submission, never as an instruction in the prompt, and
+a report note records it. A string that doesn't parse, or parses to the wrong type, is
+left for the check to report, with two exceptions a local model was seen needing: a
+string missing only its final `]` or `}` is parsed with that closer added, and a complete
+value followed only by stray closing brackets is parsed without them. A submission that still doesn't match gets one follow-up: the tool result lists each problem
 by field (`recommended_actions[0]: 'Block 203.0.113.45' is not of type 'object'`),
 includes the full schema, and asks the model to submit again in exactly that format.
 A second mismatch ends that model's attempt with the problems as its error, so the
 runner falls back to the next model (§9), and if none is left the run sends the
 statistics-only report. A model that corrects itself is used, with a data-quality note
 saying a correction was needed. An analysis returned as content instead of a tool call
-goes through the same check. This is what lets the adjudicator read the analysis
+goes through the same check. A model that ends its turn with no tool call and no
+analysis in its content gets one reminder to call `submit_analysis` (through the
+terminal tool's `on_stop` hook, sent as a user message by every provider); stopping
+again ends that model's attempt and the runner falls back. This is what lets the adjudicator read the analysis
 without defending against every shape a weaker model invents: before the check, one
 model returning actions as plain strings crashed a run outright. As a backstop, if
 building the report from an accepted analysis still fails, the run degrades to the

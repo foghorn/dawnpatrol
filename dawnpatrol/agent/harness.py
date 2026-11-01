@@ -186,6 +186,16 @@ class Harness:
         result.tool_calls = len(run.tool_calls)
         result.turns = run.turns
 
+        if toolbox.stop_reminders and run.ok:
+            result.notes.append(
+                "the model ended its turn without submitting its analysis; it was "
+                "reminded to and then submitted"
+            )
+        if toolbox.unwrapped_fields and run.ok:
+            result.notes.append(
+                "the model sent part of its analysis as JSON text rather than "
+                "structured data; it was parsed before the format check"
+            )
         if toolbox.format_corrections and run.ok:
             result.notes.append(
                 "the model's first analysis did not match the required format; it "

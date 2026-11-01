@@ -7,7 +7,7 @@ import json
 import pytest
 
 from dawnpatrol.agent.bundle import build_bundle
-from dawnpatrol.agent.schema import analysis_problems
+from dawnpatrol.agent.schema import analysis_problems, unwrap_json_strings
 from dawnpatrol.agent.tools import ToolBox
 from dawnpatrol.analyzers.baseline import Baseline
 from dawnpatrol.devices import DeviceDirectory
@@ -188,6 +188,81 @@ def test_a_malformed_analysis_gets_one_correction_spelling_out_the_format(store,
     assert '"recommended_actions"' in correction, "the full schema is included"
     with pytest.raises(SubmissionRejected, match="still did not match"):
         toolbox.check_submission(STRING_ACTIONS)
+
+
+def test_fields_sent_as_json_text_are_parsed_before_the_check(store, profile):
+    toolbox = _toolbox(store, profile)
+    args = {**VALID_ANALYSIS,
+            "findings": "[]",
+            "recommended_actions": json.dumps(VALID_ANALYSIS["recommended_actions"])}
+    assert toolbox.check_submission(args) is None, "accepted without a correction"
+    assert args == VALID_ANALYSIS, "the provider's copy is the parsed one"
+    assert toolbox.unwrapped_fields == ["findings", "recommended_actions"]
+    assert toolbox.format_corrections == 0
+
+
+def test_json_text_is_parsed_only_into_the_type_the_schema_wants():
+    nested = {"recommended_actions": ['{"priority": 1, "text": "Block it."}'],
+              "findings": '{"not": "a list"}', "executive_summary": "[1, 2]",
+              "section_narratives": "not json"}
+    assert unwrap_json_strings(nested) == ["recommended_actions[0]"]
+    assert nested["recommended_actions"] == [{"priority": 1, "text": "Block it."}]
+    assert nested["findings"] == '{"not": "a list"}', "wrong type is left for the check"
+    assert nested["executive_summary"] == "[1, 2]", "a string field stays a string"
+    assert nested["section_narratives"] == "not json"
+
+
+def test_json_text_missing_only_its_final_closer_is_parsed():
+    actions = '[{"priority": 1, "text": "Block it."}'
+    data = {"recommended_actions": actions,
+            "section_narratives": '{"perimeter": "Quiet."',
+            "findings": '[{"title": "x"}'}
+    assert sorted(unwrap_json_strings(data)) == ["findings", "recommended_actions",
+                                                 "section_narratives"]
+    assert data["recommended_actions"] == [{"priority": 1, "text": "Block it."}]
+    assert data["section_narratives"] == {"perimeter": "Quiet."}
+    broken = {"findings": '[{"title": "x"'}
+    assert unwrap_json_strings(broken) == [], "only a single missing closer is repaired"
+
+
+def test_a_model_that_stops_without_submitting_is_reminded_once(store, profile):
+    toolbox = _toolbox(store, profile)
+    submit = next(s for s in toolbox.specs() if s.terminal)
+    assert "Call submit_analysis now" in submit.on_stop()
+    assert submit.on_stop() is None, "a second stop ends this model's attempt"
+    assert toolbox.stop_reminders == 1
+
+
+def test_json_text_with_stray_closing_brackets_after_it_is_parsed():
+    data = {"findings": '[{"title": "x"}]\n]',
+            "section_narratives": '{"perimeter": "Quiet."} }'}
+    assert sorted(unwrap_json_strings(data)) == ["findings", "section_narratives"]
+    assert data["findings"] == [{"title": "x"}]
+    assert data["section_narratives"] == {"perimeter": "Quiet."}
+    trailing_text = {"findings": '[{"title": "x"}] and more'}
+    assert unwrap_json_strings(trailing_text) == [], "only closers may trail the value"
+
+
+def test_each_tool_result_shows_the_budget_left(store, profile):
+    toolbox = _toolbox(store, profile)
+    toolbox.max_calls = 5
+    describe = next(s for s in toolbox.specs() if s.name == "describe_schema").handler
+    results = [describe({}) for _ in range(6)]
+    assert results[0].endswith("\n\n[tool calls used: 1 of 5]")
+    assert results[1].endswith("[tool calls used: 2 of 5] 3 remaining - spend them on "
+                               "your most important open question, then submit.")
+    assert results[4].endswith("[tool calls used: 5 of 5] That was your last tool "
+                               "call. Submit your analysis now.")
+    assert results[5].startswith("Tool-call budget exhausted")
+    assert "tool calls used" not in results[5]
+
+
+def test_json_text_that_still_fails_the_check_gets_the_correction(store, profile):
+    toolbox = _toolbox(store, profile)
+    args = {**VALID_ANALYSIS, "recommended_actions": '["Block 203.0.113.45"]'}
+    assert "is not of type 'object'" in toolbox.check_submission(args)
+    with pytest.raises(SubmissionRejected):
+        toolbox.check_submission(dict(args, recommended_actions='["Block it"]'))
 
 
 def test_a_corrected_analysis_is_accepted_after_the_follow_up(store, profile):

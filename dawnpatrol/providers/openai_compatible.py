@@ -49,6 +49,7 @@ from .base import (
     SubmissionRejected,
     ToolCallLog,
     ToolSpec,
+    stop_reminder,
 )
 
 log = logging.getLogger(__name__)
@@ -203,6 +204,9 @@ class OpenAICompatibleProvider(Provider):
                             )
                             return run
                         messages.append({"role": "user", "content": correction})
+                        continue
+                    if (reminder := stop_reminder(tools)) is not None:
+                        messages.append({"role": "user", "content": reminder})
                         continue
                     run.error = (f"model stopped without calling {SUBMIT_TOOL} "
                                  f"(finish_reason={run.stop_reason})")

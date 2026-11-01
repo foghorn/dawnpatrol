@@ -26,6 +26,7 @@ from .base import (
     SubmissionRejected,
     ToolCallLog,
     ToolSpec,
+    stop_reminder,
 )
 
 log = logging.getLogger(__name__)
@@ -147,6 +148,9 @@ class AnthropicProvider(Provider):
 
             tool_uses = [b for b in message.content if getattr(b, "type", "") == "tool_use"]
             if not tool_uses:
+                if (reminder := stop_reminder(tools)) is not None:
+                    messages.append({"role": "user", "content": reminder})
+                    continue
                 run.error = run.error or (
                     f"model stopped without calling {SUBMIT_TOOL} "
                     f"(stop_reason={run.stop_reason})"

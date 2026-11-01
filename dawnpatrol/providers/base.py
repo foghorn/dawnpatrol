@@ -42,6 +42,20 @@ class ToolSpec:
     #: accept it, returns text to send back to the model as a correction (the
     #: loop continues), or raises SubmissionRejected to end the run with an error.
     terminal: bool = False
+    #: For a terminal tool: called when the model ends its turn without calling
+    #: it. Returns text to send back as a user message (the loop continues), or
+    #: None to end the run with the usual "stopped without calling" error.
+    on_stop: Callable[[], str | None] | None = None
+
+
+def stop_reminder(tools: list[ToolSpec]) -> str | None:
+    """What to send a model that ended its turn without calling the terminal tool.
+
+    None means there is nothing to send, and the provider ends the run with
+    its usual error.
+    """
+    spec = next((t for t in tools if t.terminal and t.on_stop), None)
+    return spec.on_stop() if spec else None
 
 
 @dataclass(slots=True)

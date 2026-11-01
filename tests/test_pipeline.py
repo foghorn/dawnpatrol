@@ -279,6 +279,38 @@ def test_a_model_that_keeps_the_wrong_format_falls_back_to_the_next(sloppy_runne
     assert store.recent_runs(1)[0]["model"] == "cloud-1"
 
 
+def test_findings_sent_as_json_text_are_used_without_a_correction(sloppy_runner, monkeypatch):
+    def run_agent(self, *, system_static, system_context, user_message,
+                  tools, max_turns, on_turn=None):
+        submit = next(t for t in tools if t.terminal)
+        args = {**GOOD_ANALYSIS, "findings": json.dumps(GOOD_ANALYSIS["findings"])}
+        assert submit.handler(args) is None
+        return AgentRun(analysis=args, usage=TokenUsage(calls=1))
+
+    monkeypatch.setattr(SloppyProvider, "run_agent", run_agent)
+    report = sloppy_runner.run().report
+    assert not report.degraded
+    assert report.finding_count == 1
+    assert any("parsed before the format check" in n for n in report.data_quality)
+    assert not any("asked to correct it" in n for n in report.data_quality)
+    assert not any("fallback model" in n for n in report.data_quality)
+
+
+def test_a_model_reminded_to_submit_is_used_and_noted(sloppy_runner, monkeypatch):
+    def run_agent(self, *, system_static, system_context, user_message,
+                  tools, max_turns, on_turn=None):
+        submit = next(t for t in tools if t.terminal)
+        assert submit.on_stop() is not None, "the first stop earns a reminder"
+        assert submit.handler(GOOD_ANALYSIS) is None
+        return AgentRun(analysis=GOOD_ANALYSIS, usage=TokenUsage(calls=2))
+
+    monkeypatch.setattr(SloppyProvider, "run_agent", run_agent)
+    report = sloppy_runner.run().report
+    assert report.finding_count == 1
+    assert any("reminded to and then submitted" in n for n in report.data_quality)
+    assert not any("fallback model" in n for n in report.data_quality)
+
+
 def test_no_model_matching_the_format_sends_the_statistics_only_report(
         sloppy_runner, settings, monkeypatch):
     monkeypatch.setattr("dawnpatrol.runner.build_provider", lambda ai: SloppyProvider(ai))

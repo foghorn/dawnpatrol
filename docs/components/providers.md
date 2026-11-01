@@ -74,8 +74,17 @@ terminal tool (or returns its analysis as content), pass the arguments to that s
 | raises `SubmissionRejected` | Set `run.error` to its message and return; the runner tries the next model. |
 
 The harness's handler accepts an analysis only when it matches `ANALYSIS_SCHEMA`
-exactly, and allows one correction before rejecting. Your provider only has to route
+exactly, and allows one correction before rejecting. It first parses, in place, any
+list or object field that arrived as a string of JSON, so set `run.analysis` from the
+same `args` object you passed it, not a copy made beforehand. Your provider only has to route
 the three outcomes; it never inspects the analysis itself.
+
+**A model that stops without submitting gets one reminder.** When the model ends a
+turn with no tool call at all (and no analysis in its content), call
+`stop_reminder(tools)` from `providers/base.py`. Text means send it as a user message
+and keep looping; `None` means end the run with the usual "stopped without calling
+submit_analysis" error, so the runner falls back. The harness's terminal tool supplies
+the reminder through `ToolSpec.on_stop` and allows one.
 
 ## Walkthrough: `anthropic_provider.py`
 
@@ -135,6 +144,8 @@ class MyBackendProvider(Provider):
         # ... build the request, loop on tool calls, dispatch through by_name.
         #     On the terminal tool (spec.terminal), route spec.handler(args):
         #     None -> accept, text -> send back and loop, SubmissionRejected -> error.
+        #     On a turn with no tool call, send stop_reminder(tools) as a user
+        #     message and loop; None from it means end with an error.
         return run
 ```
 

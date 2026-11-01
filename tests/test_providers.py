@@ -486,3 +486,64 @@ def test_openai_provider_sends_a_correction_as_the_call_output(monkeypatch):
     assert run.analysis == {"attempt": 2}
     assert bodies[1]["input"][-1] == {"type": "function_call_output", "call_id": "c1",
                                       "output": "use objects"}
+
+
+# --------------------------------------------------------------------------- #
+# Stopping without submitting
+# --------------------------------------------------------------------------- #
+
+
+def _reminding_tools(reminders: list) -> list[ToolSpec]:
+    """A submit tool that accepts anything and answers a stop with each
+    reminder in turn (None ends the run)."""
+    return [_tools()[0], ToolSpec(name=SUBMIT_TOOL, description="submit",
+                                  parameters={"type": "object"},
+                                  handler=lambda args: None, terminal=True,
+                                  on_stop=lambda: reminders.pop(0))]
+
+
+def test_a_model_that_stops_without_submitting_is_reminded(monkeypatch):
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(200, json=_completion(content="All quiet tonight."))
+        return httpx.Response(200, json=_submit_completion("2", {"findings": []}))
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_reminding_tools(["submit it"]), max_turns=5)
+    assert run.error is None
+    assert run.analysis == {"findings": []}
+    assert bodies[1]["messages"][-1] == {"role": "user", "content": "submit it"}
+
+
+def test_a_model_that_stops_again_after_the_reminder_ends_the_run(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_completion(content="All quiet tonight."))
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_reminding_tools(["submit it", None]), max_turns=5)
+    assert run.analysis is None
+    assert "stopped without calling" in run.error
+
+
+def test_openai_provider_sends_the_reminder_as_a_user_message(monkeypatch):
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        if len(bodies) == 1:
+            return httpx.Response(200, json=_oa_response([
+                {"type": "message", "status": "completed", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "All quiet tonight."}]}]))
+        return httpx.Response(200, json=_oa_response(
+            [_oa_function_call(SUBMIT_TOOL, json.dumps({"findings": []}), call_id="c2")]))
+
+    provider = _oa_provider(monkeypatch, _oa_settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_reminding_tools(["submit it"]), max_turns=5)
+    assert run.analysis == {"findings": []}
+    assert bodies[1]["input"][-1] == {"role": "user", "content": "submit it"}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from ..analyzers.baseline import Baseline
@@ -25,7 +26,12 @@ from ..providers.base import SUBMIT_TOOL, SubmissionRejected, ToolSpec
 from ..query import EventQuery
 from ..store import Store
 from . import sqlguard
-from .schema import ANALYSIS_SCHEMA, analysis_problems, format_correction
+from .schema import (
+    ANALYSIS_SCHEMA,
+    analysis_problems,
+    format_correction,
+    unwrap_json_strings,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +39,11 @@ MAX_ENRICH_PER_CALL = 10
 #: Follow-ups a model gets to fix a submission that does not match the schema
 #: before the run moves on to the next model.
 FORMAT_CORRECTIONS = 1
+#: Reminders a model gets to submit after ending its turn without calling
+#: submit_analysis, before the run moves on to the next model.
+STOP_REMINDERS = 1
+#: Tool calls left at which each result urges the model to prioritise.
+LOW_BUDGET = 3
 
 
 class ToolBox:
@@ -69,6 +80,8 @@ class ToolBox:
         self.calls_made = 0
         self.call_log: list[str] = []
         self.format_corrections = 0
+        self.unwrapped_fields: list[str] = []
+        self.stop_reminders = 0
 
     # ----- budget ----------------------------------------------------------- #
 
@@ -80,6 +93,27 @@ class ToolBox:
                     f"Submit your analysis now with what you have, and note the "
                     f"limitation in data_quality_notes.")
         return None
+
+    def _metered(self, handler: Callable[[dict[str, Any]], str]) -> Callable[[dict[str, Any]], str]:
+        """``handler`` with the remaining tool-call budget appended to its result.
+
+        The model learns the budget from what it spends rather than from the
+        prompt, which keeps the cached system prompt identical across models
+        whose budgets differ.
+        """
+        def metered(args: dict[str, Any]) -> str:
+            result = handler(args)
+            if self.calls_made > self.max_calls:
+                return result
+            line = f"[tool calls used: {self.calls_made} of {self.max_calls}]"
+            remaining = self.max_calls - self.calls_made
+            if remaining == 0:
+                line += " That was your last tool call. Submit your analysis now."
+            elif remaining <= LOW_BUDGET:
+                line += (f" {remaining} remaining - spend them on your most "
+                         f"important open question, then submit.")
+            return f"{result}\n\n{line}"
+        return metered
 
     # ----- handlers ---------------------------------------------------------- #
 
@@ -259,7 +293,7 @@ class ToolBox:
                     "queries. Call this before your first query_events."
                 ),
                 parameters={"type": "object", "properties": {}, "additionalProperties": False},
-                handler=self.describe_schema,
+                handler=self._metered(self.describe_schema),
             ),
             ToolSpec(
                 name="query_events",
@@ -277,7 +311,7 @@ class ToolBox:
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000},
                     },
                 },
-                handler=self.query_events,
+                handler=self._metered(self.query_events),
             ),
             ToolSpec(
                 name="sample_events",
@@ -294,7 +328,7 @@ class ToolBox:
                         "n": {"type": "integer", "minimum": 1, "maximum": 50},
                     },
                 },
-                handler=self.sample_events,
+                handler=self._metered(self.sample_events),
             ),
             ToolSpec(
                 name="get_entity_history",
@@ -309,7 +343,7 @@ class ToolBox:
                     "required": ["value"],
                     "properties": {"value": {"type": "string"}},
                 },
-                handler=self.get_entity_history,
+                handler=self._metered(self.get_entity_history),
             ),
             ToolSpec(
                 name="get_metric_history",
@@ -323,7 +357,7 @@ class ToolBox:
                         "days": {"type": "integer", "minimum": 1, "maximum": 365},
                     },
                 },
-                handler=self.get_metric_history,
+                handler=self._metered(self.get_metric_history),
             ),
             ToolSpec(
                 name="hunt_history",
@@ -340,7 +374,7 @@ class ToolBox:
                         "days": {"type": "integer", "minimum": 1, "maximum": 365},
                     },
                 },
-                handler=self.hunt_history,
+                handler=self._metered(self.hunt_history),
             ),
         ]
 
@@ -362,7 +396,7 @@ class ToolBox:
                               "description": "Omit to list every known device."},
                     },
                 },
-                handler=self.get_device_directory,
+                handler=self._metered(self.get_device_directory),
             ))
 
         if self.notebook_enabled:
@@ -392,7 +426,7 @@ class ToolBox:
                                 "maxLength": self.notebook_max_entry_chars},
                     },
                 },
-                handler=self.add_notebook_entry,
+                handler=self._metered(self.add_notebook_entry),
             ))
 
         if self.broker.available_for("ip"):
@@ -413,7 +447,7 @@ class ToolBox:
                                 "maxItems": MAX_ENRICH_PER_CALL},
                     },
                 },
-                handler=self.enrich_ip,
+                handler=self._metered(self.enrich_ip),
             ))
 
         if self.broker.available_for("domain"):
@@ -432,7 +466,7 @@ class ToolBox:
                                     "maxItems": MAX_ENRICH_PER_CALL},
                     },
                 },
-                handler=self.enrich_domain,
+                handler=self._metered(self.enrich_domain),
             ))
 
         tools.append(ToolSpec(
@@ -443,16 +477,40 @@ class ToolBox:
             ),
             parameters=ANALYSIS_SCHEMA,
             handler=self.check_submission,
+            on_stop=self.remind_to_submit,
             terminal=True,
         ))
         return tools
 
+    def remind_to_submit(self) -> str | None:
+        """The follow-up for a model that ended its turn without submitting.
+
+        Sent once; a second stop returns None, which ends this model's attempt
+        so the runner can try the next one.
+        """
+        if self.stop_reminders >= STOP_REMINDERS:
+            return None
+        self.stop_reminders += 1
+        log.warning("model ended its turn without calling %s, reminding it to submit",
+                    SUBMIT_TOOL)
+        return (f"You ended your turn without calling {SUBMIT_TOOL}, so no analysis "
+                f"has been recorded and this run has no report yet. Call "
+                f"{SUBMIT_TOOL} now with your complete analysis as its arguments. "
+                f"Do not reply with plain text.")
+
     def check_submission(self, args: dict[str, Any]) -> str | None:
         """Accept an analysis only if it matches the schema exactly.
 
-        The first mismatch earns one follow-up spelling out the format; a
-        second ends this model's attempt, so the runner can try the next one.
+        Fields sent as a string of JSON are parsed in place first, so the
+        provider's accepted analysis is the unwrapped one. The first mismatch
+        earns one follow-up spelling out the format; a second ends this model's
+        attempt, so the runner can try the next one.
         """
+        unwrapped = unwrap_json_strings(args)
+        if unwrapped:
+            self.unwrapped_fields += unwrapped
+            log.warning("analysis sent %s as JSON text; parsed it before checking "
+                        "the format", ", ".join(unwrapped[:5]))
         problems = analysis_problems(args)
         if not problems:
             return None

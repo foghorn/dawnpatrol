@@ -245,6 +245,58 @@ MAX_PROBLEMS = 15
 _validator: Draft202012Validator | None = None
 
 
+def unwrap_json_strings(data: Any, schema: dict[str, Any] = ANALYSIS_SCHEMA,
+                        path: str = "") -> list[str]:
+    """Replace, in place, strings that hold JSON where ``schema`` wants a list or object.
+
+    Some local models send a nested field like ``findings`` as a string of JSON
+    rather than the array itself. When that string parses to the type the
+    schema expects, the parsed value is what the model meant, so use it. A
+    string that doesn't parse, or parses to the wrong type, is left alone for
+    validation to report. Returns the paths that were unwrapped.
+    """
+    if isinstance(data, dict):
+        children = [(key, sub, f"{path}.{key}" if path else key)
+                    for key, sub in (schema.get("properties") or {}).items() if key in data]
+    elif isinstance(data, list) and isinstance(schema.get("items"), dict):
+        children = [(i, schema["items"], f"{path}[{i}]") for i in range(len(data))]
+    else:
+        return []
+    unwrapped: list[str] = []
+    for key, sub, where in children:
+        parsed = _json_of_type(data[key], sub.get("type"))
+        if parsed is not None:
+            data[key] = parsed
+            unwrapped.append(where)
+        unwrapped += unwrap_json_strings(data[key], sub, where)
+    return unwrapped
+
+
+def _json_of_type(value: Any, wanted: Any) -> list | dict | None:
+    """``value`` parsed, if it is a JSON string of the array/object type ``wanted``.
+
+    Two slips a local model was seen making are repaired: a string missing
+    only its final ``]`` or ``}``, and a complete value followed by stray
+    closing brackets. Nothing else is repaired.
+    """
+    if not isinstance(value, str) or wanted not in ("array", "object"):
+        return None
+    kind = list if wanted == "array" else dict
+    for text in (value, value + ("]" if kind is list else "}")):
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            continue
+        return parsed if isinstance(parsed, kind) else None
+    try:
+        parsed, end = json.JSONDecoder().raw_decode(value.lstrip())
+    except ValueError:
+        return None
+    if isinstance(parsed, kind) and not value.lstrip()[end:].strip(" \t\r\n]}"):
+        return parsed
+    return None
+
+
 def analysis_problems(data: Any) -> list[str]:
     """Every way ``data`` departs from ANALYSIS_SCHEMA, as readable lines.
 
