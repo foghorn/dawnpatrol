@@ -277,6 +277,9 @@ class Runner:
                 ):
                     self.store.remove_watch(removal.entity_type, removal.entity_value)
 
+            report.ai_model = ai_used.model if ai_used and not report.degraded else ""
+            report.analysis_seconds = timings.get("investigate")
+
             if stop_after == "adjudicate":
                 return self._stop(outcome, "adjudicate", timings, run_id)
 

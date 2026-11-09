@@ -42,11 +42,11 @@ def test_get_device_directory_lists_all_when_no_ip_given(store, profile):
 def test_get_device_directory_detail_for_one_ip(store, profile):
     devices = DeviceDirectory()
     devices.update("10.10.0.1", source="librenms_syslog", hostname="edge",
-                  hardware="ASUS RT-AX88U Pro")
+                  hardware="ExampleCo AX-1000")
     toolbox = _toolbox(store, profile, devices=devices)
     payload = json.loads(toolbox.get_device_directory({"ip": "10.10.0.1"}))
     assert payload["hostname"] == "edge"
-    assert payload["hardware"] == "ASUS RT-AX88U Pro"
+    assert payload["hardware"] == "ExampleCo AX-1000"
 
 
 def test_get_device_directory_unknown_ip_is_a_clear_error(store, profile):
@@ -129,7 +129,7 @@ def test_add_notebook_entry_enforces_char_limit(store, profile):
 def test_bundle_includes_device_directory_section(window, profile):
     devices = DeviceDirectory()
     devices.update("10.10.0.1", source="librenms_syslog", role="librenms-managed",
-                  hostname="edge", hardware="ASUS RT-AX88U Pro")
+                  hostname="edge", hardware="ExampleCo AX-1000")
     bundle = build_bundle(
         window=window, profile=profile, health=[], metrics=[], signals=[],
         notes=[], watchlist=[], enrichment_budgets={}, baseline_available=False,
@@ -181,12 +181,17 @@ def test_schema_problems_name_the_field_and_what_was_wrong():
     assert analysis_problems("text") == ["top level: 'text' is not of type 'object'"]
 
 
-def test_a_malformed_analysis_gets_one_correction_spelling_out_the_format(store, profile):
+def test_a_malformed_analysis_gets_three_corrections_spelling_out_the_format(
+        store, profile):
     toolbox = _toolbox(store, profile)
-    correction = toolbox.check_submission(STRING_ACTIONS)
-    assert "'Block 203.0.113.45' is not of type 'object'" in correction
-    assert '"recommended_actions"' in correction, "the full schema is included"
-    with pytest.raises(SubmissionRejected, match="still did not match"):
+    corrections = [toolbox.check_submission(STRING_ACTIONS) for _ in range(3)]
+    assert all("'Block 203.0.113.45' is not of type 'object'" in c for c in corrections)
+    assert '"additionalProperties"' in corrections[0], "the full schema is included"
+    for later in corrections[1:]:
+        assert '"additionalProperties"' not in later, "the schema is sent only once"
+        assert "earlier correction" in later
+        assert len(later) < len(corrections[0]) / 5
+    with pytest.raises(SubmissionRejected, match="after 3 correction"):
         toolbox.check_submission(STRING_ACTIONS)
 
 
@@ -263,7 +268,8 @@ def test_each_tool_result_shows_the_budget_left(store, profile):
 def test_json_text_that_still_fails_the_check_gets_the_correction(store, profile):
     toolbox = _toolbox(store, profile)
     args = {**VALID_ANALYSIS, "recommended_actions": '["Block 203.0.113.45"]'}
-    assert "is not of type 'object'" in toolbox.check_submission(args)
+    for _ in range(3):
+        assert "is not of type 'object'" in toolbox.check_submission(args)
     with pytest.raises(SubmissionRejected):
         toolbox.check_submission(dict(args, recommended_actions='["Block it"]'))
 

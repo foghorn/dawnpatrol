@@ -314,13 +314,27 @@ def analysis_problems(data: Any) -> list[str]:
     return problems
 
 
-def format_correction(problems: list[str]) -> str:
-    """The follow-up sent to a model whose analysis did not match the schema."""
+def format_correction(problems: list[str], *, with_schema: bool = True) -> str:
+    """The follow-up sent to a model whose analysis did not match the schema.
+
+    The full schema runs to thousands of tokens, so only the first follow-up
+    carries it; later ones point back to it, which keeps repeated corrections
+    from crowding a local model's context window.
+    """
     listed = problems[:MAX_PROBLEMS]
     more = len(problems) - len(listed)
     lines = "\n".join(f"- {p}" for p in listed)
     if more > 0:
         lines += f"\n- ...and {more} more"
+    if not with_schema:
+        return (
+            "Your analysis was still NOT accepted because it does not match the "
+            "required format:\n"
+            f"{lines}\n\n"
+            "Call submit_analysis again with your complete analysis, matching "
+            "exactly the JSON schema given in the earlier correction. Send every "
+            "list and object as structured data, not as a string."
+        )
     return (
         "Your analysis was NOT accepted because it does not match the required "
         "format:\n"

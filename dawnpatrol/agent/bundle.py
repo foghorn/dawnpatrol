@@ -12,15 +12,18 @@ fenced so its boundaries are unambiguous.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from typing import Any
 
 from ..devices import DeviceDirectory
-from ..models import Metric, Signal, SourceHealth, Window
+from ..models import Metric, Severity, Signal, SourceHealth, Window
 from ..profile import Profile
 
 MAX_SIGNALS = 60
 MAX_METRICS_PER_SECTION = 25
 MAX_DEVICES_SHOWN = 200
+# A taxonomy with at least this many LOW/INFO signals is rendered as a table.
+TABLE_MIN_SIGNALS = 5
 
 
 def build_bundle(
@@ -59,7 +62,7 @@ def build_bundle(
         "Each signal was computed deterministically from the event store. Every\n"
         "finding you report must cite at least one signal id, or event ids when no\n"
         "signal covers the activity (such findings are recorded as SUSPECTED).\n"
-        + _fence(json.dumps([s.to_bundle() for s in ranked], indent=1, default=str))
+        + _signals_block(ranked)
     )
 
     sections.append("METRICS\n" + _metrics_block(metrics))
@@ -69,7 +72,7 @@ def build_bundle(
             "WATCHLIST CARRIED FORWARD\n"
             "Close resolved items with watchlist_removals rather than letting them\n"
             "recur silently.\n"
-            + _fence(json.dumps(watchlist, indent=1, default=str))
+            + _fence("\n".join(_compact(w) for w in watchlist))
         )
 
     if enrichment_budgets:
@@ -84,6 +87,102 @@ def build_bundle(
         sections.append("ANALYZER NOTES\n" + "\n".join(f"  - {n}" for n in notes[:40]))
 
     return "\n\n".join(sections)
+
+
+def _compact(obj: Any) -> str:
+    """One-line JSON. Pretty-printing cost ~3k tokens a run and told the model
+    nothing; one object per line keeps it just as readable."""
+    return json.dumps(obj, separators=(",", ":"), default=str)
+
+
+def _signals_block(ranked: list[Signal]) -> str:
+    """Render signals with the repetition squeezed out, losing no data.
+
+    Three reductions, all lossless:
+    - an analyzer's boilerplate ``note`` is printed once per taxonomy, and a
+      signal only carries its own note when it says something different;
+    - signals are compact one-line JSON;
+    - a taxonomy with many LOW/INFO signals (typically dozens of persistent
+      probers - background internet noise) becomes a table with one row per
+      signal, so the evidence field names are written once, not per signal.
+    Every signal id still appears exactly once, so all remain citable.
+    """
+    if not ranked:
+        return _fence("(none)")
+
+    dicts = [s.to_bundle() for s in ranked]
+
+    shared_notes: dict[str, str] = {}
+    for tax in dict.fromkeys(d["taxonomy"] for d in dicts):
+        counts = Counter(d["note"] for d in dicts
+                         if d["taxonomy"] == tax and d.get("note"))
+        if counts:
+            note, n = counts.most_common(1)[0]
+            if n >= 2:
+                shared_notes[tax] = note
+    for d in dicts:
+        if d.get("note") and d["note"] == shared_notes.get(d["taxonomy"]):
+            del d["note"]
+
+    low_by_tax = Counter(d["taxonomy"] for s, d in zip(ranked, dicts, strict=True)
+                         if s.severity_hint <= Severity.LOW)
+    tabled = {tax for tax, n in low_by_tax.items() if n >= TABLE_MIN_SIGNALS}
+
+    full: list[dict[str, Any]] = []
+    tables: dict[str, list[dict[str, Any]]] = {}
+    for s, d in zip(ranked, dicts, strict=True):
+        if d["taxonomy"] in tabled and s.severity_hint <= Severity.LOW:
+            tables.setdefault(d["taxonomy"], []).append(d)
+        else:
+            full.append(d)
+
+    parts: list[str] = []
+    if shared_notes:
+        parts.append(
+            "Analyzer notes by taxonomy (apply to every signal of that taxonomy; "
+            "a signal with its own note field overrides):\n"
+            + "\n".join(f"  {tax}: {note}" for tax, note in shared_notes.items())
+        )
+    if full:
+        parts.append("Signals (one JSON object per line, ordered by severity hint):\n"
+                     + _fence("\n".join(_compact(d) for d in full)))
+    for tax, rows in tables.items():
+        parts.append(_signal_table(tax, rows))
+    return "\n\n".join(parts)
+
+
+def _signal_table(taxonomy: str, rows: list[dict[str, Any]]) -> str:
+    """LOW/INFO signals of one taxonomy as a pipe-separated table."""
+    evidence_keys = list(dict.fromkeys(k for r in rows for k in r["evidence"]))
+    has_note = any("note" in r for r in rows)
+    has_first = any("first_seen" in r for r in rows)
+    has_recur = any("days_recurring" in r for r in rows)
+    cols = (["id", "severity_hint", "confidence", "entities"] + evidence_keys
+            + (["first_seen"] if has_first else [])
+            + (["days_recurring"] if has_recur else [])
+            + (["note"] if has_note else []))
+
+    def cell(value: Any) -> str:
+        if value is None:
+            return ""
+        text = value if isinstance(value, str) else _compact(value)
+        return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", " ")
+
+    lines = [" | ".join(cols)]
+    for r in rows:
+        ents = " ".join(f"{e['role']}={e['type']}:{e['value']}" for e in r["entities"])
+        values = ([r["id"], r["severity_hint"], r["confidence"], ents]
+                  + [r["evidence"].get(k) for k in evidence_keys]
+                  + ([r.get("first_seen")] if has_first else [])
+                  + ([r.get("days_recurring")] if has_recur else [])
+                  + ([r.get("note")] if has_note else []))
+        lines.append(" | ".join(cell(v) for v in values))
+    return (
+        f"{taxonomy}: {len(rows)} LOW/INFO signals as a table (one row per signal; "
+        f"same fields as the JSON signals above, entities as role=type:value). "
+        f"Example title: {rows[0]['title']}\n"
+        + _fence("\n".join(lines))
+    )
 
 
 def _rank_signals(signals: list[Signal]) -> list[Signal]:

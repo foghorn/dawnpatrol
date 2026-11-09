@@ -146,6 +146,13 @@ class AISettings:
     verify_tls: bool = True
     max_tokens_param: str = "max_tokens"  # openai_compatible only
     reasoning_effort: str = ""            # openai_compatible only
+    #: The model's context window in tokens (openai_compatible only). 0 (the
+    #: default) leaves context management off, so the server decides what
+    #: happens on overflow. CONTEXT_TOKENS=auto stores -1: ask an Ollama
+    #: server for the model's num_ctx at the start of each run.
+    context_tokens: int = 0
+    #: Longest single tool result handed back to the model, in characters.
+    tool_result_max_chars: int = 20000
     #: Cost accounting only, never sent to the API. anthropic_provider.py
     #: prices from its own built-in per-model table instead of these.
     price_input_per_mtok: float = 0.0
@@ -190,11 +197,20 @@ class AISettings:
             verify_tls=read_bool(f"{p}VERIFY_TLS", True),
             max_tokens_param=read_env(f"{p}MAX_TOKENS_PARAM", "max_tokens") or "max_tokens",
             reasoning_effort=read_env(f"{p}REASONING_EFFORT", "") or "",
+            context_tokens=_read_context_tokens(f"{p}CONTEXT_TOKENS"),
+            tool_result_max_chars=read_int(f"{p}TOOL_RESULT_MAX_CHARS", 20000),
             price_input_per_mtok=read_float(f"{p}PRICE_IN", 0.0),
             price_output_per_mtok=read_float(f"{p}PRICE_OUT", 0.0),
             price_cache_read_per_mtok=read_float(f"{p}PRICE_CACHE_READ", 0.0),
             price_cache_write_per_mtok=read_float(f"{p}PRICE_CACHE_WRITE", 0.0),
         )
+
+
+def _read_context_tokens(name: str) -> int:
+    """A token count, or "auto" (stored as -1) to ask the server."""
+    if (read_env(name, "") or "").strip().lower() == "auto":
+        return -1
+    return read_int(name, 0)
 
 
 def _discover_ai_designators() -> list[str]:

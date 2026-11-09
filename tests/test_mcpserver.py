@@ -366,7 +366,7 @@ def test_get_device_directory_missing_report_is_a_clear_error(toolctx):
 
 def test_get_device_directory_lists_devices_from_the_latest_report(toolctx, settings):
     _write_latest_report(settings, [
-        {"ip": "10.10.0.1", "hostname": "edge", "hardware": "ASUS RT-AX88U Pro",
+        {"ip": "10.10.0.1", "hostname": "edge", "hardware": "ExampleCo AX-1000",
          "roles": ["librenms-managed"], "sources": ["librenms_syslog"]},
         {"ip": "10.10.0.55", "hostname": "", "roles": ["dns-client"],
          "sources": ["pihole_dns"]},
@@ -376,7 +376,7 @@ def test_get_device_directory_lists_devices_from_the_latest_report(toolctx, sett
     assert out["run_id"] == "run-1"
     by_ip = {d["ip"]: d for d in out["devices"]}
     assert by_ip["10.10.0.1"]["hostname"] == "edge"
-    assert by_ip["10.10.0.1"]["hardware"] == "ASUS RT-AX88U Pro"
+    assert by_ip["10.10.0.1"]["hardware"] == "ExampleCo AX-1000"
     assert "librenms-managed" in by_ip["10.10.0.1"]["roles"]
     assert "dns-client" in by_ip["10.10.0.55"]["roles"]
 

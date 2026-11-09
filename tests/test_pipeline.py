@@ -23,6 +23,7 @@ from dawnpatrol.models import (
     Status,
     TokenUsage,
     Window,
+    _duration,
 )
 from dawnpatrol.providers.base import (
     SUBMIT_TOOL,
@@ -31,6 +32,7 @@ from dawnpatrol.providers.base import (
     SubmissionRejected,
     ToolCallLog,
 )
+from dawnpatrol.render import render as render_with
 from dawnpatrol.runner import Runner
 from dawnpatrol.sources.base import Source
 from tests.conftest import make_events
@@ -238,7 +240,8 @@ class SloppyProvider(Provider):
             elif self.fixes and submit.handler(GOOD_ANALYSIS) is None:
                 run.analysis = GOOD_ANALYSIS
             else:
-                submit.handler(bad)
+                while submit.handler(bad) is not None:
+                    pass
         except SubmissionRejected as exc:
             run.error = str(exc)
         return run
@@ -265,7 +268,7 @@ def test_a_model_that_fixes_its_format_when_asked_is_used(sloppy_runner):
     report = sloppy_runner.run().report
     assert not report.degraded
     assert report.finding_count == 1
-    assert any("asked to correct it and the corrected version was accepted" in n
+    assert any("asked to correct it 1 time(s) and the corrected version was accepted" in n
                for n in report.data_quality)
     assert not any("fallback model" in n for n in report.data_quality)
 
@@ -277,6 +280,7 @@ def test_a_model_that_keeps_the_wrong_format_falls_back_to_the_next(sloppy_runne
     note = next(n for n in report.data_quality if "fallback model cloud" in n)
     assert "still did not match the required format" in note
     assert store.recent_runs(1)[0]["model"] == "cloud-1"
+    assert report.ai_model == "cloud-1", "the header names the fallback that wrote it"
 
 
 def test_findings_sent_as_json_text_are_used_without_a_correction(sloppy_runner, monkeypatch):
@@ -320,6 +324,7 @@ def test_no_model_matching_the_format_sends_the_statistics_only_report(
     assert outcome.report.metrics, "statistics survive"
     note = next(n for n in outcome.report.data_quality if "did not complete" in n)
     assert note.count("still did not match the required format") == 2
+    assert outcome.report.analysis_summary.startswith("none, statistics only in ")
     assert outcome.deliveries and all(d.ok for d in outcome.deliveries)
 
 
@@ -687,3 +692,20 @@ def test_canary_domain_absent_from_every_rendered_format(runner):
         body = render_with(name, report)
         assert "dawnpatrol-canary-beacon.invalid" not in body
         assert "192.0.2.77" not in body
+
+
+def test_the_email_header_names_the_model_and_how_long_the_analysis_took(runner):
+    outcome = runner.run()
+    report = outcome.report
+    assert report.ai_model == "stub-1"
+    assert report.analysis_seconds is not None
+    assert report.analysis_summary.startswith("stub-1 in ")
+    assert f"analysis: {report.analysis_summary}" in render_with("html_email", report)
+    assert report.to_json_dict()["usage"]["model"] == "stub-1"
+
+
+@pytest.mark.parametrize(("seconds", "shown"), [
+    (48.4, "48s"), (1912.0, "31m 52s"), (7500.0, "2h 05m"), (0.2, "0s"),
+])
+def test_analysis_durations_read_naturally(seconds, shown):
+    assert _duration(seconds) == shown

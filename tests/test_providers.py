@@ -158,6 +158,68 @@ def test_unsupported_max_tokens_error_surfaces_clearly(monkeypatch):
     assert "max_completion_tokens" in run.error
 
 
+_OLLAMA_PARSE_ERROR = {"error": {"message": "XML syntax error on line 23: unexpected EOF",
+                                 "type": "api_error"}}
+
+
+def _empty_submit_completion() -> dict:
+    return _completion(
+        content=None,
+        tool_calls=[{"id": "1", "type": "function",
+                     "function": {"name": SUBMIT_TOOL,
+                                  "arguments": '{"findings": [], "executive_summary": "ok"}'}}],
+        finish_reason="tool_calls",
+    )
+
+
+def test_a_server_error_is_retried_once_and_the_retry_can_succeed(monkeypatch):
+    """Ollama answers 500 when it cannot parse the tool call a model wrote; the
+    same request is sent again, and a good second answer carries the run on."""
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        if len(bodies) == 1:
+            return httpx.Response(500, json=_OLLAMA_PARSE_ERROR)
+        return httpx.Response(200, json=_empty_submit_completion())
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_tools(), max_turns=3)
+    assert run.error is None
+    assert run.analysis == {"findings": [], "executive_summary": "ok"}
+    assert len(bodies) == 2 and bodies[0] == bodies[1]
+    assert run.usage.calls == 1
+
+
+def test_a_server_error_twice_in_a_row_fails_the_run(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, json=_OLLAMA_PARSE_ERROR)
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_tools(), max_turns=3)
+    assert calls["n"] == 2
+    assert run.error.startswith("HTTP 500") and "XML syntax error" in run.error
+
+
+def test_a_client_error_is_not_retried(monkeypatch):
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, json={"error": {"message": "bad request"}})
+
+    provider = _provider(monkeypatch, _settings(), handler)
+    run = provider.run_agent(system_static="s", system_context="c", user_message="u",
+                             tools=_tools(), max_turns=3)
+    assert calls["n"] == 1
+    assert run.error.startswith("HTTP 400")
+
+
 def test_openai_compatible_cost_does_not_double_count_cached_tokens(monkeypatch):
     """Same fix, same reasoning, as openai_provider.py's equivalent test -
     this provider's /v1/chat/completions usage shape has the identical

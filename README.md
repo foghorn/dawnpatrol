@@ -193,11 +193,15 @@ sent as JSON text instead of structured data (a common local-model habit, such
 as a `findings` list wrapped in quotes, sometimes missing its final bracket or
 with stray brackets or commas after it) is parsed first and used if it has the right shape. A
 model that gets the format wrong is told exactly what was wrong, shown the
-format, and asked to submit again. If its second attempt is still wrong, the run
+format, and asked to submit again, up to three times. If it is still wrong, the run
 falls back to the next model; if no model gets it right, you get the
 statistics-only report, never no report. A model that ends its turn without
 submitting at all is reminded once to submit, and falls back the same way if it
 stops again. Weaker local models need this most.
+
+Every report's header names the model that wrote its analysis and how long the
+analysis took (`analysis: claude-sonnet-5 in 3m 12s`; on a fallback, the
+fallback's model), and says `none, statistics only` when no model finished.
 
 Turn and tool-call limits default to `DAWNPATROL_AI_MAX_TURNS` and
 `DAWNPATROL_AI_MAX_TOOL_CALLS`, and any designator can set its own. Every turn
@@ -224,9 +228,38 @@ model call 9: 112340 input tokens (98112 cached), 15872/16000 output tokens
 ```
 
 If a local model stops with `finish_reason=length`, those lines show which limit
-it hit: input plus output nearing the model's context window (use a variant with a
-larger window, or lower that designator's `_MAX_TURNS`), or output reaching
-`_MAX_TOKENS` (raise it).
+it hit: input plus output nearing the model's context window (turn on context
+management, below; use a variant with a larger window; or lower that designator's
+`_MAX_TURNS`), or output reaching `_MAX_TOKENS` (raise it).
+
+A local server with a fixed context window doesn't always fail cleanly when a
+conversation outgrows it: Ollama can quietly drop the oldest messages, which here
+means the evidence the whole analysis rests on. For an `openai_compatible` model,
+`_CONTEXT_TOKENS` makes DawnPatrol keep the conversation inside the window itself:
+
+```bash
+DAWNPATROL_AI_LOCAL_CONTEXT_TOKENS=auto            # or the window in tokens, e.g. 131072
+DAWNPATROL_AI_LOCAL_TOOL_RESULT_MAX_CHARS=8000     # default 20000
+```
+
+`auto` asks an Ollama server for the model's `num_ctx` at the start of each run;
+other servers need the number. With it set:
+
+- each call's reply budget is sized to the room actually left in the window,
+  rather than always reserving the full `_MAX_TOKENS`;
+- once the prompt passes 85% of the window, the oldest tool results are replaced
+  with one-line placeholders until it is back under 60%. The evidence bundle, the
+  model's own turns and the three newest results are never touched, and a
+  placeholder names the query that produced it, so the model can run it again;
+- if that still leaves too little room for an answer, the model is told to stop
+  investigating and submit what it has.
+
+When any of that happens, the report's data-quality notes say so. Each model call
+also logs how full the window is (`model call 9: context 93100/131072 tokens (71%),
+output budget 32000`). Unset, context management is off and the server decides
+what happens on overflow. `_TOOL_RESULT_MAX_CHARS` caps any single tool result,
+with a note telling the model how to narrow the query; around 8000 suits a
+64–128k window.
 
 `openai_compatible` points at any server speaking `/v1/chat/completions` —
 Ollama, LM Studio, vLLM, LiteLLM, Open-WebUI, or a compatible gateway that
@@ -524,7 +557,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-305 tests, fully offline — no network, no API key, no spend — including an
+572 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract

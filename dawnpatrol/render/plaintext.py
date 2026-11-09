@@ -83,6 +83,7 @@ def render(report: Report) -> str:
     a(kv("Data sources", _health_summary(report.health), ""))
     if report.canaries:
         a(kv("Detection self-test", report.canary_summary, ""))
+    a(kv("Analysis", report.analysis_summary, ""))
     if report.degraded:
         a(kv("NOTE", "AI analysis unavailable - statistics only", ""))
 

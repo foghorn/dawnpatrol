@@ -59,15 +59,15 @@ def test_openwrt_kernel_uptime_prefixed_line_is_still_parsed_as_firewall(librenm
     DHCP chatter and invisible to every firewall-shaped analyzer."""
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "KERNEL", "seq": 10, "level": 4,
-        "msg": ("[4081245.823274] drop wan out: IN=eth0 OUT=eth1 MAC=d8:3a:dd:6a:6c:2a "
-                "SRC=10.128.15.135 DST=10.128.10.90 LEN=52 TTL=127 PROTO=TCP "
+        "msg": ("[4081245.823274] drop wan out: IN=eth0 OUT=eth1 MAC=02:00:00:00:00:01 "
+                "SRC=10.10.15.135 DST=10.10.0.90 LEN=52 TTL=127 PROTO=TCP "
                 "SPT=53056 DPT=7680"),
     }
     ev = librenms._normalize(entry, "4")
     assert ev.kind == EventKind.FIREWALL
     assert ev.action == "drop"
-    assert ev.src_ip == "10.128.15.135"
-    assert ev.dst_ip == "10.128.10.90"
+    assert ev.src_ip == "10.10.15.135"
+    assert ev.dst_ip == "10.10.0.90"
     assert ev.dst_port == 7680
     assert ev.proto == "tcp"
 
@@ -75,8 +75,8 @@ def test_openwrt_kernel_uptime_prefixed_line_is_still_parsed_as_firewall(librenm
 def test_openwrt_kernel_uptime_prefixed_reject_is_parsed(librenms):
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "KERNEL", "seq": 11,
-        "msg": ("[4082607.98] reject wan out: IN=eth0 OUT=eth1 MAC=dc:a6:32:0d:6f:bd "
-                "SRC=10.128.50.209 DST=10.128.10.161 LEN=256 TTL=63 PROTO=UDP "
+        "msg": ("[4082607.98] reject wan out: IN=eth0 OUT=eth1 MAC=02:00:00:00:00:02 "
+                "SRC=10.10.50.209 DST=10.10.0.161 LEN=256 TTL=63 PROTO=UDP "
                 "SPT=62691 DPT=62743"),
     }
     ev = librenms._normalize(entry, "7")
@@ -102,24 +102,24 @@ def test_vpn_program_becomes_an_auth_event(librenms):
 def test_wlceventd_deauth_becomes_an_auth_event_with_the_client_mac(librenms):
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "WLCEVENTD", "seq": 4,
-        "msg": ("wlceventd_proc_event(645): eth7: Deauth_ind 54:E4:ED:A1:17:BF, "
+        "msg": ("wlceventd_proc_event(645): eth7: Deauth_ind 02:AB:CD:00:00:03, "
                 "status: 0, reason: Previous authentication no longer valid (2), rssi:-65"),
     }
     ev = librenms._normalize(entry, "3")
     assert ev.kind == EventKind.AUTH
     assert ev.action == "deauth"
-    assert ev.user == "54:e4:ed:a1:17:bf"
+    assert ev.user == "02:ab:cd:00:00:03"
 
 
 def test_hostapd_deauth_becomes_an_auth_event_with_the_client_mac(librenms):
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "HOSTAPD", "seq": 5,
-        "msg": "eth7: STA 64:ff:0a:ba:41:93 IEEE 802.11: deauthenticated due to local deauth request",
+        "msg": "eth7: STA 02:00:00:00:00:04 IEEE 802.11: deauthenticated due to local deauth request",
     }
     ev = librenms._normalize(entry, "3")
     assert ev.kind == EventKind.AUTH
     assert ev.action == "deauth"
-    assert ev.user == "64:ff:0a:ba:41:93"
+    assert ev.user == "02:00:00:00:00:04"
 
 
 def test_non_deauth_wlceventd_lines_stay_system(librenms):
@@ -127,7 +127,7 @@ def test_non_deauth_wlceventd_lines_stay_system(librenms):
     that actually say "deauth" are reclassified."""
     entry = {
         "timestamp": "2026-06-01 03:14:15", "program": "WLCEVENTD", "seq": 6,
-        "msg": "wlceventd_proc_event(645): eth7: Assoc_ind 54:E4:ED:A1:17:BF",
+        "msg": "wlceventd_proc_event(645): eth7: Assoc_ind 02:AB:CD:00:00:03",
     }
     assert librenms._normalize(entry, "3").kind == EventKind.SYSTEM
 
@@ -580,30 +580,30 @@ def test_parse_router_admin_login(program, message, expected):
 
 def test_dhcpack_captures_ip_mac_and_hostname(librenms):
     entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 7,
-             "msg": "DHCPACK(br0) 10.128.10.90 a4:4f:3e:60:12:38 maven-iot"}
+             "msg": "DHCPACK(br0) 10.10.0.90 02:00:00:00:00:05 sensor-iot"}
     ev = librenms._normalize(entry, "3")
     assert ev.kind == EventKind.SYSTEM
     assert ev.action == "dhcpack"
-    assert ev.src_ip == "10.128.10.90"
-    assert ev.user == "a4:4f:3e:60:12:38"
+    assert ev.src_ip == "10.10.0.90"
+    assert ev.user == "02:00:00:00:00:05"
 
 
 def test_dhcpack_without_a_hostname_still_captures_ip_and_mac(librenms):
     entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 8,
-             "msg": "DHCPREQUEST(eth0) 10.128.15.135 1c:69:7a:0b:8e:49"}
+             "msg": "DHCPREQUEST(eth0) 10.10.15.135 02:00:00:00:00:06"}
     ev = librenms._normalize(entry, "3")
     assert ev.action == "dhcprequest"
-    assert ev.src_ip == "10.128.15.135"
-    assert ev.user == "1c:69:7a:0b:8e:49"
+    assert ev.src_ip == "10.10.15.135"
+    assert ev.user == "02:00:00:00:00:06"
 
 
 def test_dhcpdiscover_has_a_mac_but_no_ip_yet(librenms):
     entry = {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 9,
-             "msg": "DHCPDISCOVER(eth0) 44:bb:3b:43:26:24"}
+             "msg": "DHCPDISCOVER(eth0) 02:00:00:00:00:07"}
     ev = librenms._normalize(entry, "3")
     assert ev.action == "dhcpdiscover"
     assert ev.src_ip is None
-    assert ev.user == "44:bb:3b:43:26:24"
+    assert ev.user == "02:00:00:00:00:07"
 
 
 def test_dhcp_pool_exhaustion_error_is_not_parsed_as_a_lease(librenms):
@@ -629,7 +629,7 @@ def test_dhcpack_feeds_the_device_directory_with_hostname_and_mac(librenms, monk
             return httpx.Response(200, json={"devices": []})
         return httpx.Response(200, json={"total": 1, "logs": [
             {"timestamp": "2026-06-01 03:14:15", "program": "DNSMASQ-DHCP", "seq": 1,
-             "msg": "DHCPACK(eth0) 10.128.50.104 1c:53:f9:2d:33:30 Nest-Cam-indoor"},
+             "msg": "DHCPACK(eth0) 10.10.50.104 02:00:00:00:00:08 camera-indoor"},
         ]})
 
     monkeypatch.setattr(librenms, "_client",
@@ -638,10 +638,10 @@ def test_dhcpack_feeds_the_device_directory_with_hostname_and_mac(librenms, monk
     ctx = _FakeCtx()
     librenms.collect(window, ctx=ctx)
 
-    device = ctx.devices.get("10.128.50.104")
+    device = ctx.devices.get("10.10.50.104")
     assert device is not None
-    assert device.hostname == "Nest-Cam-indoor"
-    assert device.mac == "1c:53:f9:2d:33:30"
+    assert device.hostname == "camera-indoor"
+    assert device.mac == "02:00:00:00:00:08"
     assert "dhcp-client" in device.roles
     assert "librenms_syslog" in device.sources
 
@@ -711,7 +711,7 @@ def test_dnsmasq_answer_lines_are_not_turned_into_dns_events(librenms, verb_line
     # device activity.
     "1 127.0.0.1/60318 query[PTR] 218.10.10.10.in-addr.arpa from 127.0.0.1",
     "1 127.0.0.1/60318 config 10.10.10.218 is NXDOMAIN",
-    "13 127.0.0.1/60318 DHCP 10.10.50.114 is Nest-Cam-indoor.lan",
+    "13 127.0.0.1/60318 DHCP 10.10.50.114 is camera-indoor.lan",
     "53 127.0.0.1/60318 /tmp/hosts/dhcp.cfg01411c 10.10.50.1 is IoTFirewall.lan",
 ])
 def test_dnsmasq_restart_self_test_from_loopback_is_not_a_dns_event(librenms, verb_line):
@@ -808,7 +808,7 @@ def test_device_directory_parses_the_devices_endpoint(librenms, monkeypatch):
         assert request.url.path.endswith("/devices")
         return httpx.Response(200, json={"devices": [
             {"device_id": 3, "hostname": "edge", "ip": "10.10.0.1",
-             "hardware": "ASUS RT-AX88U Pro", "os": "asuswrt-merlin",
+             "hardware": "ExampleCo AX-1000", "os": "example-firmware",
              "status": 1, "uptime": 123456},
             {"device_id": 8, "hostname": "dmz-windows", "status": 0},
         ]})
@@ -816,7 +816,7 @@ def test_device_directory_parses_the_devices_endpoint(librenms, monkeypatch):
     with _mock_client(handler) as client:
         directory = librenms._device_directory(client)
     assert directory["3"]["hostname"] == "edge"
-    assert directory["3"]["hardware"] == "ASUS RT-AX88U Pro"
+    assert directory["3"]["hardware"] == "ExampleCo AX-1000"
     assert directory["3"]["status"] == "up"
     assert directory["8"]["status"] == "down"
 
@@ -881,8 +881,8 @@ def test_collect_health_notes_carry_device_metadata_when_available(librenms, mon
     def handler(request):
         if request.url.path.endswith("/devices"):
             return httpx.Response(200, json={"devices": [
-                {"device_id": 3, "hostname": "edge", "hardware": "ASUS RT-AX88U Pro",
-                 "os": "asuswrt-merlin", "status": 1},
+                {"device_id": 3, "hostname": "edge", "hardware": "ExampleCo AX-1000",
+                 "os": "example-firmware", "status": 1},
             ]})
         return httpx.Response(200, json={"total": 1, "logs": [
             {"timestamp": "2026-06-01 03:14:15", "program": "KERNEL", "seq": 1,
@@ -979,7 +979,7 @@ def test_librenms_collect_registers_devices_by_ip(librenms, monkeypatch, window)
         if request.url.path.endswith("/devices"):
             return httpx.Response(200, json={"devices": [
                 {"device_id": 3, "hostname": "edge", "ip": "10.10.0.1",
-                 "hardware": "ASUS RT-AX88U Pro", "os": "asuswrt-merlin", "status": 1},
+                 "hardware": "ExampleCo AX-1000", "os": "example-firmware", "status": 1},
                 {"device_id": 8, "hostname": "no-ip-device"},
             ]})
         return httpx.Response(200, json={"total": 0, "logs": []})
@@ -993,7 +993,7 @@ def test_librenms_collect_registers_devices_by_ip(librenms, monkeypatch, window)
     device = ctx.devices.get("10.10.0.1")
     assert device is not None
     assert device.hostname == "edge"
-    assert device.hardware == "ASUS RT-AX88U Pro"
+    assert device.hardware == "ExampleCo AX-1000"
     assert device.status == "up"
     assert "librenms_syslog" in device.sources
     assert "librenms-managed" in device.roles
@@ -1037,13 +1037,13 @@ def test_device_directory_merges_across_sources_without_clobbering():
     devices = DeviceDirectory()
     devices.update("10.10.0.1", source="pihole_dns", role="dns-client")
     devices.update("10.10.0.1", source="librenms_syslog", role="librenms-managed",
-                  hostname="edge", hardware="ASUS RT-AX88U Pro")
+                  hostname="edge", hardware="ExampleCo AX-1000")
     # A later, sparser contribution never overwrites a field already filled in.
     devices.update("10.10.0.1", source="librenms_syslog", hostname="should-not-win")
 
     device = devices.get("10.10.0.1")
     assert device.hostname == "edge"
-    assert device.hardware == "ASUS RT-AX88U Pro"
+    assert device.hardware == "ExampleCo AX-1000"
     assert device.sources == {"pihole_dns", "librenms_syslog"}
     assert device.roles == {"dns-client", "librenms-managed"}
 

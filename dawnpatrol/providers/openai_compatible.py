@@ -51,8 +51,16 @@ from .base import (
     ToolSpec,
     stop_reminder,
 )
+from .context_window import WRAP_UP_MESSAGE, ContextWindow
 
 log = logging.getLogger(__name__)
+
+#: Extra attempts at a model call the server answered with a 5xx error. Ollama
+#: returns 500 when it cannot parse the tool call a model wrote (for example
+#: "XML syntax error ... unexpected EOF" from a Qwen-family parser), and the
+#: model's sampled output is discarded with it; asking again usually yields a
+#: well-formed call.
+SERVER_ERROR_RETRIES = 1
 
 
 class OpenAICompatibleProvider(Provider):
@@ -119,6 +127,26 @@ class OpenAICompatibleProvider(Provider):
         max_turns: int,
         on_turn: Callable[[TokenUsage], None] | None = None,
     ) -> AgentRun:
+        ctx = _ContextState()
+        run = self._run_agent(
+            system_static=system_static, system_context=system_context,
+            user_message=user_message, tools=tools, max_turns=max_turns,
+            on_turn=on_turn, ctx=ctx,
+        )
+        run.context_note = ctx.note()
+        return run
+
+    def _run_agent(
+        self,
+        *,
+        system_static: str,
+        system_context: str,
+        user_message: str,
+        tools: list[ToolSpec],
+        max_turns: int,
+        on_turn: Callable[[TokenUsage], None] | None,
+        ctx: _ContextState,
+    ) -> AgentRun:
         run = AgentRun()
         by_name = {t.name: t for t in tools}
         if not self.endpoint:
@@ -138,14 +166,31 @@ class OpenAICompatibleProvider(Provider):
         ]
         with httpx.Client(timeout=self.settings.timeout_seconds, headers=headers,
                           verify=self.settings.verify_tls) as client:
+            window = ctx.window = self._context_window(client, tools)
             for turn in range(1, max_turns + 1):
                 run.turns = turn
+                max_tokens = self.settings.max_tokens
+                if window is not None:
+                    plan = window.plan(messages)
+                    if plan.wrap_up and not ctx.wrap_sent:
+                        log.warning("context: ~%d of %d tokens used after trimming; "
+                                    "telling the model to submit now",
+                                    plan.estimated_prompt_tokens, window.limit_tokens)
+                        messages.append({"role": "user", "content": WRAP_UP_MESSAGE})
+                        ctx.wrap_sent = True
+                        plan = window.plan(messages)
+                    if plan.exhausted:
+                        run.error = (f"context window exhausted: ~{plan.estimated_prompt_tokens}"
+                                     f" of {window.limit_tokens} tokens used, no room left "
+                                     f"for an answer")
+                        return run
+                    max_tokens = plan.max_tokens
                 payload: dict[str, Any] = {
                     "model": self.settings.model,
                     "messages": messages,
                     "tools": self._tool_defs(tools),
                     "tool_choice": "auto",
-                    self.max_tokens_param: self.settings.max_tokens,
+                    self.max_tokens_param: max_tokens,
                     "stream": False,
                 }
                 if self.settings.temperature is not None:
@@ -154,9 +199,7 @@ class OpenAICompatibleProvider(Provider):
                     payload["reasoning_effort"] = self.reasoning_effort
 
                 try:
-                    resp = client.post(self.endpoint, json=payload)
-                    resp.raise_for_status()
-                    data = resp.json()
+                    data = self._post(client, payload, turn)
                 except httpx.HTTPStatusError as exc:
                     run.error = (f"HTTP {exc.response.status_code}: "
                                  f"{exc.response.text[:300]}")
@@ -168,6 +211,11 @@ class OpenAICompatibleProvider(Provider):
                 usage = _usage_from(data)
                 usage.cost_usd = self.estimate_cost(usage)
                 run.usage.add(usage)
+                if window is not None:
+                    window.record(messages, usage.input_tokens)
+                    log.info("model call %d: context %d/%d tokens (%.0f%%), output budget %d",
+                             turn, usage.input_tokens, window.limit_tokens,
+                             100 * usage.input_tokens / window.limit_tokens, max_tokens)
                 if on_turn is not None:
                     on_turn(run.usage)
 
@@ -239,10 +287,19 @@ class OpenAICompatibleProvider(Provider):
                         run.tool_calls.append(ToolCallLog(tool_name, {}, False,
                                                           "format correction requested"))
                         continue
+                    if ctx.wrap_sent:
+                        messages.append(_tool_message(
+                            call_id, tool_name,
+                            "Not run: the context window is full. Call "
+                            f"{SUBMIT_TOOL} now with what you have."))
+                        run.tool_calls.append(ToolCallLog(tool_name, args, False,
+                                                          "skipped: context window full"))
+                        continue
                     try:
                         output = spec.handler(args)
                         text = output if isinstance(output, str) else json.dumps(
-                            output, default=str)[:20000]
+                            output, default=str)
+                        text = _cap(text, self.settings.tool_result_max_chars)
                         messages.append(_tool_message(call_id, tool_name, text))
                         run.tool_calls.append(ToolCallLog(tool_name, args, True))
                     except Exception as exc:  # noqa: BLE001
@@ -252,6 +309,81 @@ class OpenAICompatibleProvider(Provider):
 
         run.error = f"reached the {max_turns}-turn limit without a final analysis"
         return run
+
+
+    def _context_window(self, client: httpx.Client,
+                        tools: list[ToolSpec]) -> ContextWindow | None:
+        limit = self.settings.context_tokens
+        if limit < 0:
+            limit = self._ollama_num_ctx(client)
+            if not limit:
+                log.warning("context: CONTEXT_TOKENS=auto, but the server did not report "
+                            "num_ctx for %s; context management is off",
+                            self.settings.model)
+                return None
+        if limit <= 0:
+            return None
+        log.info("context: keeping %s within a %d-token window", self.settings.model, limit)
+        return ContextWindow(
+            limit_tokens=limit,
+            max_output_tokens=self.settings.max_tokens,
+            fixed_chars=len(json.dumps(self._tool_defs(tools), separators=(",", ":"))),
+        )
+
+    def _ollama_num_ctx(self, client: httpx.Client) -> int:
+        """The model's num_ctx from Ollama's /api/show, or 0 if unavailable."""
+        root = (self.settings.base_url or "").rstrip("/")
+        root = root.removesuffix("/v1")
+        try:
+            resp = client.post(f"{root}/api/show", json={"model": self.settings.model},
+                               timeout=15)
+            resp.raise_for_status()
+            for line in (resp.json().get("parameters") or "").splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == "num_ctx":
+                    return int(parts[1])
+        except Exception as exc:  # noqa: BLE001
+            log.debug("context: /api/show failed: %s", exc)
+        return 0
+
+    def _post(self, client: httpx.Client, payload: dict[str, Any], turn: int) -> Any:
+        """One model call, resent up to SERVER_ERROR_RETRIES times on a 5xx reply."""
+        for attempt in range(SERVER_ERROR_RETRIES + 1):
+            resp = client.post(self.endpoint, json=payload)
+            if resp.status_code >= 500 and attempt < SERVER_ERROR_RETRIES:
+                log.warning("model call %d: server returned HTTP %d (%s); retrying "
+                            "(attempt %d of %d)", turn, resp.status_code,
+                            resp.text[:300], attempt + 2, SERVER_ERROR_RETRIES + 1)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        raise AssertionError("unreachable")
+
+
+class _ContextState:
+    """What context management did during one run, for the report note."""
+
+    def __init__(self) -> None:
+        self.window: ContextWindow | None = None
+        self.wrap_sent = False
+
+    def note(self) -> str:
+        parts = []
+        if self.window is not None and (summary := self.window.summary()):
+            parts.append(summary)
+        if self.wrap_sent:
+            parts.append("the context window still filled up, so the model was told "
+                         "to stop investigating and submit with what it had")
+        return "; ".join(parts)
+
+
+def _cap(text: str, limit: int) -> str:
+    """Cut an oversized tool result, telling the model how to see the rest."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    return (text[:limit] + f"\n[Truncated: {len(text)} characters in total, the first "
+            f"{limit} shown. Narrow the query (filters, a LIMIT, a shorter time "
+            f"range) to see the rest.]")
 
 
 def _tool_message(call_id: str, name: str, content: str) -> dict[str, Any]:

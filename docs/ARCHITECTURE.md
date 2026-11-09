@@ -94,12 +94,13 @@ dawnpatrol/
 │   │   ├── anthropic_provider.py
 │   │   ├── openai_provider.py      # native /v1/responses
 │   │   ├── openai_compatible.py    # any /v1/chat/completions server
+│   │   ├── context_window.py       # keeps a local model inside its context window (§6.1)
 │   │   └── TEMPLATE.py
 │   └── mcpserver/                  # external-agent MCP surface (§12)
 │       ├── server.py               # tool registration, bearer-auth middleware
 │       ├── tools.py                # ToolContext: the tool implementations
 │       └── auth.py
-└── tests/                          # 430 tests, offline, zero spend (§14)
+└── tests/                          # 572 tests, offline, zero spend (§14)
 ```
 
 `canary.py` is deliberately not a discovered plugin folder like the five above — it ships
@@ -559,6 +560,37 @@ thing to read when a model stops with `finish_reason=length`. Input counts follo
 provider's own convention above, so for Anthropic the cached tokens are additional to the
 input figure rather than part of it.
 
+**Context management (`openai_compatible` only).** A local server has a hard context
+window, and what it does past it is its own business: Ollama can silently drop the oldest
+messages, which here is the evidence bundle the analysis rests on. Setting a designator's
+`_CONTEXT_TOKENS` (a token count, or `auto` to read the model's `num_ctx` from Ollama's
+`/api/show` at the start of each run) hands the provider a `ContextWindow`
+(`providers/context_window.py`) that it consults before every call. Three measures,
+cheapest first:
+
+1. **Size the reply to the room left.** Each call's `max_tokens` is the smaller of the
+   designator's `_MAX_TOKENS` and what remains of the window after the prompt and a
+   512-token safety margin, rather than always reserving the full figure.
+2. **Remove old tool results in one batch.** When the estimated prompt passes 85% of the
+   window, the oldest tool results are replaced with one-line stubs until it is under 60%.
+   Each stub names the tool and its arguments, so the model can re-run anything it still
+   needs. The system messages, the bundle, every assistant turn, format corrections (which
+   carry the schema) and the three newest results are never touched; if the newest results
+   alone are too big, all but the latest go. Trimming happens rarely and in one go because
+   any edit to the conversation invalidates the server's prefix cache from that point on.
+3. **Wrap up.** If less than 4,096 tokens of reply room remain after trimming, the model
+   gets one message to stop investigating and call `submit_analysis` with what it has, and
+   any further investigation call is answered "not run" rather than executed. Under 1,024
+   tokens the call isn't made at all and the attempt fails, so the runner falls back.
+
+Token counts are estimated from character counts, calibrated after every call against the
+`prompt_tokens` the server reports. Whatever trimming or wrap-up happened becomes
+`AgentRun.context_note`, which the harness adds to the report's data-quality notes, and
+each call logs the window's fill: `model call 9: context 93100/131072 tokens (71%),
+output budget 32000`. Unset, `_CONTEXT_TOKENS` leaves all of this off. Independently,
+`_TOOL_RESULT_MAX_CHARS` (default 20,000) caps any single tool result, ending a cut one
+with a note telling the model to narrow the query.
+
 ### 6.2 Prompt structure and caching
 
 Ordered for maximum cache hit rate — stable content first:
@@ -641,6 +673,19 @@ ISP strings — only ever appears inside this bundle or inside a later tool resu
 between `<<<DATA`/`DATA>>>` markers, with an explicit instruction that content inside them
 is data to analyze, never instructions to follow. It never appears in the system prompt.
 
+The bundle is written compactly, because it is resent on every turn and takes up much of
+a local model's context window. The squeezing is lossless; every signal id still appears
+exactly once, so all remain citable:
+
+- Signals and watchlist entries are one-line JSON, one per line, not pretty-printed.
+- When two or more signals of a taxonomy share the same analyzer `note`, it is printed
+  once under "Analyzer notes by taxonomy". A signal keeps its own note only when it
+  differs.
+- A taxonomy with at least five LOW/INFO signals (typically dozens of persistent probers,
+  the internet's background noise) is rendered as a pipe-separated table with one row per
+  signal, so the evidence field names are written once rather than per signal. Higher
+  severities stay as full JSON.
+
 The device directory (`devices.py`) itself is a per-run, in-memory registry keyed by IP,
 built fresh every run — any source's `collect()` can call `ctx.devices.update(ip,
 source=..., role=..., hostname=..., ...)` to contribute whatever it happens to know.
@@ -677,10 +722,13 @@ This happens in response to the submission, never as an instruction in the promp
 a report note records it. A string that doesn't parse, or parses to the wrong type, is
 left for the check to report, with two exceptions a local model was seen needing: a
 string missing only its final `]` or `}` is parsed with that closer added, and a complete
-value followed only by stray closing brackets or commas is parsed without them. A submission that still doesn't match gets one follow-up: the tool result lists each problem
+value followed only by stray closing brackets or commas is parsed without them. A submission that still doesn't match gets a follow-up, up to three times
+(`FORMAT_CORRECTIONS`): the tool result lists each problem
 by field (`recommended_actions[0]: 'Block 203.0.113.45' is not of type 'object'`),
-includes the full schema, and asks the model to submit again in exactly that format.
-A second mismatch ends that model's attempt with the problems as its error, so the
+includes the full schema (the first follow-up only; later ones list the problems and
+point back to it, so repeated corrections don't crowd a local model's context), and asks
+the model to submit again in exactly that format.
+A fourth mismatch ends that model's attempt with the problems as its error, so the
 runner falls back to the next model (§9), and if none is left the run sends the
 statistics-only report. A model that corrects itself is used, with a data-quality note
 saying a correction was needed. An analysis returned as content instead of a tool call
@@ -904,7 +952,8 @@ same "presence enables it" pattern the plugin folders use) - every other field f
 designator (`_MODEL`, `_API_KEY`, `_BASE_URL`, `_EFFORT`, `_MAX_TOKENS`, `_TEMPERATURE`,
 `_TIMEOUT`, `_VERIFY_TLS`, `_TASK_BUDGET_TOKENS`, `_REFUSAL_FALLBACK`,
 `_MAX_TOKENS_PARAM`, `_REASONING_EFFORT`, `_PRICE_IN`, `_PRICE_OUT`, `_PRICE_CACHE_READ`,
-`_PRICE_CACHE_WRITE`, and the optional `_MAX_TURNS` / `_MAX_TOOL_CALLS` overrides) lives under that same prefix. Because each designator owns its own
+`_PRICE_CACHE_WRITE`, the optional `_MAX_TURNS` / `_MAX_TOOL_CALLS` overrides, and, for
+`openai_compatible`, `_CONTEXT_TOKENS` / `_TOOL_RESULT_MAX_CHARS` from §6.1) lives under that same prefix. Because each designator owns its own
 namespace, any number of them can be fully filled in and left uncommented in `.env` at
 once without conflict - two configs never share a variable, so switching between them is
 never "which block is currently commented out." `DAWNPATROL_AI_ACTIVE=<name>` selects
@@ -1190,7 +1239,7 @@ that matters for your deployment.
 
 ## 14. Testing
 
-430 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
+572 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
 full end-to-end pipeline exercise against a stubbed provider. CI runs the same suite plus
 `ruff` on every push and pull request.
 

@@ -198,12 +198,15 @@ class Harness:
             )
         if toolbox.format_corrections and run.ok:
             result.notes.append(
-                "the model's first analysis did not match the required format; it "
-                "was asked to correct it and the corrected version was accepted"
+                f"the model's analysis did not match the required format; it was "
+                f"asked to correct it {toolbox.format_corrections} time(s) and the "
+                f"corrected version was accepted"
             )
 
         if run.transcript_note:
             result.notes.append(run.transcript_note)
+        if run.context_note:
+            result.notes.append(run.context_note)
 
         # Format corrections are reported above, not as failed tools.
         failed_tools = [t for t in run.tool_calls if not t.ok and t.name != SUBMIT_TOOL]

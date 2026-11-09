@@ -588,6 +588,16 @@ class TokenUsage:
         self.calls += other.calls
 
 
+def _duration(seconds: float) -> str:
+    """``seconds`` as e.g. "31m 52s", "2h 05m" or "48s"."""
+    total = int(round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"
+
+
 @dataclass(slots=True)
 class Report:
     """Everything the renderers need. Fully assembled before any output runs."""
@@ -615,6 +625,10 @@ class Report:
     usage: TokenUsage = field(default_factory=TokenUsage)
     degraded: bool = False  # agent stage skipped or failed; stats-only report
     site_name: str = "network"
+    # The model that produced the analysis (a fallback's, when one ran), and
+    # how long the investigate stage took, failed attempts included.
+    ai_model: str = ""
+    analysis_seconds: float | None = None
 
     # ----- convenience accessors used by renderers ------------------------- #
 
@@ -637,6 +651,15 @@ class Report:
     @property
     def finding_count(self) -> int:
         return len(self.findings)
+
+    @property
+    def analysis_summary(self) -> str:
+        """Which model wrote the analysis and how long the analysis took."""
+        took = (f" in {_duration(self.analysis_seconds)}"
+                if self.analysis_seconds is not None else "")
+        if self.degraded or not self.ai_model:
+            return f"none, statistics only{took}"
+        return f"{self.ai_model}{took}"
 
     @property
     def canary_summary(self) -> str:
@@ -752,6 +775,8 @@ class Report:
                 "cache_read_tokens": self.usage.cache_read_tokens,
                 "cost_usd": round(self.usage.cost_usd, 4),
                 "model_calls": self.usage.calls,
+                "model": self.ai_model or None,
+                "analysis_seconds": self.analysis_seconds,
             },
         }
 

@@ -511,18 +511,18 @@ def test_segment_firewall_client_count_includes_both_directions(store, profile, 
     run_id = "seg-bidi"
     store.start_run(run_id, 1, window.start, window)
     events = [
-        # 10.128.50.209 initiates traffic out of iot (visible as src_ip).
+        # 10.10.50.209 initiates traffic out of iot (visible as src_ip).
         Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
-              dedup_key="e1", action="reject", src_ip="10.128.50.209",
-              dst_ip="10.128.10.161", src_zone="iot", dst_zone="lan"),
-        # 10.128.50.55 and .56 are only ever the *target* of rejected inbound
+              dedup_key="e1", action="reject", src_ip="10.10.50.209",
+              dst_ip="10.10.0.161", src_zone="iot", dst_zone="lan"),
+        # 10.10.50.55 and .56 are only ever the *target* of rejected inbound
         # sessions - never a src_ip anywhere in this run's events.
         Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
-              dedup_key="e2", action="drop", src_ip="10.128.10.1",
-              dst_ip="10.128.50.55", src_zone="lan", dst_zone="iot"),
+              dedup_key="e2", action="drop", src_ip="10.10.0.1",
+              dst_ip="10.10.50.55", src_zone="lan", dst_zone="iot"),
         Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
               dedup_key="e3", action="drop", src_ip="203.0.113.9",
-              dst_ip="10.128.50.56", src_zone="external", dst_zone="iot"),
+              dst_ip="10.10.50.56", src_zone="external", dst_zone="iot"),
     ]
     store.insert_events(run_id, events)
     q = EventQuery(store, run_id)
@@ -568,14 +568,14 @@ def test_watchlist_hit_recognizes_host_entity_type_by_ip(store, profile, window)
     store.start_run(run_id, 1, window.start, window)
     store.insert_events(run_id, [
         Event(ts=window.end, source="librenms_syslog", kind=EventKind.FIREWALL,
-              dedup_key="h1", action="reject", src_ip="10.128.15.135",
-              dst_ip="10.128.10.30"),
+              dedup_key="h1", action="reject", src_ip="10.10.15.135",
+              dst_ip="10.10.0.30"),
     ])
-    store.add_watch("host", "10.128.15.135", "flagged for follow-up", "priorrun")
+    store.add_watch("host", "10.10.15.135", "flagged for follow-up", "priorrun")
     q = EventQuery(store, run_id)
     baseline = Baseline(store, run_id)
     result = CorrelationAnalyzer().run(q, profile, baseline)
-    signal = next(s for s in result.signals if s.id == "corr.watchlist.host.10.128.15.135")
+    signal = next(s for s in result.signals if s.id == "corr.watchlist.host.10.10.15.135")
     assert signal.entities[0].type == EntityType.HOST
     assert signal.evidence["events_this_period"] == 1
 

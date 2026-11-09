@@ -77,6 +77,8 @@ class AgentRun:
     stop_reason: str = ""
     error: str | None = None
     transcript_note: str = ""
+    #: Report note when context management had to trim or force a wrap-up.
+    context_note: str = ""
 
     @property
     def ok(self) -> bool:

@@ -36,6 +36,7 @@ def render(report: Report) -> str:
     a(f"**Sources:** {', '.join(f'{h.source} {h.state.value}' for h in report.health)}  ")
     if report.canaries:
         a(f"**Detection self-test:** {report.canary_summary}  ")
+    a(f"**Analysis:** {report.analysis_summary}  ")
     if report.degraded:
         a("")
         a("> AI analysis was unavailable for this run. Statistics only.")

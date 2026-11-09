@@ -62,6 +62,7 @@ def render(report: Report) -> str:
       f"sources: {escape(_health_summary(report))}")
     if report.canaries:
         a(f" &middot; self-test: {escape(report.canary_summary)}")
+    a(f"<br>analysis: {escape(report.analysis_summary)}")
     a("</p>")
     if report.degraded:
         a("<p><em>AI analysis was unavailable for this run. Statistics only.</em></p>")

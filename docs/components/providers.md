@@ -74,7 +74,8 @@ terminal tool (or returns its analysis as content), pass the arguments to that s
 | raises `SubmissionRejected` | Set `run.error` to its message and return; the runner tries the next model. |
 
 The harness's handler accepts an analysis only when it matches `ANALYSIS_SCHEMA`
-exactly, and allows one correction before rejecting. It first parses, in place, any
+exactly, and allows three corrections before rejecting; only the first carries the
+full schema. It first parses, in place, any
 list or object field that arrived as a string of JSON, so set `run.analysis` from the
 same `args` object you passed it, not a copy made beforehand. Your provider only has to route
 the three outcomes; it never inspects the analysis itself.
@@ -115,6 +116,12 @@ and want real cost accounting. `openai_provider.py` follows the identical patter
 `/v1/responses` - see its module docstring for the two things it does differently
 (`reasoning.effort`, `store: false`) and why.
 
+A model call the server answers with a 5xx error is sent again once before the run
+fails. Ollama returns 500 when it cannot parse the tool call a model wrote (a Qwen-family
+model's `XML syntax error ... unexpected EOF`, for one) and discards the model's output
+with it, so a second sample usually comes back well-formed. A 4xx error, a timeout, or a
+second 5xx in a row still fails the run, and the runner moves on to the next model.
+
 Every call resends the whole conversation, so the prompt grows each turn. The harness
 logs one line per model call - `model call 9: 112340 input tokens (98112 cached),
 15872/16000 output tokens` - for any provider. If a local model fails with
@@ -122,6 +129,25 @@ logs one line per model call - `model call 9: 112340 input tokens (98112 cached)
 nearing the model's context window (pick a variant with a larger one, or shorten that
 designator's investigation with its own `_MAX_TURNS` / `_MAX_TOOL_CALLS`), or output
 reaching `_MAX_TOKENS` (raise it).
+
+This provider can also keep a conversation inside a fixed window itself. When that
+designator sets `_CONTEXT_TOKENS` (a token count, or `auto` to read `num_ctx` from
+Ollama's `/api/show`), it consults a `ContextWindow` (`context_window.py`, beside it in
+this folder) before each call. The window:
+
+- sizes `max_tokens` to the room left;
+- replaces the oldest tool results with stubs once the prompt passes 85% of the window;
+- tells the model to submit if even that isn't enough.
+
+It records what it did in `AgentRun.context_note`, which the harness carries into the
+report. `_TOOL_RESULT_MAX_CHARS` caps each tool result (default 20,000 characters).
+`docs/ARCHITECTURE.md` §6.1 has the thresholds and what is never trimmed.
+
+A provider for another chat-shaped API can reuse `ContextWindow` as is. It needs the
+messages list (`plan()` trims it in place, so keep it append-only otherwise) and the
+server's prompt-token count after each call (`record()`). It only removes `role: "tool"`
+messages, so a wire format with differently shaped tool results would need its own trim
+rule.
 
 ## Build your own
 

@@ -104,6 +104,7 @@ def render(report: Report) -> str:
     if report.canaries:
         add(f' &middot; self-test: {escape(report.canary_summary)}')
     add('</p>')
+    add(f'<p style="{_META_STYLE}">analysis: {escape(report.analysis_summary)}</p>')
     if report.degraded:
         add(f'<p style="{_P_STYLE}"><em>AI analysis was unavailable for this run. '
             f'Statistics only.</em></p>')

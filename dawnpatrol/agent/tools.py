@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 MAX_ENRICH_PER_CALL = 10
 #: Follow-ups a model gets to fix a submission that does not match the schema
 #: before the run moves on to the next model.
-FORMAT_CORRECTIONS = 1
+FORMAT_CORRECTIONS = 3
 #: Reminders a model gets to submit after ending its turn without calling
 #: submit_analysis, before the run moves on to the next model.
 STOP_REMINDERS = 1
@@ -502,9 +502,9 @@ class ToolBox:
         """Accept an analysis only if it matches the schema exactly.
 
         Fields sent as a string of JSON are parsed in place first, so the
-        provider's accepted analysis is the unwrapped one. The first mismatch
-        earns one follow-up spelling out the format; a second ends this model's
-        attempt, so the runner can try the next one.
+        provider's accepted analysis is the unwrapped one. Each mismatch earns a
+        follow-up spelling out the format, up to FORMAT_CORRECTIONS; one more
+        ends this model's attempt, so the runner can try the next one.
         """
         unwrapped = unwrap_json_strings(args)
         if unwrapped:
@@ -520,6 +520,7 @@ class ToolBox:
                 f"{self.format_corrections} correction(s): {'; '.join(problems[:3])}"
             )
         self.format_corrections += 1
-        log.warning("analysis did not match the required format, asking for a "
-                    "correction: %s", "; ".join(problems[:3]))
-        return format_correction(problems)
+        log.warning("analysis did not match the required format, asking for "
+                    "correction %d of %d: %s", self.format_corrections,
+                    FORMAT_CORRECTIONS, "; ".join(problems[:3]))
+        return format_correction(problems, with_schema=self.format_corrections == 1)
