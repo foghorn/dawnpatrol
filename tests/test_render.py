@@ -412,3 +412,31 @@ def test_smtp_output_sends_multipart_alternative_html_and_plaintext(monkeypatch)
     assert "text/html" in parts
     assert "<!doctype html>" in parts["text/html"].get_content()
     assert sample_finding().title in parts["text/plain"].get_content()
+
+
+def test_min_severity_holds_email_back_unless_a_finding_is_high(monkeypatch):
+    """Email only for HIGH/CRITICAL; the daily summary lives elsewhere."""
+    from dataclasses import replace
+
+    from dawnpatrol.models import Severity
+    from dawnpatrol.outputs.smtp_email import SMTPEmailOutput
+
+    monkeypatch.setenv("DAWNPATROL_OUTPUT_SMTP_RUN_WHEN", "ALWAYS")
+    monkeypatch.setenv("DAWNPATROL_OUTPUT_SMTP_MIN_SEVERITY", "high")
+    output = SMTPEmailOutput()
+    output.configure()
+
+    def with_sev(*sevs):
+        return make_report(findings=[replace(sample_finding(), severity=s) for s in sevs])
+
+    assert output.should_run(make_report()) == (False, "no HIGH or higher findings")
+    assert not output.should_run(with_sev(Severity.MEDIUM, Severity.LOW))[0]
+    assert not output.should_run(with_sev(Severity.SUSPECTED))[0]
+    assert output.should_run(with_sev(Severity.LOW, Severity.HIGH))[0]
+    assert output.should_run(with_sev(Severity.CRITICAL))[0]
+
+    # Unset: the old daily behaviour.
+    monkeypatch.delenv("DAWNPATROL_OUTPUT_SMTP_MIN_SEVERITY")
+    daily = SMTPEmailOutput()
+    daily.configure()
+    assert daily.should_run(make_report())[0]

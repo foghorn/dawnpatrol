@@ -11,7 +11,7 @@ import logging
 from abc import ABC, abstractmethod
 
 from ..context import RunContext
-from ..models import DeliveryResult, Report, Status
+from ..models import DeliveryResult, Report, Severity, Status
 from ..secrets import read_bool, read_env, read_list
 
 log = logging.getLogger(__name__)
@@ -29,10 +29,14 @@ class Output(ABC):
     default_run_when: frozenset[Status] = ALL_STATUSES
     #: When true, deliver only when the report is actually interesting.
     default_important_only: bool = False
+    #: When set, deliver only if a finding is at least this severe. Set per
+    #: output via ``DAWNPATROL_OUTPUT_<NAME>_MIN_SEVERITY`` (e.g. "HIGH").
+    default_min_severity: Severity | None = None
 
     def __init__(self) -> None:
         self.run_when: frozenset[Status] = self.default_run_when
         self.important_only: bool = self.default_important_only
+        self.min_severity: Severity | None = self.default_min_severity
 
     # ----- delivery policy -------------------------------------------------- #
 
@@ -56,6 +60,9 @@ class Output(ABC):
         self.important_only = read_bool(
             f"{env_prefix}{self.name.upper()}_IMPORTANT_ONLY", self.important_only
         )
+        floor = read_env(f"{env_prefix}{self.name.upper()}_MIN_SEVERITY", "").strip()
+        if floor:
+            self.min_severity = Severity.parse(floor)
 
     def should_run(self, report: Report) -> tuple[bool, str]:
         """Decide delivery. Returns (run, reason-if-skipped)."""
@@ -65,6 +72,9 @@ class Output(ABC):
             return False, f"status {report.status} not in {sorted(s.value for s in self.run_when)}"
         if self.important_only and not report.has_important():
             return False, "important_only: nothing notable this period"
+        if self.min_severity is not None and not any(
+                f.severity >= self.min_severity for f in report.findings):
+            return False, f"no {self.min_severity.label()} or higher findings"
         return True, ""
 
     # ----- delivery --------------------------------------------------------- #

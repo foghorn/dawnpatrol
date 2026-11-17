@@ -493,7 +493,8 @@ Delivery policy is per output:
 `DAWNPATROL_OUTPUT_SMTP_RUN_WHEN=ALWAYS|NEVER|IMPORTANT|AMBER,RED`. Email
 defaults to daily, because silence is indistinguishable from a dead agent;
 webhooks default to `IMPORTANT`, because a channel that pings every morning gets
-muted.
+muted. `DAWNPATROL_OUTPUT_<NAME>_MIN_SEVERITY=HIGH` additionally holds an output
+back unless a finding is at least that severe (suspected findings never count).
 
 ---
 

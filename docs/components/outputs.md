@@ -36,6 +36,10 @@ DAWNPATROL_OUTPUT_<NAME>_RUN_WHEN=ALWAYS | NEVER | IMPORTANT | AMBER,RED
 on `Report`. This is the mechanism behind "email every day, but only ping the phone when
 something's actually wrong": same report, two outputs, two policies, zero code.
 
+`DAWNPATROL_OUTPUT_<NAME>_MIN_SEVERITY=INFO|LOW|MEDIUM|HIGH|CRITICAL` narrows that
+further: the output runs only if some (unsuppressed) finding is at least that
+severe. SUSPECTED findings sort below INFO and never qualify.
+
 ## Two things every output must get right
 
 **Never raise.** An output that throws is a run that otherwise succeeded getting logged
