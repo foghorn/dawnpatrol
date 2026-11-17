@@ -71,6 +71,9 @@ def build_parser() -> argparse.ArgumentParser:
     hunt = sub.add_parser("hunt", help="search retained history for an IOC")
     hunt.add_argument("--domain")
     hunt.add_argument("--ip")
+    hunt.add_argument("--ioc-file", action="append", default=[],
+                      help="sweep history for every indicator in an IoC list (CSV or "
+                           "text); repeatable, and a folder reads every list in it")
     hunt.add_argument("--days", type=int, default=180)
 
     rep = sub.add_parser("render", help="re-render a stored run")
@@ -273,6 +276,11 @@ def cmd_validate(settings, profile, store, args) -> int:
               "DAWNPATROL_MCP_ENABLED is not - no agent can submit a note "
               "until the MCP server itself is also enabled")
     providers = available_providers()
+    from .iocs import ioc_paths, load_iocs
+    from .secrets import read_env
+
+    ioc_files = ioc_paths(read_env("DAWNPATROL_IOC_PATHS", ""))
+    print(f"\nIoC lists: {load_iocs(ioc_files).summary() if ioc_files else 'none'}")
     print(f"\nproviders discovered: {', '.join(sorted(providers)) or 'none'}")
     fallback = (f", then fallback: {' -> '.join(settings.ai_fallbacks)}"
                 if settings.ai_fallbacks else "")
@@ -366,8 +374,10 @@ def cmd_init_db(settings, profile, store, args) -> int:
 
 
 def cmd_hunt(settings, profile, store, args) -> int:
+    if args.ioc_file:
+        return _hunt_ioc_files(store, args.ioc_file, args.days)
     if not args.domain and not args.ip:
-        print("supply --domain or --ip", file=sys.stderr)
+        print("supply --domain, --ip or --ioc-file", file=sys.stderr)
         return 2
     rows = (store.hunt_domain(args.domain, args.days) if args.domain
             else store.hunt_ip(args.ip, args.days))
@@ -379,6 +389,38 @@ def cmd_hunt(settings, profile, store, args) -> int:
     print(f"{len(rows)} record(s) for {target} in the last {args.days} days:\n")
     for row in rows:
         print("  " + "  ".join(f"{k}={v}" for k, v in row.items()))
+    return 0
+
+
+def _hunt_ioc_files(store, paths: list[str], days: int) -> int:
+    from .iocs import ioc_paths, load_iocs
+
+    files = ioc_paths(",".join(paths))
+    if not files:
+        print(f"no IoC list found at {', '.join(paths)}", file=sys.stderr)
+        return 2
+    iocs = load_iocs(files)
+    print(f"IoC lists: {iocs.summary()}")
+    ips, domains = store.history_values(days)
+    ip_hits = iocs.match_ips(ips)
+    dom_hits = iocs.match_domains(domains)
+    if not ip_hits and not dom_hits:
+        print(f"no indicator seen in {days} days of retained history "
+              f"({len(ips)} addresses, {len(domains)} domains checked).")
+        print("This is bounded by retention, and is not proof of absence.")
+        return 0
+    rows = store.history_for(sorted(ip_hits), sorted(dom_hits), days)
+    for value, inds in sorted((ip_hits | dom_hits).items()):
+        ind = max(inds, key=lambda i: i.severity)
+        label = f"{ind.tier or ind.severity.label()} {ind.value}"
+        if ind.value != value:
+            label += f" (matched {value})"
+        print(f"\n{label}  [{ind.campaign or ind.source or ind.origin}]")
+        for row in rows:
+            if value in (row.get("src_ip"), row.get("dst_ip"), row.get("domain")):
+                print("  " + "  ".join(f"{k}={v}" for k, v in row.items()))
+    print("\nRetained history keeps no firewall action: check whether contact was "
+          "dropped before treating it as a breach.")
     return 0
 
 

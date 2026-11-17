@@ -227,6 +227,14 @@ firewall telemetry, an internal host probing many ports (the lateral-movement sh
 and - the mechanism that gives the model's own `watchlist_updates` teeth - checking
 whether anything it flagged for follow-up on a prior run actually recurred.
 
+**`ioc_match`** (order 60) checks the run against operator-supplied indicator lists
+(`DAWNPATROL_IOC_PATHS`, default `/etc/dawnpatrol/iocs`; formats in `iocs.py`). It reads
+*every* distinct address and domain in the run, uncapped, because a list match is usually
+one probe or one lookup, exactly what a top-N query drops first. Matching is in Python
+(`IocSet.match_ips` / `match_domains`), so CIDR ranges, subdomains and suffixes cost
+nothing extra; only the matched values go back to the database for detail. With no lists
+present it emits nothing at all.
+
 **`baseline_delta`** (order 900) runs last, after every other analyzer, so it can
 compare this run's own metrics against history. It's the one analyzer whose entire job
 is auditing the analysis itself rather than the network: a metric that moved by an order

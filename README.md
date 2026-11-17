@@ -152,6 +152,40 @@ narrow long-term slice of DNS and flow records persists for 180 days. That slice
 is what makes `dawnpatrol hunt --domain evil.example --days 180` possible when an
 IOC surfaces next month.
 
+### Indicator (IoC) lists
+
+Drop published IoC lists into `/etc/dawnpatrol/iocs/` (or point
+`DAWNPATROL_IOC_PATHS` at files or folders) and every run checks all of its
+firewall and DNS traffic against them. Every distinct address and domain is
+checked, not just the busiest, because the contact that matters is usually a
+single probe or a single lookup. Lists can be:
+
+- **CSV with a header row** — the value in `indicator`, plus `type`, and a
+  `tier` (T1–T4) or `severity`; optional `source`, `campaign`, `warning`, and
+  an `alert_until`/`valid_until` expiry. Published lists shaped like
+  MalwareMustDie's ARTEX pack load as they are.
+- **Plain text**, one indicator per line, with `#` comments. The type is
+  inferred, a leading `*.` marks a domain suffix, and severity is `low`.
+
+IP addresses, CIDR ranges, domains (which also match their subdomains) and
+domain suffixes are matched, and defanged values (`198.51.100[.]7`) are
+refanged. Other indicator types (user agents, hashes, cloud IDs) can't be seen
+in firewall and DNS logs; they're skipped, and `dawnpatrol validate` counts
+them so nothing is dropped silently.
+
+A match becomes a signal at the list's own severity (T1 CRITICAL, T2 HIGH,
+T3 MEDIUM, T4 LOW). One exception: a listed address that only ever probed in
+and had every packet dropped is capped at LOW. A closed-door probe is worth
+recording, but it isn't worth an AMBER report. An internal host contacting a
+listed address, or any accepted traffic, keeps the full severity.
+
+When a new list arrives, sweep the long-term history for it too, since the
+indicators were usually published after the traffic happened:
+
+```bash
+dawnpatrol hunt --ioc-file /etc/dawnpatrol/iocs --days 180
+```
+
 ### Model provider
 
 Providers are plugins, and every model you want configured gets its own name
@@ -433,6 +467,7 @@ dawnpatrol runs                         # recent run history
 dawnpatrol delete-run <run_id>          # delete one run's data and report files on demand
 dawnpatrol canary                       # last detection self-test
 dawnpatrol hunt --domain x --days 180   # retrospective IOC search
+dawnpatrol hunt --ioc-file iocs.csv     # sweep history for a whole IoC list
 dawnpatrol suppress --taxonomy scan.persistent_prober \
     --entity 203.0.113.45 --reason "my own scanner" --days 90
 dawnpatrol suppressions                 # list active suppressions
@@ -557,7 +592,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-572 tests, fully offline — no network, no API key, no spend — including an
+584 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract

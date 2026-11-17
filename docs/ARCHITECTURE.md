@@ -38,6 +38,7 @@ dawnpatrol/
 │   ├── models.py                   # Event, Metric, Signal, Finding, Report, ...
 │   ├── schema.py                   # SQLAlchemy Table definitions — the one database
 │   ├── store.py                    # all reads/writes against that database
+│   ├── iocs.py                     # IoC list loading (CSV/text) and matching
 │   ├── query.py                    # EventQuery: the typed read API analyzers use
 │   ├── devices.py                  # per-run, cross-source device directory
 │   ├── verify.py                   # source health classification (OK/DEGRADED/SUSPECT/FAILED)
@@ -77,6 +78,7 @@ dawnpatrol/
 │   │   ├── segment_review.py
 │   │   ├── data_volume.py
 │   │   ├── correlation.py
+│   │   ├── ioc_match.py            # every run's traffic/DNS vs operator IoC lists
 │   │   ├── baseline_delta.py
 │   │   ├── baseline.py             # not a plugin — the Baseline helper every analyzer takes
 │   │   └── TEMPLATE.py
@@ -100,7 +102,7 @@ dawnpatrol/
 │       ├── server.py               # tool registration, bearer-auth middleware
 │       ├── tools.py                # ToolContext: the tool implementations
 │       └── auth.py
-└── tests/                          # 572 tests, offline, zero spend (§14)
+└── tests/                          # 584 tests, offline, zero spend (§14)
 ```
 
 `canary.py` is deliberately not a discovered plugin folder like the five above — it ships
@@ -279,7 +281,9 @@ without real storage cost. `ioc_dns`/`ioc_flow` are a deliberately narrow slice 
 bytes per row, no message payload) kept for `DAWNPATROL_RETENTION_IOC_DAYS` (default 180)
 specifically so retrospective hunting works: when an IOC surfaces next month,
 `dawnpatrol hunt --domain evil.example --days 180` answers whether anything here ever
-touched it. `metrics` ages out on its own, longer clock
+touched it, and `hunt --ioc-file <list>` asks the same of every indicator in a published
+list at once (CIDR ranges and domain suffixes included). The slice keeps no firewall
+action, so a history match says contact happened, not whether it was allowed. `metrics` ages out on its own, longer clock
 (`DAWNPATROL_RETENTION_METRICS_DAYS`, default 730 — two years of trend history).
 A finding's `event_ids` therefore outlive the events they cite: once a run's events age
 out, its findings keep their text and ids but the rows behind them are gone.
@@ -907,6 +911,7 @@ DAWNPATROL_WINDOW_HOURS=24             # code default; a source's own max_window
 DAWNPATROL_DATA_DIR=/var/lib/dawnpatrol
 DAWNPATROL_OUTPUT_DIR=/out
 DAWNPATROL_PROFILE=/etc/dawnpatrol/profile.yml
+#DAWNPATROL_IOC_PATHS=/etc/dawnpatrol/iocs   # IoC list files or folders, comma-separated
 
 # Retention
 DAWNPATROL_RETENTION_RAW_DAYS=7
@@ -1068,6 +1073,7 @@ dawnpatrol probe                        # connectivity + auth check on every sou
 dawnpatrol list-plugins                 # what was discovered and whether it is enabled
 dawnpatrol validate                     # config and profile validation
 dawnpatrol hunt --domain x --days 180   # retrospective IOC search over the long-term store
+dawnpatrol hunt --ioc-file <list|dir>   # the same for every indicator in IoC lists
 dawnpatrol suppress --reason "..." --days 90 --taxonomy scan.persistent_prober
 ```
 
@@ -1239,7 +1245,7 @@ that matters for your deployment.
 
 ## 14. Testing
 
-572 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
+584 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
 full end-to-end pipeline exercise against a stubbed provider. CI runs the same suite plus
 `ruff` on every push and pull request.
 

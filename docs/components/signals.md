@@ -148,6 +148,17 @@ run's watchlist into something that can actually re-fire.
 | `corr.watchlist.<type>.<value>` | `watchlist.hit` | MEDIUM | 0.7 | An entity (`ip`, `domain`, or `host`) the model carried forward on a prior run's watchlist (`watchlist_updates`) shows activity again this run. `host` matches the same way `ip` does — by address — plus `Event.device`, in case some future source populates that with a real hostname | `entity`, `entity_type`, `events_this_period`, `watch_reason`, `watch_expires` |
 | `corr.internal_scan.<ip>` | `lateral.internal_scan` | HIGH | 0.65 | An internal host probes ≥20 distinct destination ports with ≥50 total hits — the shape of lateral-movement enumeration, only visible when internal traffic actually traverses a logging device | `src`, `hits`, `distinct_destination_ports`, `duration_hours` |
 
+## `ioc_match` (order 60)
+
+Matches against operator-supplied IoC lists. Severity comes from the list (tier T1
+CRITICAL, T2 HIGH, T3 MEDIUM, T4 LOW, or its `severity` column; plain-text lists are
+LOW), confidence from the tier (T1 0.9, T2 0.7, T3 0.5, T4 0.2, otherwise 0.5).
+
+| Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Key evidence |
+|---|---|---|---|---|---|
+| `ioc.ip.<addr>` / `ioc.cidr.<net>` | `ioc.ip_match` | List severity; capped at LOW when every contact was inbound and all of it dropped or rejected | by tier | A listed address or range appears as source or destination of firewall/flow events | `matched`, `inbound_accepted`, `inbound_blocked`, `outbound_allowed`, `outbound_blocked`, `dst_ports`, `local_addresses`, `tier`, `campaign`, `source`, `warning`, `first_seen`, `last_seen` |
+| `ioc.domain.<d>` / `ioc.domain_suffix.<d>` | `ioc.domain_match` | List severity (a lookup is an internal client reaching out, even when the resolver blocked it) | by tier | A listed domain, a subdomain of it, or a domain under a listed suffix is looked up | `matched`, `queries`, `blocked_by_resolver`, `clients`, `tier`, `campaign`, `source`, `warning`, `first_seen`, `last_seen` |
+
 ## `data_volume` (order 55)
 
 Outbound byte-volume signals, from `pkt_len` on ACCEPTed firewall events -

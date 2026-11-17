@@ -438,6 +438,59 @@ class Store:
             ).mappings().all()
         return [{**dict(r), "day": _aware(r["day"]).strftime("%Y-%m-%d")} for r in rows]
 
+    def history_values(self, days: int = 180) -> tuple[set[str], set[str]]:
+        """Every distinct address and domain in retained history, for list sweeps."""
+        since = datetime.now(UTC) - timedelta(days=days)
+        f, d = S.ioc_flow.c, S.ioc_dns.c
+        ips: set[str] = set()
+        with self.engine.connect() as conn:
+            for col in (f.src_ip, f.dst_ip):
+                ips.update(r[0] for r in conn.execute(
+                    select(col).where(f.day >= since, col.is_not(None)).distinct()) if r[0])
+            domains = {r[0] for r in conn.execute(
+                select(d.domain).where(d.day >= since).distinct()) if r[0]}
+        return ips, domains
+
+    def history_for(self, ips: list[str], domains: list[str], days: int = 180
+                    ) -> list[dict[str, Any]]:
+        """Retained flow and DNS rows touching exactly these addresses/domains."""
+        since = datetime.now(UTC) - timedelta(days=days)
+        f, d = S.ioc_flow.c, S.ioc_dns.c
+        out: list[dict[str, Any]] = []
+        with self.engine.connect() as conn:
+            if ips:
+                for r in conn.execute(
+                    select(f.day, f.src_ip, f.dst_ip, f.dst_port, f.proto,
+                           func.sum(f.hits))
+                    .where(f.day >= since, f.src_ip.in_(ips) | f.dst_ip.in_(ips))
+                    .group_by(f.day, f.src_ip, f.dst_ip, f.dst_port, f.proto)
+                    .order_by(f.day)
+                ).all():
+                    out.append({"day": _aware(r[0]).strftime("%Y-%m-%d"), "src_ip": r[1],
+                                "dst_ip": r[2], "dst_port": r[3], "proto": r[4],
+                                "hits": int(r[5] or 0)})
+            if domains:
+                for r in conn.execute(
+                    select(d.day, d.client_ip, d.domain, func.sum(d.queries),
+                           func.sum(d.blocked))
+                    .where(d.day >= since, d.domain.in_(domains))
+                    .group_by(d.day, d.client_ip, d.domain).order_by(d.day)
+                ).all():
+                    out.append({"day": _aware(r[0]).strftime("%Y-%m-%d"), "client_ip": r[1],
+                                "domain": r[2], "queries": int(r[3] or 0),
+                                "blocked": int(r[4] or 0)})
+        # Two runs on one calendar day each keep their own rows; show one per day.
+        merged: dict[tuple, dict[str, Any]] = {}
+        for row in out:
+            counts = {k: v for k, v in row.items() if k in ("hits", "queries", "blocked")}
+            key = tuple((k, v) for k, v in row.items() if k not in counts)
+            if key in merged:
+                for k, v in counts.items():
+                    merged[key][k] += v
+            else:
+                merged[key] = dict(row)
+        return list(merged.values())
+
     # ----- enrichment cache -------------------------------------------------- #
 
     def cache_get(self, enricher: str, subject: str) -> dict[str, Any] | None:

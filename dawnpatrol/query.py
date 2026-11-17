@@ -317,6 +317,69 @@ class EventQuery:
             ).all()
         return [(r[0], r[1], int(r[2] or 0), int(r[3])) for r in rows]
 
+    def all_traffic_ips(self) -> set[str]:
+        """Every distinct src/dst address on firewall and flow events, uncapped.
+
+        For indicator matching, where the one address that matters is likely
+        to have a single hit and would be the first to fall off a top-N list.
+        """
+        kinds = [str(EventKind.FIREWALL), str(EventKind.FLOW)]
+        out: set[str] = set()
+        with self._engine.connect() as conn:
+            for col in (S.events.c.src_ip, S.events.c.dst_ip):
+                out.update(r[0] for r in conn.execute(
+                    select(col).where(self._base(kind=kinds), col.is_not(None)).distinct()
+                ) if r[0])
+        return out
+
+    def all_dns_domains(self) -> set[str]:
+        """Every distinct domain looked up this run, uncapped."""
+        with self._engine.connect() as conn:
+            return {r[0] for r in conn.execute(
+                select(S.events.c.domain)
+                .where(self._base(kind=EventKind.DNS), S.events.c.domain.is_not(None))
+                .distinct()
+            ) if r[0]}
+
+    def traffic_involving(self, ips: Sequence[str], limit: int = 2000
+                          ) -> list[dict[str, Any]]:
+        """Firewall/flow events to or from ``ips``, grouped by pair, port and action."""
+        if not ips:
+            return []
+        e = S.events.c
+        kinds = [str(EventKind.FIREWALL), str(EventKind.FLOW)]
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(e.src_ip, e.dst_ip, e.dst_port, e.proto, e.action,
+                       func.count().label("n"), func.min(e.ts), func.max(e.ts))
+                .where(self._base(kind=kinds), or_(e.src_ip.in_(list(ips)),
+                                                    e.dst_ip.in_(list(ips))))
+                .group_by(e.src_ip, e.dst_ip, e.dst_port, e.proto, e.action)
+                .order_by(func.count().desc()).limit(limit)
+            ).all()
+        return [{"src_ip": r[0], "dst_ip": r[1], "dst_port": r[2], "proto": r[3],
+                 "action": r[4], "hits": int(r[5]), "first": _aware(r[6]),
+                 "last": _aware(r[7])} for r in rows]
+
+    def lookups_of(self, domains: Sequence[str], limit: int = 2000
+                   ) -> list[dict[str, Any]]:
+        """DNS lookups of ``domains``, grouped by client and domain."""
+        if not domains:
+            return []
+        e = S.events.c
+        blocked_expr = func.sum(case((e.blocked.is_(True), 1), else_=0))
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(e.client_ip, e.domain, func.count().label("n"), blocked_expr,
+                       func.min(e.ts), func.max(e.ts))
+                .where(self._base(kind=EventKind.DNS), e.domain.in_(list(domains)))
+                .group_by(e.client_ip, e.domain)
+                .order_by(func.count().desc()).limit(limit)
+            ).all()
+        return [{"client_ip": r[0], "domain": r[1], "queries": int(r[2]),
+                 "blocked": int(r[3] or 0), "first": _aware(r[4]), "last": _aware(r[5])}
+                for r in rows]
+
     def flow_pairs_for_ioc(self, limit: int = 50000
                            ) -> list[tuple[str | None, str, int | None, str | None, int]]:
         with self._engine.connect() as conn:
