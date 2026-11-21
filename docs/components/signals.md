@@ -148,6 +148,35 @@ run's watchlist into something that can actually re-fire.
 | `corr.watchlist.<type>.<value>` | `watchlist.hit` | MEDIUM | 0.7 | An entity (`ip`, `domain`, or `host`) the model carried forward on a prior run's watchlist (`watchlist_updates`) shows activity again this run. `host` matches the same way `ip` does — by address — plus `Event.device`, in case some future source populates that with a real hostname | `entity`, `entity_type`, `events_this_period`, `watch_reason`, `watch_expires` |
 | `corr.internal_scan.<ip>` | `lateral.internal_scan` | HIGH | 0.65 | An internal host probes ≥20 distinct destination ports with ≥50 total hits — the shape of lateral-movement enumeration, only visible when internal traffic actually traverses a logging device | `src`, `hits`, `distinct_destination_ports`, `duration_hours` |
 
+## `cloud_activity` (order 65)
+
+AWS account activity from `aws_cloudtrail` and `aws_guardduty`. Runs only when one of
+them is configured. Evidence on every signal: `events`, `apis`, `principals`,
+`source_ips`, `accounts_regions`, `user_agents`, `error_codes`, `first_seen`, `last_seen`.
+
+| Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Extra evidence |
+|---|---|---|---|---|---|
+| `aws.root_activity.<account>` | `cloud.root_usage` | HIGH | 0.8 | Any call or sign-in by the root user | `account` |
+| `aws.console_login_no_mfa.<principal>` | `cloud.console_login_no_mfa` | MEDIUM | 0.7 | Successful console sign-in by an IAM user or root without MFA (SSO sign-ins excluded: they always record `MFAUsed=No`) | |
+| `aws.console_login_failures.<ip-or-principal>` | `cloud.console_login_failures` | MEDIUM | 0.6 | ≥5 failed console sign-ins from one address or against one user | |
+| `aws.defense_evasion.<api>.<principal>` | `cloud.logging_tampering` | HIGH if it succeeded, else MEDIUM | 0.75 | A call that stops or blinds CloudTrail, GuardDuty (including `CreateFilter`, which can auto-archive findings), AWS Config, flow logs or log groups, or disables/schedules deletion of a KMS key | |
+| `aws.iam_change.<principal>` | `cloud.iam_persistence` | MEDIUM if any succeeded, LOW if all denied | 0.6 | Calls creating users, keys, login profiles, roles or identity providers, reactivating keys (`UpdateAccessKey`), attaching/putting policies (including KMS key policies), changing trust, removing MFA or the password policy | `succeeded`, `targets` |
+| `aws.storage_change.<principal>` | `cloud.storage_change` | MEDIUM if any succeeded, LOW if all denied | 0.6 | Bucket policy, ACL, public-access block (bucket or account), versioning, lifecycle, replication, Object Lock changes, or bucket deletion | `succeeded`, `targets` |
+| `aws.compute_launch.<principal>` | `cloud.compute_launch` | MEDIUM if any succeeded, LOW if all denied | 0.6 | EC2/Spot/fleet launches, Lambda create/code update, Beanstalk environments, Lightsail, ECS, EKS, Batch, SageMaker, Auto Scaling groups | `succeeded`, `targets` |
+| `aws.dns_edge_change.<principal>` | `cloud.dns_edge_change` | MEDIUM if any succeeded, LOW if all denied | 0.6 | Route 53 record/zone changes, domain registration changes, CloudFront distribution create/update/delete | `succeeded`, `targets`, `requests` (the exact change) |
+| `aws.cross_account.<account>` | `cloud.cross_account` | LOW | 0.6 | An identity from another AWS account (userIdentity `AWSAccount`) made calls here, e.g. assuming a vendor role | `caller_account` |
+| `aws.dormant_principal.<match>` | `cloud.dormant_principal` | HIGH | 0.85 | Any activity by a principal the profile marks `dormant` | |
+| `aws.long_term_key_use.<match>` | `cloud.unexpected_access_key` | HIGH | 0.8 | A call signed with a long-term key (`AKIA...`) by a principal with `long_term_keys: false` | `access_keys` |
+| `aws.out_of_scope_service.<match>` / `aws.out_of_scope_bucket.<match>` | `cloud.principal_out_of_scope` | HIGH | 0.8 | A principal calling a service outside its `allowed_services`, or naming a bucket outside its `allowed_buckets` | `allowed_services` / `allowed_buckets`, `buckets` |
+| `aws.blocked_account.<account>` | `cloud.blocked_account` | HIGH | 0.85 | A profile `blocked_accounts` ID appears anywhere in a call (caller, ARNs, request) | `blocked_account` |
+| `aws.watched_resource.<match>` | `cloud.watched_resource` | The resource's `severity` | 0.8 | A call whose principal or request names a profile `watched_resources` string | `watched`, `requests` |
+| `aws.permission_probing.<principal>` | `cloud.permission_probing` | MEDIUM | 0.6 | ≥10 denied calls across ≥5 different APIs | `denied_apis` |
+| `aws.secrets_sweep.<principal>` | `cloud.secrets_sweep` | HIGH | 0.6 | ≥10 distinct secrets/parameters read (Secrets Manager, SSM) | `distinct`, `all_from_console` |
+| `aws.iam_enum_sweep.<principal>` | `cloud.iam_enumeration` | MEDIUM, LOW if all from the console | 0.6 | ≥10 distinct IAM `List*`/`Get*` APIs | `distinct`, `all_from_console` |
+| `aws.buckets_sweep.<principal>` | `cloud.bucket_sweep` | MEDIUM, LOW if all from the console | 0.6 | ≥15 distinct S3 buckets touched | `distinct`, `all_from_console` |
+| `aws.unexpected_region.<region>` | `cloud.unexpected_region` | MEDIUM | 0.65 | Write calls in a region outside the expected regions (the profile's `cloud_accounts[].expected_regions` plus `DAWNPATROL_SOURCE_AWS_EXPECTED_REGIONS`; only when either is set; global services ignored) | `region`, `expected_regions` |
+| `aws.guardduty.<finding-type>` | `cloud.guardduty_finding` | GuardDuty's (score 1–3.9 LOW, 4–6.9 MEDIUM, 7–8.9 HIGH, 9+ CRITICAL); INFO for sample findings | 0.85, sample 0.3 | GuardDuty findings of this type updated during the run | `finding_type`, `max_score`, `description`, `resources`, `sample` |
+
 ## `ioc_match` (order 60)
 
 Matches against operator-supplied IoC lists. Severity comes from the list (tier T1

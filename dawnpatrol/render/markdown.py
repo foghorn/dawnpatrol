@@ -83,7 +83,7 @@ def render(report: Report) -> str:
     a("")
     a("| Metric | Value | Prior | Change |")
     a("|---|---:|---:|---:|")
-    for m in report.metrics[:40]:
+    for m in report.table_metrics(40):
         prior = "-" if m.prior is None else f"{m.prior:g}"
         delta = m.delta_pct
         change = "-" if delta is None else f"{delta:+.0f}%"

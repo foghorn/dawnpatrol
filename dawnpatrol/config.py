@@ -412,6 +412,13 @@ class Settings:
     @classmethod
     def from_env(cls) -> Settings:
         registry = SecretRegistry()
+        # Source credentials (Pi-hole password, LibreNMS token, AWS secret key)
+        # are read by the plugins themselves; register them here so rendered
+        # reports are still scanned for them.
+        for name in os.environ:
+            if name.startswith(f"{ENV_PREFIX}SOURCE_") and name.endswith(
+                    ("_PASSWORD", "_TOKEN", "_SECRET_ACCESS_KEY", "_API_KEY")):
+                registry.register(read_secret(name))
         data_dir = Path(read_env(f"{ENV_PREFIX}DATA_DIR", "./data") or "./data").expanduser()
         output_dir = Path(read_env(f"{ENV_PREFIX}OUTPUT_DIR", "./out") or "./out").expanduser()
         profile_raw = read_env(f"{ENV_PREFIX}PROFILE", "")

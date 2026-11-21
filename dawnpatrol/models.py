@@ -635,6 +635,14 @@ class Report:
     def metrics_for(self, section: str) -> list[Metric]:
         return [m for m in self.metrics if m.section == section]
 
+    def table_metrics(self, limit: int = 40) -> list[Metric]:
+        """The first ``limit`` metrics for a statistics table, plus every cloud
+        metric: those come from a late analyzer and would otherwise never make
+        the cut on a network with a busy perimeter."""
+        cloud = [m for m in self.metrics if m.section == "cloud"]
+        rest = [m for m in self.metrics if m.section != "cloud"]
+        return rest[:limit] + cloud
+
     def metric(self, key: str) -> Metric | None:
         for m in self.metrics:
             if m.key == key:

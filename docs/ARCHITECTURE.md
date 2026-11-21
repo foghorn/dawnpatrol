@@ -66,6 +66,9 @@ dawnpatrol/
 │   ├── sources/                    # ── PLUGIN FOLDER (discovered, §5.1) ──
 │   │   ├── librenms_syslog.py
 │   │   ├── pihole_dns.py
+│   │   ├── aws_cloudtrail.py       # CloudTrail from the trail's S3 bucket
+│   │   ├── aws_guardduty.py        # GuardDuty findings via the API
+│   │   ├── _aws.py                 # shared boto3 session (not a plugin)
 │   │   └── TEMPLATE.py
 │   ├── analyzers/                  # ── PLUGIN FOLDER (discovered, §5.2) ──
 │   │   ├── firewall_volume.py
@@ -79,6 +82,7 @@ dawnpatrol/
 │   │   ├── data_volume.py
 │   │   ├── correlation.py
 │   │   ├── ioc_match.py            # every run's traffic/DNS vs operator IoC lists
+│   │   ├── cloud_activity.py       # CloudTrail behaviour checks + GuardDuty findings
 │   │   ├── baseline_delta.py
 │   │   ├── baseline.py             # not a plugin — the Baseline helper every analyzer takes
 │   │   └── TEMPLATE.py
@@ -102,7 +106,7 @@ dawnpatrol/
 │       ├── server.py               # tool registration, bearer-auth middleware
 │       ├── tools.py                # ToolContext: the tool implementations
 │       └── auth.py
-└── tests/                          # 584 tests, offline, zero spend (§14)
+└── tests/                          # 603 tests, offline, zero spend (§14)
 ```
 
 `canary.py` is deliberately not a discovered plugin folder like the five above — it ships
@@ -375,10 +379,14 @@ the framework (`Window.clamp_hours`), and the clamp is recorded as a known limit
 than a shortfall — the labels a reader sees are generated from the window each source
 actually achieved, not a uniform number every source is forced onto.
 
-Two sources ship: `librenms_syslog.py` (firewall/kernel logs, DHCP leases, dnsmasq query
-logs, router-admin logins — everything LibreNMS's syslog collector forwards) and
-`pihole_dns.py` (DNS queries and block decisions). `EventKind` already reserves `IDS` and
-`FLOW` for a future intrusion-detection or NetFlow source; adding one is one file
+Four sources ship: `librenms_syslog.py` (firewall/kernel logs, DHCP leases, dnsmasq query
+logs, router-admin logins — everything LibreNMS's syslog collector forwards),
+`pihole_dns.py` (DNS queries and block decisions), and, for an AWS account,
+`aws_cloudtrail.py` (API activity read from the trail's S3 bucket: `program` is
+`<service>:<eventName>`, `user` the principal ARN, `device` `<account>/<region>`, console
+sign-ins as `AUTH`) and `aws_guardduty.py` (findings as `IDS` events, `action=gd_finding`).
+Both AWS sources share `_aws.py`'s session handling, and `boto3` is the optional `aws`
+extra. `EventKind` still reserves `FLOW` for a future NetFlow or VPC flow-log source; adding one is one file
 implementing `collect()` and `self_test()`, and every analyzer, enrichment path,
 renderer, output, and the MCP server's own `list_source_plugins`/`trigger_analysis`
 picks it up without modification. See `docs/components/sources.md` for the full
@@ -1245,7 +1253,7 @@ that matters for your deployment.
 
 ## 14. Testing
 
-584 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
+603 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
 full end-to-end pipeline exercise against a stubbed provider. CI runs the same suite plus
 `ruff` on every push and pull request.
 

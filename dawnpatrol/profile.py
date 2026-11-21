@@ -60,6 +60,47 @@ class Policy:
     scanner_isp_hints: list[str] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class CloudPrincipal:
+    """Expected behaviour of one cloud identity, matched by ARN suffix
+    (``user/backup``, ``role/ci-deploy``, ``:root``)."""
+
+    match: str
+    notes: str = ""
+    #: Any activity at all is reported (an account that should be unused).
+    dormant: bool = False
+    #: False: an API call authenticated with a long-term access key (AKIA...)
+    #: is reported - for identities that should only use console/SSO sessions.
+    long_term_keys: bool = True
+    #: Services it may call (``s3``, ``guardduty``); anything else is reported.
+    allowed_services: list[str] = field(default_factory=list)
+    #: Buckets it may touch; any other bucket named in its S3 calls is reported.
+    allowed_buckets: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class WatchedResource:
+    """A name whose appearance in any call is reported: a dangling DNS name,
+    an orphaned secret, a key that should never be used."""
+
+    match: str
+    severity: str = "HIGH"
+    note: str = ""
+
+
+@dataclass(slots=True)
+class CloudAccount:
+    account_id: str
+    provider: str = "aws"
+    name: str = ""
+    notes: str = ""
+    expected_regions: list[str] = field(default_factory=list)
+    #: Other accounts that must never appear (e.g. a removed vendor's).
+    blocked_accounts: list[str] = field(default_factory=list)
+    principals: list[CloudPrincipal] = field(default_factory=list)
+    watched_resources: list[WatchedResource] = field(default_factory=list)
+
+
 DEFAULT_ATTACK_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 1194,
                         1433, 3306, 3389, 5060, 5432, 5900, 8080, 8443, 8728]
 
@@ -88,6 +129,7 @@ class Profile:
     policy: Policy = field(default_factory=Policy)
     known_quirks: list[str] = field(default_factory=list)
     source_hints: dict[str, Any] = field(default_factory=dict)
+    cloud_accounts: list[CloudAccount] = field(default_factory=list)
     _host_index: dict[str, Host] = field(default_factory=dict, repr=False)
 
     # ----- loading --------------------------------------------------------- #
@@ -157,6 +199,7 @@ class Profile:
             policy=policy,
             known_quirks=[_clean(q) for q in (raw.get("known_quirks") or [])],
             source_hints=raw.get("source_hints") or {},
+            cloud_accounts=[_cloud_account(a) for a in (raw.get("cloud_accounts") or [])],
         )
 
     def compiled(self) -> Profile:
@@ -303,6 +346,33 @@ class Profile:
         if self.policy.nat_attribution_limited_behind:
             gws = ", ".join(self.policy.nat_attribution_limited_behind)
             lines.append(f"  Per-device attribution is impossible behind: {gws}")
+        for acct in self.cloud_accounts:
+            lines.append("")
+            lines.append(f"CLOUD ACCOUNT {acct.provider} {acct.account_id}"
+                         + (f" ({acct.name})" if acct.name else ""))
+            if acct.notes:
+                lines.append(f"  notes: {acct.notes}")
+            if acct.expected_regions:
+                lines.append(f"  expected regions: {', '.join(acct.expected_regions)}")
+            if acct.blocked_accounts:
+                lines.append(f"  accounts that must never appear: "
+                             f"{', '.join(acct.blocked_accounts)}")
+            for pr in acct.principals:
+                rules = []
+                if pr.dormant:
+                    rules.append("dormant: any activity is suspicious")
+                if not pr.long_term_keys:
+                    rules.append("must not use long-term access keys")
+                if pr.allowed_services:
+                    rules.append(f"services: {', '.join(pr.allowed_services)} only")
+                if pr.allowed_buckets:
+                    rules.append(f"buckets: {', '.join(pr.allowed_buckets)} only")
+                lines.append(f"  principal {pr.match}" + (f" [{'; '.join(rules)}]" if rules else ""))
+                if pr.notes:
+                    lines.append(f"    {pr.notes}")
+            for wr in acct.watched_resources:
+                lines.append(f"  watched resource {wr.match} ({wr.severity})"
+                             + (f": {wr.note}" if wr.note else ""))
         if self.known_quirks:
             lines.append("")
             lines.append("KNOWN LOCAL QUIRKS (established facts, not findings)")
@@ -322,6 +392,42 @@ _RFC1918 = [
 
 def _is_rfc1918(addr: Any) -> bool:
     return any(addr in net for net in _RFC1918 if addr.version == net.version)
+
+
+def _cloud_account(a: dict[str, Any]) -> CloudAccount:
+    if not a.get("account_id"):
+        raise ConfigError("cloud_accounts entry is missing account_id")
+
+    def strs(key: str, src: dict[str, Any]) -> list[str]:
+        return [str(x) for x in (src.get(key) or [])]
+
+    principals = []
+    for pr in a.get("principals") or []:
+        if not pr.get("match"):
+            raise ConfigError(f"cloud account {a['account_id']}: principal without match")
+        principals.append(CloudPrincipal(
+            match=str(pr["match"]), notes=_clean(pr.get("notes")),
+            dormant=bool(pr.get("dormant", False)),
+            long_term_keys=bool(pr.get("long_term_keys", True)),
+            allowed_services=[x.lower() for x in strs("allowed_services", pr)],
+            allowed_buckets=strs("allowed_buckets", pr),
+        ))
+    watched = []
+    for wr in a.get("watched_resources") or []:
+        sev = str(wr.get("severity", "HIGH")).upper()
+        if sev not in ("LOW", "MEDIUM", "HIGH", "CRITICAL"):
+            raise ConfigError(f"watched resource {wr.get('match')!r}: bad severity {sev!r}")
+        if not wr.get("match"):
+            raise ConfigError(f"cloud account {a['account_id']}: watched resource without match")
+        watched.append(WatchedResource(match=str(wr["match"]), severity=sev,
+                                       note=_clean(wr.get("note"))))
+    return CloudAccount(
+        account_id=str(a["account_id"]), provider=str(a.get("provider", "aws")),
+        name=str(a.get("name", "")), notes=_clean(a.get("notes")),
+        expected_regions=strs("expected_regions", a),
+        blocked_accounts=strs("blocked_accounts", a),
+        principals=principals, watched_resources=watched,
+    )
 
 
 def _clean(value: Any) -> str:

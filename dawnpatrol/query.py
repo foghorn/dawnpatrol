@@ -6,6 +6,7 @@ across SQLite and MySQL. Every method is scoped to one run_id.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
@@ -379,6 +380,47 @@ class EventQuery:
         return [{"client_ip": r[0], "domain": r[1], "queries": int(r[2]),
                  "blocked": int(r[3] or 0), "first": _aware(r[4]), "last": _aware(r[5])}
                 for r in rows]
+
+    def detail_rows(self, *, programs: Sequence[str] | None = None,
+                    program_prefixes: Sequence[str] | None = None,
+                    user_suffix: str | None = None, raw_contains: str | None = None,
+                    limit: int = 20000, **filters: Any) -> list[dict[str, Any]]:
+        """Events with their ``raw`` payload decoded, for analyzers that need
+        fields with no column of their own (CloudTrail request targets, user
+        agents). Narrow it: ``programs`` (exact), ``program_prefixes``
+        (``iam:List``), ``user_suffix`` (``:root``), plus the usual filters."""
+        e = S.events.c
+        clauses = [self._base(**filters)]
+        alts = []
+        if programs:
+            alts.append(e.program.in_(list(programs)))
+        for p in program_prefixes or []:
+            alts.append(e.program.like(p.replace("%", r"\%") + "%", escape="\\"))
+        if alts:
+            clauses.append(or_(*alts))
+        if user_suffix:
+            clauses.append(e.user.like("%" + user_suffix.replace("%", r"\%"), escape="\\"))
+        if raw_contains:
+            needle = "%" + raw_contains.replace("%", r"\%") + "%"
+            clauses.append(or_(e.raw_json.like(needle, escape="\\"),
+                               e.user.like(needle, escape="\\")))
+        with self._engine.connect() as conn:
+            rows = conn.execute(
+                select(e.ts, e.kind, e.user, e.program, e.action, e.src_ip, e.dst_ip,
+                       e.dst_port, e.device, e.severity, e.domain, e.message, e.raw_json)
+                .where(and_(*clauses)).order_by(e.ts).limit(limit)
+            ).mappings().all()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["ts"] = _aware(d["ts"])
+            raw = d.pop("raw_json")
+            try:
+                d["raw"] = json.loads(raw) if raw else {}
+            except ValueError:
+                d["raw"] = {}
+            out.append(d)
+        return out
 
     def flow_pairs_for_ioc(self, limit: int = 50000
                            ) -> list[tuple[str | None, str, int | None, str | None, int]]:

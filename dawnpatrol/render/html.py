@@ -195,7 +195,7 @@ def _finding_html(f: Finding) -> str:
 
 def _statistics_table(report: Report) -> str:
     rows = []
-    for m in report.metrics[:40]:
+    for m in report.table_metrics(40):
         prior = "-" if m.prior is None else f"{m.prior:g}"
         delta = m.delta_pct
         change = "-" if delta is None else f"{delta:+.0f}%"

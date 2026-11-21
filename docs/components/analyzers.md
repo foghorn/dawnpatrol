@@ -227,6 +227,13 @@ firewall telemetry, an internal host probing many ports (the lateral-movement sh
 and - the mechanism that gives the model's own `watchlist_updates` teeth - checking
 whether anything it flagged for follow-up on a prior run actually recurred.
 
+**`cloud_activity`** (order 65) only runs when an AWS source is configured
+(`requires_sources`). It reads CloudTrail events through `EventQuery.detail_rows()`,
+which returns them with `raw` decoded, because the fields that matter (request targets,
+MFA, user agent) have no column of their own. Each check is a small, named pattern; the
+thresholds are module constants, and anything routine that trips one belongs in the
+profile's `known_quirks`, not in a raised threshold.
+
 **`ioc_match`** (order 60) checks the run against operator-supplied indicator lists
 (`DAWNPATROL_IOC_PATHS`, default `/etc/dawnpatrol/iocs`; formats in `iocs.py`). It reads
 *every* distinct address and domain in the run, uncapped, because a list match is usually

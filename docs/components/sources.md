@@ -211,6 +211,33 @@ more.
   more nonexistent domains than its peers - a DGA-shaped pattern the block rate alone
   cannot see, since a nonexistent domain is never something Pi-hole blocks.
 
+## Walkthrough: `aws_cloudtrail.py` and `aws_guardduty.py`
+
+Two sources for an AWS account, sharing `_aws.py` (a leading underscore keeps the
+registry from loading it as a plugin). Setting up the AWS side is in
+[`docs/aws-setup.md`](../aws-setup.md).
+
+- **CloudTrail is read from S3, not the `LookupEvents` API.** The API covers management
+  events only and is throttled to two requests a second; the bucket is complete and also
+  works for organization trails. The source walks
+  `AWSLogs/[<org-id>/]<account>/CloudTrail/<region>/YYYY/MM/DD/`, reads only delivery
+  files whose timestamp falls within an hour of the window (CloudTrail delivers up to
+  ~15 minutes late), and keeps records whose `eventTime` is inside it.
+- **Calls AWS services make for themselves are dropped and counted** (`userIdentity`
+  type `AWSService`). They are most of a quiet account's trail and say nothing about who
+  is acting in it.
+- **Assumed-role sessions are attributed to the role**, not the per-session ARN, so one
+  CI role isn't a hundred different principals.
+- **What the analyzer needs that has no column goes in `raw`**: region, user agent, MFA
+  flag, error message, and `targets`, the resources a call named (secret IDs, bucket
+  names, users, roles). `EventQuery.detail_rows()` returns events with `raw` decoded.
+- **A stopped trail is a collection error, not a quiet day.** With
+  `DAWNPATROL_SOURCE_AWS_CLOUDTRAIL_TRAIL` set, every run calls `GetTrailStatus`.
+- **GuardDuty findings are collected by `updatedAt`**, because a recurring finding is
+  updated rather than re-created. Archived findings are excluded, sample findings are
+  kept and marked, and a configured region with no detector is an error: GuardDuty is
+  regional, so that region is a blind spot.
+
 ## Build your own
 
 Copy `dawnpatrol/sources/TEMPLATE.py` (skipped by the plugin registry, so it's a safe

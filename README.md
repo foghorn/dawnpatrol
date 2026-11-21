@@ -186,6 +186,49 @@ indicators were usually published after the traffic happened:
 dawnpatrol hunt --ioc-file /etc/dawnpatrol/iocs --days 180
 ```
 
+### AWS (CloudTrail and GuardDuty)
+
+DawnPatrol can watch an AWS account alongside the network. Two sources read it:
+
+- **`aws_cloudtrail`** reads the account's API activity from the S3 bucket a
+  CloudTrail trail delivers to, including organization trails covering many
+  accounts. With `DAWNPATROL_SOURCE_AWS_CLOUDTRAIL_TRAIL` set, it also checks
+  each run that the trail is still logging.
+- **`aws_guardduty`** collects GuardDuty findings updated during the run, per
+  region. A listed region with no detector is reported as a blind spot.
+
+The `cloud_activity` analyzer then looks for:
+
+- root account use;
+- console sign-ins without MFA, and bursts of failed sign-ins;
+- logging or detection being switched off (CloudTrail, GuardDuty, AWS Config,
+  flow logs);
+- IAM changes that create or widen access;
+- one identity denied across many APIs (permission probing);
+- one identity reading many secrets, IAM objects or buckets in a day;
+- bucket policy, ACL, public-access, versioning or lifecycle changes, and bucket
+  deletion;
+- compute launches, DNS and CDN changes, and calls from other AWS accounts;
+- write activity outside your expected regions;
+- each GuardDuty finding type, at GuardDuty's severity.
+
+A `cloud_accounts` entry in `profile.yml` describes the account for the model
+and adds rules that report at HIGH:
+- identities that should be dormant;
+- people who should never use long-term keys;
+- keys limited to certain services or buckets;
+- vendor accounts you've removed;
+- resource names worth watching, such as dangling DNS names or orphaned secrets.
+
+AWS statistics appear as a Cloud block in the report. Setting the bucket or the
+GuardDuty regions switches each source on; credentials can be a dedicated
+read-only access key, an assumed role, or the default AWS chain. The image
+includes boto3; for a local install, `pip install "dawnpatrol[aws]"`.
+
+[`docs/aws-setup.md`](docs/aws-setup.md) builds the AWS side step by step with
+the AWS CLI: the log bucket, the trail, GuardDuty in each region, and the
+read-only IAM identity.
+
 ### Model provider
 
 Providers are plugins, and every model you want configured gets its own name
@@ -593,7 +636,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-584 tests, fully offline — no network, no API key, no spend — including an
+603 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract
@@ -613,6 +656,8 @@ and pull request, across Python 3.11-3.13.
   component (sources, analyzers, enrichment, outputs, providers, canaries, the network
   profile, the MCP server), each ending with a worked example of building your own.
   Start here if you want to extend DawnPatrol rather than just run it.
+- [`docs/aws-setup.md`](docs/aws-setup.md) — enabling CloudTrail, GuardDuty and a
+  read-only IAM identity for DawnPatrol with the AWS CLI.
 
 ## License
 
