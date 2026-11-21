@@ -115,6 +115,7 @@ class AnthropicProvider(Provider):
         use_beta = self.settings.refusal_fallback
         for turn in range(1, max_turns + 1):
             run.turns = turn
+            log.info("model call %d: sent to %s, waiting", turn, self.settings.model)
             try:
                 message = self._create(client, request, messages, use_beta)
             except _BetaUnsupported as exc:

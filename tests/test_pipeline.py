@@ -369,6 +369,32 @@ def test_each_model_call_logs_its_own_token_counts(runner, monkeypatch, caplog):
     ]
 
 
+def test_a_run_logs_its_progress_stage_by_stage(runner, monkeypatch, caplog):
+    """`docker logs` should show where a run is: each stage starting and
+    finishing, each source and analyzer, each tool call and the adjudication."""
+    def run_agent(self, *, system_static, system_context, user_message,
+                  tools, max_turns, on_turn=None):
+        by_name = {t.name: t for t in tools}
+        by_name["describe_schema"].handler({})
+        assert by_name["submit_analysis"].handler(dict(StubProvider.analysis)) is None
+        return AgentRun(analysis=StubProvider.analysis, usage=TokenUsage(calls=1), turns=1)
+
+    monkeypatch.setattr(StubProvider, "run_agent", run_agent)
+    with caplog.at_level("INFO", logger="dawnpatrol"):
+        runner.run()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    for stage in ("collect", "verify", "persist", "analyze", "investigate",
+                  "adjudicate", "render", "deliver"):
+        assert f"stage {stage}: started" in text
+        assert f"stage {stage}: done in" in text
+    assert "source synthetic: collecting" in text
+    assert "source synthetic: collected" in text
+    assert "analyzer firewall_volume:" in text
+    assert "tool 1/" in text and "describe_schema()" in text
+    assert "analysis submitted and accepted" in text
+    assert "adjudicate: " in text and "finding(s) kept" in text
+
+
 # --------------------------------------------------------------------------- #
 # Full run
 # --------------------------------------------------------------------------- #

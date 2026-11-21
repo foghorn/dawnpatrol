@@ -52,6 +52,13 @@ def classify(source: Source, result: CollectionResult, ctx: RunContext) -> Sourc
             log.warning("self_test for %s raised: %s", source.name, exc)
             health.notes.append(f"self_test raised {type(exc).__name__}: {exc}")
 
+        if source.activity_driven and not result.errors and health.probes \
+                and all(p.ok for p in health.probes):
+            health.notes.append(
+                "no records this period, and every probe passed: this source only "
+                "produces records when something happens, so this is a quiet period")
+            return health
+
         if _probes_prove_failure(health):
             health.state = HealthState.FAILED
             health.notes.append(
@@ -91,7 +98,8 @@ def classify(source: Source, result: CollectionResult, ctx: RunContext) -> Sourc
     # Coverage is judged against the EFFECTIVE window. A source with a known
     # retention ceiling has not fallen short of anything.
     expected_hours = effective.hours
-    if expected_hours > 0 and result.span_hours < expected_hours * (1 - SPAN_TOLERANCE):
+    if (not source.activity_driven and expected_hours > 0
+            and result.span_hours < expected_hours * (1 - SPAN_TOLERANCE)):
         problems.append(
             f"timestamps span {result.span_hours:.2f}h of an expected "
             f"{expected_hours:.2f}h: the pull is truncated"

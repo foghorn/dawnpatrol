@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -101,8 +102,14 @@ class ToolBox:
         prompt, which keeps the cached system prompt identical across models
         whose budgets differ.
         """
+        name = getattr(handler, "__name__", "tool")
+
         def metered(args: dict[str, Any]) -> str:
+            start = time.monotonic()
             result = handler(args)
+            log.info("tool %d/%d: %s(%s) -> %d chars in %.1fs", self.calls_made,
+                     self.max_calls, name, _args_summary(args), len(result or ""),
+                     time.monotonic() - start)
             if self.calls_made > self.max_calls:
                 return result
             line = f"[tool calls used: {self.calls_made} of {self.max_calls}]"
@@ -513,6 +520,9 @@ class ToolBox:
                         "the format", ", ".join(unwrapped[:5]))
         problems = analysis_problems(args)
         if not problems:
+            log.info("analysis submitted and accepted: %d finding(s), %d recommended "
+                     "action(s)", len(args.get("findings") or []),
+                     len(args.get("recommended_actions") or []))
             return None
         if self.format_corrections >= FORMAT_CORRECTIONS:
             raise SubmissionRejected(
@@ -524,3 +534,13 @@ class ToolBox:
                     "correction %d of %d: %s", self.format_corrections,
                     FORMAT_CORRECTIONS, "; ".join(problems[:3]))
         return format_correction(problems, with_schema=self.format_corrections == 1)
+
+
+def _args_summary(args: dict[str, Any], limit: int = 160) -> str:
+    """Tool arguments on one short line for the log (SQL whitespace collapsed)."""
+    parts = []
+    for key, value in (args or {}).items():
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        parts.append(f"{key}={' '.join(str(text).split())}")
+    out = ", ".join(parts)
+    return out if len(out) <= limit else out[:limit - 3] + "..."

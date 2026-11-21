@@ -233,6 +233,12 @@ registry from loading it as a plugin). Setting up the AWS side is in
   names, users, roles). `EventQuery.detail_rows()` returns events with `raw` decoded.
 - **A stopped trail is a collection error, not a quiet day.** With
   `DAWNPATROL_SOURCE_AWS_CLOUDTRAIL_TRAIL` set, every run calls `GetTrailStatus`.
+- **Both are `activity_driven`.** Their records exist only when something happens, so
+  health checks don't read an empty GuardDuty pull as SUSPECT (an empty pull with passing
+  probes is a quiet period) or a CloudTrail day bunched into a few active hours as a
+  truncated pull. They prove they're alive through their own checks instead: trail
+  status, bucket listing and detector state. Set `activity_driven = True` on any source
+  of this kind.
 - **GuardDuty findings are collected by `updatedAt`**, because a recurring finding is
   updated rather than re-created. Archived findings are excluded, sample findings are
   kept and marked, and a configured region with no detector is an error: GuardDuty is

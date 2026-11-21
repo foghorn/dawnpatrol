@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -267,6 +268,11 @@ class Runner:
                         canary_results, usage,
                     )
                 outcome.report = report
+                kept = Counter(f.severity.label() for f in report.findings)
+                log.info("adjudicate: %d finding(s) kept (%s), %d rejected, %d suppressed",
+                         len(report.findings),
+                         ", ".join(f"{n} {s}" for s, n in kept.most_common()) or "none",
+                         len(report.rejected_findings), len(report.suppressed_findings))
                 self.store.save_findings(run_id, started,
                                          report.findings + report.suppressed_findings)
                 for update in parse_watchlist((analysis or {}).get("watchlist_updates")):
@@ -345,8 +351,15 @@ class Runner:
         results: list[tuple[Source, CollectionResult]] = []
 
         def one(source: Source) -> tuple[Source, CollectionResult]:
+            log.info("source %s: collecting", source.name)
+            start = time.monotonic()
             try:
-                return source, source.collect(ctx.window, ctx)
+                result = source.collect(ctx.window, ctx)
+                log.info("source %s: collected %d record(s) in %s (%d page(s)/file(s)%s)",
+                         source.name, result.count, _elapsed(time.monotonic() - start),
+                         result.pages, f", {len(result.errors)} error(s)"
+                         if result.errors else "")
+                return source, result
             except Exception as exc:  # noqa: BLE001
                 log.exception("source %s raised", source.name)
                 return source, CollectionResult(
@@ -373,8 +386,12 @@ class Runner:
             if not analyzer.applicable(kinds, sources):
                 log.debug("analyzer %s not applicable", analyzer.name)
                 continue
+            start = time.monotonic()
             try:
                 result = analyzer.run(query, self.profile, baseline)
+                log.info("analyzer %s: %d signal(s), %d metric(s) in %s", analyzer.name,
+                         len(result.signals), len(result.metrics),
+                         _elapsed(time.monotonic() - start))
             except Exception as exc:  # noqa: BLE001 - one bad analyzer is not fatal
                 log.exception("analyzer %s raised", analyzer.name)
                 notes.append(f"analyzer {analyzer.name} failed: {type(exc).__name__}: {exc}")
@@ -603,8 +620,18 @@ class _timed:
 
     def __enter__(self) -> _timed:
         self.start = time.monotonic()
+        log.info("stage %s: started", self.name)
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, exc_type: Any, *exc: Any) -> None:
         self.sink[self.name] = round(time.monotonic() - self.start, 3)
-        log.debug("stage %s took %.3fs", self.name, self.sink[self.name])
+        log.info("stage %s: %s %s", self.name, "failed after" if exc_type else "done in",
+                 _elapsed(self.sink[self.name]))
+
+
+def _elapsed(seconds: float) -> str:
+    """``0.4s``, ``52s``, ``3m 07s``."""
+    if seconds < 10:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(round(seconds)), 60)
+    return f"{minutes}m {secs:02d}s" if minutes else f"{secs}s"

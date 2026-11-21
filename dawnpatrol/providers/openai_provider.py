@@ -171,6 +171,7 @@ class OpenAIProvider(Provider):
                     "store": False,
                 }
 
+                log.info("model call %d: sent to %s, waiting", turn, self.settings.model)
                 try:
                     resp = client.post(self.endpoint, json=payload)
                     resp.raise_for_status()

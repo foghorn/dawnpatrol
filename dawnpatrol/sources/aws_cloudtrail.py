@@ -75,6 +75,7 @@ class AwsCloudTrailSource(Source):
     kinds = frozenset({EventKind.AUTH, EventKind.OTHER})
     requires_env = frozenset({f"{ENV}BUCKET"})
     min_expected_records = 0
+    activity_driven = True
 
     def collect(self, window: Window, ctx: RunContext) -> CollectionResult:
         result = CollectionResult(source=self.name, window=window, requested_window=window)

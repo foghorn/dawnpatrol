@@ -30,6 +30,12 @@ class Source(ABC):
     max_window_hours: int | None = None
     #: Volume floor below which a result is a collection defect until proven otherwise.
     min_expected_records: int = 0
+    #: Records exist only when something happens (API calls, alerts), so their
+    #: count and time span measure activity, not collection coverage. Zero
+    #: records with passing probes is a quiet period (OK), and a short span is
+    #: not a truncated pull. Such a source must prove it is alive through its
+    #: own checks instead: a stopped trail or a missing detector is an error.
+    activity_driven: bool = False
 
     def __init__(self) -> None:
         self.profile: Profile = Profile()

@@ -466,3 +466,48 @@ def test_account_rules_fire_at_high(store, account_profile, window):
     assert tax["cloud.blocked_account"][0].severity_hint == Severity.HIGH
     # expected_regions came from the profile, no env var needed
     assert tax["cloud.unexpected_region"][0].evidence["region"] == "ap-south-1"
+
+
+# --------------------------------------------------------------------------- #
+# Health: activity-driven sources
+# --------------------------------------------------------------------------- #
+
+def _ctx(window):
+    from types import SimpleNamespace
+    return SimpleNamespace(window=window)
+
+
+def test_quiet_guardduty_with_passing_probes_is_ok(monkeypatch, profile, window):
+    from dawnpatrol.models import CollectionResult, HealthState
+    from dawnpatrol.verify import classify
+    monkeypatch.setenv("DAWNPATROL_SOURCE_AWS_GUARDDUTY_REGIONS", "us-east-1")
+    monkeypatch.setattr(_aws, "session", lambda region=None: FakeSession(
+        guardduty=FakeGuardDuty([])))
+    src = AwsGuardDutySource()
+    src.configure(profile)
+    health = classify(src, CollectionResult(source=src.name, window=window,
+                                            requested_window=window), _ctx(window))
+    assert health.state == HealthState.OK
+    assert any("quiet period" in n for n in health.notes)
+
+
+def test_quiet_guardduty_with_a_missing_detector_is_not_ok(monkeypatch, profile, window):
+    from dawnpatrol.models import CollectionResult, HealthState
+    from dawnpatrol.verify import classify
+    monkeypatch.setenv("DAWNPATROL_SOURCE_AWS_GUARDDUTY_REGIONS", "us-east-1")
+    monkeypatch.setattr(_aws, "session", lambda region=None: FakeSession(
+        guardduty=FakeGuardDuty([], detectors=())))
+    src = AwsGuardDutySource()
+    src.configure(profile)
+    result = CollectionResult(source=src.name, window=window, requested_window=window,
+                              errors=["us-east-1: GuardDuty has no detector in this region"])
+    assert classify(src, result, _ctx(window)).state != HealthState.OK
+
+
+def test_short_cloudtrail_span_is_activity_not_truncation(profile, window, cloudtrail):
+    from dawnpatrol.models import CollectionResult, HealthState
+    from dawnpatrol.verify import classify
+    events = [cloudtrail.normalize(ct("ListUsers", minutes=m, read_only=True)) for m in (0, 5)]
+    result = CollectionResult(source=cloudtrail.name, window=window,
+                              requested_window=window, events=events)
+    assert classify(cloudtrail, result, _ctx(window)).state == HealthState.OK

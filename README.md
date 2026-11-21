@@ -516,6 +516,25 @@ dawnpatrol suppress --taxonomy scan.persistent_prober \
 dawnpatrol suppressions                 # list active suppressions
 ```
 
+**Following a run.** `docker logs -f dawnpatrol` shows each run's progress as it
+happens: every stage starting and finishing with its duration, each source and
+analyzer with its record or signal counts and timing, every model call as it is
+sent and answered, every tool the model calls (with its arguments and result
+size), and how many findings survived adjudication:
+
+```
+stage investigate: started
+model call 3: sent to <model> (prompt ~52,140 tokens), waiting
+model call 3: 52133 input tokens (37070 cached), 6553/32000 output tokens
+tool 7/35: query_events(sql=SELECT src_ip, count(*) FROM events WHERE ...) -> 2210 chars in 0.3s
+analysis submitted and accepted: 6 finding(s), 4 recommended action(s)
+stage investigate: done in 25m 27s
+adjudicate: 6 finding(s) kept (2 MEDIUM, 2 LOW, 2 INFO), 0 rejected, 0 suppressed
+```
+
+`DAWNPATROL_LOG_LEVEL=DEBUG` adds the MCP server's per-request lines, which are
+otherwise held back so a run's progress stays readable.
+
 Suppressions carry a mandatory expiry, and matching findings move to a report
 appendix rather than being deleted — so a tuned-out pattern that changes
 character is still visible.

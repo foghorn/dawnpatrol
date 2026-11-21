@@ -45,5 +45,11 @@ def configure(level: str = "INFO", registry: SecretRegistry | None = None) -> No
     root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
     # Third-party noise that is never useful at our level.
-    for noisy in ("httpx", "httpcore", "urllib3", "sqlalchemy.engine.Engine", "anthropic"):
+    for noisy in ("httpx", "httpcore", "urllib3", "sqlalchemy.engine.Engine", "anthropic",
+                  "botocore", "boto3", "s3transfer"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+    # The MCP server logs every request it handles; keep that for DEBUG, so
+    # the run's own progress lines are readable in `docker logs`.
+    if root.level > logging.DEBUG:
+        for chatty in ("mcp", "uvicorn.access"):
+            logging.getLogger(chatty).setLevel(logging.WARNING)

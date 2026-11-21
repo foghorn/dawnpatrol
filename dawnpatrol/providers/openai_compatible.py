@@ -198,6 +198,9 @@ class OpenAICompatibleProvider(Provider):
                 if self.reasoning_effort:
                     payload["reasoning_effort"] = self.reasoning_effort
 
+                log.info("model call %d: sent to %s (prompt ~%s tokens), waiting", turn,
+                         self.settings.model,
+                         f"{plan.estimated_prompt_tokens:,}" if window is not None else "?")
                 try:
                     data = self._post(client, payload, turn)
                 except httpx.HTTPStatusError as exc:
