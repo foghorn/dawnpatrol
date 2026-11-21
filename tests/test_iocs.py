@@ -53,7 +53,8 @@ def test_lists_load_with_tiers_defanging_expiry_and_skipped_types(iocs):
     assert by_value["oast.example"].kind == "domain_suffix"
     assert "192.0.2.99" not in by_value                                 # past alert_until
     assert iocs.expired == 1
-    assert iocs.skipped_types == {"user-agent": 1, "container-image": 1}
+    assert iocs.skipped_types == {"container-image": 1}
+    assert by_value["mozilla/5.0 (evil)"].kind == "user_agent"     # T2: usable
     # Plain text: inferred types, comments, defanged URL reduced to its host.
     assert by_value["198.51.100.200"].severity == Severity.LOW
     assert by_value["suffix.example"].kind == "domain_suffix"

@@ -196,6 +196,7 @@ def _statistics(report: Report) -> list[str]:
         ("Segments", "segments"),
         ("Router", "router"),
         ("Cloud", "cloud"),
+        ("Web", "web"),
     ]
     for label, key in sections:
         metrics = [m for m in report.metrics_for(key) if not str(m.key).startswith("fw.proto.")]

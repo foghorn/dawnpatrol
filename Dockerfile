@@ -8,6 +8,11 @@ ENV PYTHONUNBUFFERED=1 \
     DAWNPATROL_OUTPUT_DIR=/out \
     DAWNPATROL_PROFILE=/etc/dawnpatrol/profile.yml
 
+# OpenSSH client for the ssh_host source (remote servers read over SSH).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --system --uid 10001 --create-home --home-dir /home/dawnpatrol dawnpatrol
 
 WORKDIR /app

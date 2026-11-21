@@ -97,6 +97,13 @@ class EntityType(StrEnum):
     PORT = "port"
     DEVICE = "device"
     USER = "user"
+    #: A web site's script endpoint, ``<site><path>`` (``store.script_endpoint``).
+    #: Baseline history only, for spotting newly appearing scripts.
+    URL = "url"
+    #: A long-term AWS access key and a public address it called from,
+    #: ``<AKIA...>|<ip>``. Baseline history only, for spotting a key used
+    #: from a new network (``analyzers/cloud_activity.py``).
+    KEY_NETWORK = "key_network"
 
 
 class Verdict(StrEnum):
@@ -204,6 +211,9 @@ class Event:
     severity: str | None = None
     message: str | None = None
     user: str | None = None
+    #: Client software identifier: an HTTP request's User-Agent header, or the
+    #: SDK/CLI string on a cloud API call. Attacker-controlled; capped at 255.
+    user_agent: str | None = None
 
     # derived from the site profile at normalize time
     src_zone: str | None = None
@@ -637,11 +647,12 @@ class Report:
 
     def table_metrics(self, limit: int = 40) -> list[Metric]:
         """The first ``limit`` metrics for a statistics table, plus every cloud
-        metric: those come from a late analyzer and would otherwise never make
-        the cut on a network with a busy perimeter."""
-        cloud = [m for m in self.metrics if m.section == "cloud"]
-        rest = [m for m in self.metrics if m.section != "cloud"]
-        return rest[:limit] + cloud
+        and web metric: those come from late analyzers and would otherwise
+        never make the cut on a network with a busy perimeter."""
+        late = ("cloud", "web")
+        extra = [m for m in self.metrics if m.section in late]
+        rest = [m for m in self.metrics if m.section not in late]
+        return rest[:limit] + extra
 
     def metric(self, key: str) -> Metric | None:
         for m in self.metrics:

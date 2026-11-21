@@ -61,15 +61,23 @@ _TYPE_ALIASES = {
     "cidr": "cidr", "ipv4-cidr": "cidr", "ipv6-cidr": "cidr", "ip-range": "cidr",
     "domain": "domain", "hostname": "domain", "fqdn": "domain", "domain-name": "domain",
     "domain-suffix": "domain_suffix", "domain_suffix": "domain_suffix",
+    "user-agent": "user_agent", "user_agent": "user_agent",
+    "user-agent-substring": "user_agent_substring",
+    "string-marker": "url_marker", "url-marker": "url_marker", "url_marker": "url_marker",
 }
+#: Kinds matched against free text (user agents, request URLs), not addresses.
+TEXT_KINDS = ("user_agent", "user_agent_substring", "url_marker")
+#: Shorter text markers match ordinary URLs and user agents by accident.
+MIN_TEXT_MARKER = 6
 _DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9])?\.)+"
                         r"[a-z0-9-]{2,63}$")
 
 
 @dataclass(frozen=True, slots=True)
 class Indicator:
-    value: str               # normalized: an address, a network, or a lowercase domain
-    kind: str                # ip | cidr | domain | domain_suffix
+    value: str               # normalized: address, network, lowercase domain, or text
+    kind: str                # ip | cidr | domain | domain_suffix | user_agent |
+                             # user_agent_substring | url_marker
     severity: Severity = Severity.LOW
     tier: str = ""
     source: str = ""
@@ -128,6 +136,23 @@ class IocSet:
                 out[raw] = hits
         return out
 
+    def match_user_agents(self, values: Iterable[str]) -> dict[str, list[Indicator]]:
+        """Each user agent equal to (case-insensitive) or containing an indicator."""
+        exact = [i for i in self.indicators if i.kind == "user_agent"]
+        subs = [i for i in self.indicators if i.kind == "user_agent_substring"]
+        out: dict[str, list[Indicator]] = {}
+        for raw in values:
+            if not raw:
+                continue
+            ua = raw.strip().lower()
+            hits = [i for i in exact if ua == i.value] + [i for i in subs if i.value in ua]
+            if hits:
+                out[raw] = hits
+        return out
+
+    def url_markers(self) -> list[Indicator]:
+        return [i for i in self.indicators if i.kind == "url_marker"]
+
     def match_domains(self, values: Iterable[str]) -> dict[str, list[Indicator]]:
         """Each domain in ``values`` equal to, or under, a domain indicator."""
         doms = [i for i in self.indicators if i.kind in ("domain", "domain_suffix")]
@@ -173,16 +198,14 @@ def load_iocs(paths: Iterable[Path], today: date | None = None) -> IocSet:
         result.files.append(path.name)
         rows = _csv_rows(text) if path.suffix.lower() == ".csv" else _text_rows(text)
         for row in rows:
-            ind = _indicator(row, path.name, result)
-            if ind is None:
-                continue
-            if ind.expires and ind.expires < today:
-                result.expired += 1
-                continue
-            key = (ind.kind, ind.value)
-            # The same value in two lists keeps the higher severity.
-            if key not in seen or ind.severity > seen[key].severity:
-                seen[key] = ind
+            for ind in _indicators(row, path.name, result):
+                if ind.expires and ind.expires < today:
+                    result.expired += 1
+                    continue
+                key = (ind.kind, ind.value)
+                # The same value in two lists keeps the higher severity.
+                if key not in seen or ind.severity > seen[key].severity:
+                    seen[key] = ind
     result.indicators = list(seen.values())
     return result
 
@@ -212,24 +235,50 @@ def refang(value: str) -> str:
     return v
 
 
-def _indicator(row: dict[str, str], origin: str, result: IocSet) -> Indicator | None:
-    raw = row.get("indicator") or row.get("value") or row.get("ioc") or ""
-    raw = refang(raw)
-    if not raw:
-        return None
+def _indicators(row: dict[str, str], origin: str, result: IocSet) -> list[Indicator]:
+    raw = (row.get("indicator") or row.get("value") or row.get("ioc") or "").strip()
     declared = (row.get("type") or "").strip().lower()
-    kind = _TYPE_ALIASES.get(declared) if declared else _infer(raw)
+    kind = _TYPE_ALIASES.get(declared) if declared else _infer(refang(raw))
     if declared and kind is None:
         result.skipped_types[declared] = result.skipped_types.get(declared, 0) + 1
-        return None
-    value = _normalize(raw, kind)
-    if value is None:
+        return []
+    tier = (row.get("tier") or "").strip().upper()
+    if kind in ("user_agent", "user_agent_substring") and tier == "T4":
+        # Generic user agents (curl, python-requests, bare Mozilla/5.0): the
+        # lists that carry them say never to act on them alone.
+        label = f"{declared} (T4, enrichment only)"
+        result.skipped_types[label] = result.skipped_types.get(label, 0) + 1
+        return []
+    if kind == "url_marker":
+        values = _marker_variants(raw)
+    elif kind in TEXT_KINDS:
+        values = [raw.lower()] if len(raw) >= MIN_TEXT_MARKER else []
+    else:
+        values = [v for v in [_normalize(refang(raw), kind)] if v is not None]
+    if not values:
         result.invalid += 1
-        return None
+        return []
+    return [ind for v in values if (ind := _build(row, v, kind, tier, origin))]
+
+
+def _marker_variants(raw: str) -> list[str]:
+    """A string-marker cell can list variants: "artx_* / artx-* / zzartx<n>.php".
+    Wildcards and placeholders reduce to the literal part; parts shorter than
+    MIN_TEXT_MARKER are dropped as too likely to match by accident."""
+    out = []
+    for part in raw.split(" / "):
+        part = re.sub(r"\(.*?\)", "", part).strip().strip("*").split("<", 1)[0]
+        part = part.split("*", 1)[0].strip()
+        if len(part) >= MIN_TEXT_MARKER:
+            out.append(part.lower())
+    return out
+
+
+def _build(row: dict[str, str], value: str, kind: str, tier: str,
+           origin: str) -> Indicator | None:
     if kind == "ip" and "/" in value:
         kind = "cidr"
 
-    tier = (row.get("tier") or "").strip().upper()
     if tier in _TIER_SEVERITY:
         severity = _TIER_SEVERITY[tier]
     else:

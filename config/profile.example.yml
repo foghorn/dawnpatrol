@@ -115,7 +115,8 @@ known_quirks:
 # Cloud accounts (optional), read with the aws_cloudtrail / aws_guardduty
 # sources (docs/aws-setup.md). notes are context for the model; the rules
 # (dormant, long_term_keys, allowed_services/buckets, blocked_accounts,
-# watched_resources) are enforced by analyzers/cloud_activity.py at HIGH.
+# watched_resources, backup_buckets) are enforced by
+# analyzers/cloud_activity.py at HIGH.
 # ─────────────────────────────────────────────────────────────────────────
 #cloud_accounts:
 #  - provider: aws
@@ -125,6 +126,8 @@ known_quirks:
 #    notes: >
 #      Static website and backups only; nothing should run EC2 or Lambda.
 #    blocked_accounts: ["999988887777"]      # a vendor you removed
+#    backup_buckets: [example-backups]       # retention changes on these are HIGH
+#    services_in_use: []                     # e.g. [ses] if you really send mail
 #    principals:
 #      - match: user/admin                   # matched by ARN suffix
 #        long_term_keys: false               # console/SSO only

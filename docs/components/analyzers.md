@@ -227,12 +227,38 @@ firewall telemetry, an internal host probing many ports (the lateral-movement sh
 and - the mechanism that gives the model's own `watchlist_updates` teeth - checking
 whether anything it flagged for follow-up on a prior run actually recurred.
 
+**`http_activity`** (order 50) reads `HTTP` events (from `ssh_host`). Public sites are
+scanned all day, so most checks rate background noise LOW and save MEDIUM/HIGH for the
+few shapes that mean a request reached the application: a sensitive path answered 2xx,
+an injection attempt that got a 2xx or 5xx, a script answering from an upload folder.
+It reads up to 200,000 requests per run through `detail_rows()`. Three checks lean on
+state outside the run: fake-crawler detection reads Google's and Microsoft's published
+crawler ranges, which the runner (not the analyzer, which stays offline) refreshes weekly
+into the data folder via `crawlers.py`; new-script detection uses the entity baseline,
+where `store.script_endpoint()` records every script path that ran (entity type `url`);
+and successful-login reporting skips `DAWNPATROL_WEB_TRUSTED_CLIENTS`. Noise is summarized:
+scanners, refused injection and admin pages served are one signal each, with the top
+clients in evidence, because one signal per client on a shared host produced 73 web
+signals in a single real run and crowded out everything else.
+
 **`cloud_activity`** (order 65) only runs when an AWS source is configured
 (`requires_sources`). It reads CloudTrail events through `EventQuery.detail_rows()`,
 which returns them with `raw` decoded, because the fields that matter (request targets,
 MFA, user agent) have no column of their own. Each check is a small, named pattern; the
 thresholds are module constants, and anything routine that trips one belongs in the
 profile's `known_quirks`, not in a raised threshold.
+
+Three of its checks lean on things outside the run:
+- **The key-network check uses history.** Every call signed with a long-term key from a
+  public address is recorded in the entity baseline as `EntityType.KEY_NETWORK`
+  (`<key>|<ip>`, `store.key_network`). A new address is rated by the longest prefix it
+  shares with any address the key used before (same /24 ignored, /16 LOW, else MEDIUM;
+  /48 and /32 for IPv6). The check stays silent until that history exists.
+- **DawnPatrol's own calls are left out** of the reconnaissance and sweep checks:
+  `OWN_FOOTPRINT` lists the APIs its sources call, matched only for the access key in
+  `DAWNPATROL_SOURCE_AWS_ACCESS_KEY_ID`. Anything else signed with that key counts.
+- **Backup checks need S3 data events** (`docs/aws-setup.md`); without them they have
+  nothing to read and stay quiet.
 
 **`ioc_match`** (order 60) checks the run against operator-supplied indicator lists
 (`DAWNPATROL_IOC_PATHS`, default `/etc/dawnpatrol/iocs`; formats in `iocs.py`). It reads

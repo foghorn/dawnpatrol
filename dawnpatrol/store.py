@@ -6,8 +6,10 @@ SQLAlchemy Core so the dialect is a configuration detail rather than a code path
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
+import re
 from collections.abc import Iterable, Sequence
 from datetime import datetime, timedelta
 from typing import Any
@@ -15,6 +17,7 @@ from typing import Any
 from sqlalchemy import create_engine, delete, event, func, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 
+from . import crawlers
 from . import schema as S
 from .config import DatabaseSettings, RetentionSettings
 from .errors import RunDeletionError
@@ -40,7 +43,7 @@ EVENT_COLUMNS = (
     "src_ip", "dst_ip", "src_port", "dst_port", "proto", "action", "iface_in",
     "iface_out", "ttl", "pkt_len", "domain", "qtype", "blocked", "block_reason",
     "upstream", "client_ip", "device", "program", "severity", "message", "user",
-    "src_zone", "dst_zone",
+    "user_agent", "src_zone", "dst_zone",
 )
 
 
@@ -357,6 +360,27 @@ class Store:
                     .where(S.entities.c.etype == etype, S.entities.c.value == value)
                     .values(last_seen=now, occurrences=total)
                 )
+
+    def entity_count_before(self, etype: EntityType, before: datetime) -> int:
+        """How many entities of this type were first seen before ``before``."""
+        with self.engine.connect() as conn:
+            return int(conn.execute(
+                select(func.count()).select_from(S.entities)
+                .where(S.entities.c.etype == str(etype), S.entities.c.first_seen < before)
+            ).scalar_one())
+
+    def entity_values_with_prefix(self, etype: EntityType, prefix: str,
+                                  before: datetime, limit: int = 5000) -> list[str]:
+        """Values of this type starting with ``prefix``, first seen before ``before``."""
+        e = S.entities.c
+        needle = prefix.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_") + "%"
+        with self.engine.connect() as conn:
+            rows = conn.execute(
+                select(e.value).where(e.etype == str(etype), e.first_seen < before,
+                                      e.value.like(needle, escape="\\"))
+                .limit(limit)
+            ).all()
+        return [r[0] for r in rows]
 
     def entity_first_seen(self, etype: EntityType, values: Sequence[str]) -> dict[str, datetime]:
         if not values:
@@ -790,6 +814,48 @@ _ACCOUNT_LOGON_ACTIONS = {"logon_success", "logon_failed", "privileged",
                           "ssh_accepted", "ssh_failed", "ssh_invalid"}
 
 
+_SCRIPT_PATH = re.compile(r"\.(php\d?|phtml|jspx?|aspx?|ashx|cgi|pl|py|sh)$", re.I)
+
+
+def script_endpoint(site: str | None, path: str | None, method: str | None,
+                    status: Any) -> str | None:
+    """``<site><path>`` for a request that ran a server-side script, else None.
+
+    "Ran" means it answered 2xx, or accepted a POST (any status below 400). A
+    script path that has never done this before is how a dropped web shell or
+    an injected plugin file first shows up, so these go into the long-term
+    entity baseline (``EntityType.URL``) and ``http_activity`` reports new ones.
+    """
+    if not site or not path:
+        return None
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    if not _SCRIPT_PATH.search(path):
+        return None
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return None
+    if 200 <= code < 300 or (method == "POST" and code < 400):
+        return f"{site}{path}"[:255]
+    return None
+
+
+def key_network(ev: Event) -> str | None:
+    """``<access key>|<ip>`` for a CloudTrail call signed with a long-term key
+    (AKIA...) from a public address, else None. See ``EntityType.KEY_NETWORK``."""
+    if ev.source != "aws_cloudtrail" or not ev.src_ip:
+        return None
+    key = str((ev.raw or {}).get("access_key_id") or "")
+    if not key.startswith("AKIA"):
+        return None
+    try:
+        if not ipaddress.ip_address(ev.src_ip).is_global:
+            return None
+    except ValueError:
+        return None
+    return f"{key}|{ev.src_ip}"[:255]
+
+
 def entity_pairs_from_events(events: Iterable[Event]) -> list[tuple[EntityType, str, int]]:
     """Collapse a run's events into entity occurrence counts for the baseline."""
     counts: dict[tuple[EntityType, str], int] = {}
@@ -798,7 +864,18 @@ def entity_pairs_from_events(events: Iterable[Event]) -> list[tuple[EntityType, 
         if value:
             counts[(etype, value)] = counts.get((etype, value), 0) + 1
 
+    ranges = None
     for ev in events:
+        if ev.kind == EventKind.HTTP:
+            if ranges is None:
+                ranges = crawlers.load()
+            # A verified search-engine crawler fetching a file says nothing about
+            # the file; leave its requests out of the script-endpoint history.
+            bot = crawlers.claimed_crawler(ev.user_agent)
+            if not (bot and crawlers.is_genuine(ev.src_ip, bot, ranges)):
+                bump(EntityType.URL, script_endpoint(ev.domain, (ev.raw or {}).get("path"),
+                                                     ev.program, ev.action))
+        bump(EntityType.KEY_NETWORK, key_network(ev))
         if ev.kind == EventKind.DNS:
             bump(EntityType.DOMAIN, (ev.domain or "").lower() or None)
             bump(EntityType.IP, ev.client_ip)

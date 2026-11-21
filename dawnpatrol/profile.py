@@ -99,6 +99,12 @@ class CloudAccount:
     blocked_accounts: list[str] = field(default_factory=list)
     principals: list[CloudPrincipal] = field(default_factory=list)
     watched_resources: list[WatchedResource] = field(default_factory=list)
+    #: Buckets holding backups: turning off their versioning, Object Lock or
+    #: replication, adding expiry rules, or deleting them is reported at HIGH.
+    backup_buckets: list[str] = field(default_factory=list)
+    #: Abuse-prone services this account really uses (``ses``, ``bedrock``...),
+    #: which are then not reported by the abuse-prone-services check.
+    services_in_use: list[str] = field(default_factory=list)
 
 
 DEFAULT_ATTACK_PORTS = [21, 22, 23, 25, 53, 80, 110, 143, 443, 445, 1194,
@@ -357,6 +363,12 @@ class Profile:
             if acct.blocked_accounts:
                 lines.append(f"  accounts that must never appear: "
                              f"{', '.join(acct.blocked_accounts)}")
+            if acct.backup_buckets:
+                lines.append(f"  backup buckets (retention changes are HIGH): "
+                             f"{', '.join(acct.backup_buckets)}")
+            if acct.services_in_use:
+                lines.append(f"  abuse-prone services legitimately in use: "
+                             f"{', '.join(acct.services_in_use)}")
             for pr in acct.principals:
                 rules = []
                 if pr.dormant:
@@ -427,6 +439,8 @@ def _cloud_account(a: dict[str, Any]) -> CloudAccount:
         expected_regions=strs("expected_regions", a),
         blocked_accounts=strs("blocked_accounts", a),
         principals=principals, watched_resources=watched,
+        backup_buckets=strs("backup_buckets", a),
+        services_in_use=[x.lower() for x in strs("services_in_use", a)],
     )
 
 

@@ -169,7 +169,10 @@ single probe or a single lookup. Lists can be:
 
 IP addresses, CIDR ranges, domains (which also match their subdomains) and
 domain suffixes are matched, and defanged values (`198.51.100[.]7`) are
-refanged. Other indicator types (user agents, hashes, cloud IDs) can't be seen
+refanged. With web or cloud sources, user agents (exact or substring) and
+markers inside requested URLs are matched too. The lowest-tier (T4) user
+agents, generic ones like `curl` or `python-requests`, are counted but never
+signalled, as the lists that carry them advise. Other indicator types (user agents, hashes, cloud IDs) can't be seen
 in firewall and DNS logs; they're skipped, and `dawnpatrol validate` counts
 them so nothing is dropped silently.
 
@@ -186,9 +189,9 @@ indicators were usually published after the traffic happened:
 dawnpatrol hunt --ioc-file /etc/dawnpatrol/iocs --days 180
 ```
 
-### AWS (CloudTrail and GuardDuty)
+### AWS (CloudTrail, GuardDuty and posture)
 
-DawnPatrol can watch an AWS account alongside the network. Two sources read it:
+DawnPatrol can watch an AWS account alongside the network. Three sources read it:
 
 - **`aws_cloudtrail`** reads the account's API activity from the S3 bucket a
   CloudTrail trail delivers to, including organization trails covering many
@@ -196,6 +199,11 @@ DawnPatrol can watch an AWS account alongside the network. Two sources read it:
   each run that the trail is still logging.
 - **`aws_guardduty`** collects GuardDuty findings updated during the run, per
   region. A listed region with no detector is reported as a blind spot.
+- **`aws_posture`** (optional) takes a daily snapshot of the account's security
+  settings and reports what changed. It covers IAM users, keys and MFA, the
+  password policy, bucket versioning and public access, trails, GuardDuty,
+  Route 53 and CloudFront. It also flags DNS names and CDN origins that point at
+  cloud resources which no longer exist (takeover risk).
 
 The `cloud_activity` analyzer then looks for:
 
@@ -210,7 +218,17 @@ The `cloud_activity` analyzer then looks for:
   deletion;
 - compute launches, DNS and CDN changes, and calls from other AWS accounts;
 - write activity outside your expected regions;
-- each GuardDuty finding type, at GuardDuty's severity.
+- a key checking its identity and then listing across services within minutes
+  (what's done first with a stolen key);
+- a long-term key calling from a new network: same /24 ignored, same /16 LOW,
+  further away MEDIUM;
+- use of services stolen keys are cashed in with: Bedrock (LLMjacking), SES,
+  SMS and quota increases;
+- with S3 data events on your backup buckets: mass deletion, objects
+  re-encrypted with an attacker's key (SSE-C ransomware), and versioning or
+  expiry changes on backup buckets;
+- each GuardDuty finding type, at GuardDuty's severity;
+- posture: critical states every day, new weaknesses once, and every change.
 
 A `cloud_accounts` entry in `profile.yml` describes the account for the model
 and adds rules that report at HIGH:
@@ -218,7 +236,9 @@ and adds rules that report at HIGH:
 - people who should never use long-term keys;
 - keys limited to certain services or buckets;
 - vendor accounts you've removed;
-- resource names worth watching, such as dangling DNS names or orphaned secrets.
+- resource names worth watching, such as dangling DNS names or orphaned secrets;
+- backup buckets, whose retention changes are HIGH;
+- abuse-prone services you really use, which are then left alone.
 
 AWS statistics appear as a Cloud block in the report. Setting the bucket or the
 GuardDuty regions switches each source on; credentials can be a dedicated
@@ -228,6 +248,37 @@ includes boto3; for a local install, `pip install "dawnpatrol[aws]"`.
 [`docs/aws-setup.md`](docs/aws-setup.md) builds the AWS side step by step with
 the AWS CLI: the log bucket, the trail, GuardDuty in each region, and the
 read-only IAM identity.
+
+### Remote servers over SSH (journal and nginx logs)
+
+The `ssh_host` source reads servers DawnPatrol can only reach by SSH: the
+systemd journal and nginx access logs. Configure one server or several, each
+with its own `DAWNPATROL_SOURCE_SSH_<NAME>_*` settings.
+
+- **Journal:** SSH logons go through the same parser as the router's, so the
+  SSH logon checks cover these servers too. `sudo` commands and service
+  errors are kept as well.
+- **nginx logs:** found under folders you choose, sub-folders included (rotated
+  and gzipped files too), and named by site from the folder layout. Only files
+  changed during the window are read.
+- **What's checked** (the `http_activity` analyzer):
+  - scanners;
+  - a sensitive file (`.env`, `.git`, backups) actually served;
+  - injection attempts that reached the application;
+  - web-shell-shaped scripts answering from upload folders;
+  - login brute force, server-error spikes and very large responses;
+  - WordPress password sprays across many addresses, and any successful login
+    from an address you haven't listed as yours (`DAWNPATROL_WEB_TRUSTED_CLIENTS`);
+  - fake Googlebots and Bingbots (checked against the ranges Google and Microsoft
+    publish) and clients rotating user agents;
+  - script files that run for the first time, the way a dropped web shell
+    shows up.
+
+Web statistics appear as a Web block in the report. IoC lists are also checked
+against user agents and URL markers. The connection uses OpenSSH with a
+pinned host key and a read-only account: no agent, nothing installed on the
+server, no sudo. [`docs/ssh-setup.md`](docs/ssh-setup.md) walks through the
+server-side setup.
 
 ### Model provider
 
@@ -655,7 +706,7 @@ python -m venv .venv && .venv/bin/pip install -e ".[dev,all]"
 .venv/bin/ruff check dawnpatrol tests
 ```
 
-603 tests, fully offline — no network, no API key, no spend — including an
+640 tests, fully offline — no network, no API key, no spend — including an
 end-to-end pipeline exercise against a stubbed provider. Tests cover the parsing
 traps that previously caused silent data loss, the false-positive guards
 (benign traffic that must *not* be reported), the renderer's format contract
@@ -677,6 +728,8 @@ and pull request, across Python 3.11-3.13.
   Start here if you want to extend DawnPatrol rather than just run it.
 - [`docs/aws-setup.md`](docs/aws-setup.md) — enabling CloudTrail, GuardDuty and a
   read-only IAM identity for DawnPatrol with the AWS CLI.
+- [`docs/ssh-setup.md`](docs/ssh-setup.md) — a read-only account, key and pinned
+  host key for reading a remote server's journal and nginx logs.
 
 ## License
 

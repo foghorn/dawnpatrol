@@ -33,7 +33,8 @@ _MAX_LISTED = 10
 
 class IocMatchAnalyzer(Analyzer):
     name = "ioc_match"
-    requires_kinds = frozenset({EventKind.FIREWALL, EventKind.FLOW, EventKind.DNS})
+    requires_kinds = frozenset({EventKind.FIREWALL, EventKind.FLOW, EventKind.DNS,
+                                EventKind.HTTP, EventKind.AUTH, EventKind.OTHER})
     order = 60
 
     def __init__(self, iocs: IocSet | None = None) -> None:
@@ -71,6 +72,28 @@ class IocMatchAnalyzer(Analyzer):
                 signal = self._domain_signal(ind, values, lookups)
             if signal is not None:
                 result.signals.append(signal)
+
+        # Text indicators: user agents (HTTP requests, cloud API calls) and
+        # markers inside requested URLs.
+        ua_hits = iocs.match_user_agents(q.all_user_agents())
+        by_ua: dict[Indicator, set[str]] = {}
+        for value, inds in ua_hits.items():
+            for ind in inds:
+                by_ua.setdefault(ind, set()).add(value)
+        for ind, values in sorted(by_ua.items(), key=lambda kv: -kv[0].severity):
+            rows = q.detail_rows(user_agent=sorted(values), limit=5000)
+            if rows:
+                result.signals.append(self._text_signal(
+                    ind, rows, "ioc.user_agent_match",
+                    f"IoC-listed user agent {ind.value!r} seen", sorted(values)))
+        for ind in iocs.url_markers():
+            rows = q.detail_rows(kind=EventKind.HTTP, raw_contains=ind.value, limit=5000)
+            rows = [r for r in rows if ind.value in (r["raw"].get("path") or "").lower()]
+            if rows:
+                result.signals.append(self._text_signal(
+                    ind, rows, "ioc.url_marker_match",
+                    f"IoC-listed marker {ind.value!r} in requested URLs",
+                    sorted({r["raw"].get("path", "")[:200] for r in rows})))
 
         result.metrics.append(Metric(
             key="ioc.indicators", value=len(iocs.indicators), section="general",
@@ -139,6 +162,37 @@ class IocMatchAnalyzer(Analyzer):
             entities=entities,
             evidence=evidence,
             narrative_hint=_hint(ind, outbound=bool(outbound), accepted=accepted_in > 0),
+        )
+
+    def _text_signal(self, ind: Indicator, rows: list[dict[str, Any]], taxonomy: str,
+                     title: str, matched: list[str]) -> Signal:
+        clients = sorted({r["src_ip"] for r in rows if r.get("src_ip")})
+        statuses = Counter(r["action"] for r in rows if r.get("action"))
+        evidence: dict[str, Any] = {
+            **ind.to_evidence(),
+            "matched": matched[:_MAX_LISTED],
+            "events": len(rows),
+            "clients": clients[:_MAX_LISTED],
+            "where": sorted({r["device"] for r in rows if r.get("device")})[:_MAX_LISTED],
+            "sites": sorted({r["domain"] for r in rows
+                             if r.get("domain") and r["kind"] == "http"})[:_MAX_LISTED],
+            "principals": sorted({r["user"] for r in rows if r.get("user")})[:_MAX_LISTED],
+            "responses": dict(statuses.most_common(_MAX_LISTED)),
+            "first_seen": _ts(rows[0]["ts"]),
+            "last_seen": _ts(rows[-1]["ts"]),
+        }
+        entities = [Entity(EntityType.IP, c, "client") for c in clients[:_MAX_LISTED]]
+        return Signal(
+            id=f"ioc.{ind.kind}.{ind.value}"[:255], analyzer=self.name, title=title[:200],
+            taxonomy=taxonomy, severity_hint=ind.severity,
+            confidence=_TIER_CONFIDENCE.get(ind.tier, 0.5), entities=entities,
+            evidence=evidence,
+            narrative_hint=(
+                "Matched a published indicator list's tool fingerprint; its warning is in "
+                "evidence.warning. A user agent or URL marker is set by the client, so it "
+                "is easy to fake or rename - weigh it with what the same clients did: "
+                "check responses (2xx means the server answered), and what else those "
+                "addresses requested or called."),
         )
 
     def _domain_signal(self, ind: Indicator, values: set[str],

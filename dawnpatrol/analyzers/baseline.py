@@ -53,6 +53,15 @@ class Baseline:
             if self._first_seen_cache.get((str(etype), v)) is not None
         }
 
+    def has_history(self, etype: EntityType) -> bool:
+        """Whether this entity type was being recorded before this run.
+
+        Novelty means nothing on the first run that records a type - every value
+        is new - so checks built on ``novel()`` should only report once this is
+        true, and otherwise just let the run seed the history.
+        """
+        return self._store.entity_count_before(etype, self._now - self._grace) > 0
+
     def novel(self, etype: EntityType, values: list[str]) -> list[str]:
         """Values with no record before this run.
 
@@ -65,6 +74,10 @@ class Baseline:
         seen = self.first_seen_map(etype, values)
         cutoff = self._now - self._grace
         return [v for v in values if v not in seen or seen[v] >= cutoff]
+
+    def known_with_prefix(self, etype: EntityType, prefix: str) -> list[str]:
+        """Values starting with ``prefix`` already recorded before this run."""
+        return self._store.entity_values_with_prefix(etype, prefix, self._now - self._grace)
 
     # ----- findings and watchlist --------------------------------------------- #
 

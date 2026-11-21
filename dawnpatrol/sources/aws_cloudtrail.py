@@ -32,7 +32,9 @@ Mapping to the common Event model (``analyzers/cloud_activity.py`` reads it):
   names like ``s3.amazonaws.com``, kept in ``raw.source``)
 * ``severity`` ``read`` or ``write``; ``block_reason`` the error code
 * ``raw``      region, user agent, MFA, error message, and the resources the
-  call named (``targets``: secret IDs, bucket names, users, roles...)
+  call named (``targets``: secret IDs, bucket names, users, roles...); for
+  S3 data events also ``object_key`` and ``sse`` (``SSE_C`` when the caller
+  supplied its own encryption key)
 
 Calls AWS services make on their own behalf (userIdentity type
 ``AWSService``) are dropped and counted: they are the bulk of a quiet
@@ -209,6 +211,7 @@ class AwsCloudTrailSource(Source):
             dedup_key=Event.make_dedup_key(self.name, rec.get("eventID") or
                                            f"{ts.isoformat()}|{program}|{principal}"),
             action=action, program=program, user=principal[:255],
+            user_agent=user_agent[:255] or None,
             device=f"{account}/{region}"[:255],
             severity=None if read_only is None else ("read" if read_only else "write"),
             block_reason=error[:64] or None,
@@ -224,6 +227,11 @@ class AwsCloudTrailSource(Source):
                 "read_only": read_only, "mfa": mfa, "targets": targets,
                 "from_console": bool(rec.get("sessionCredentialFromConsole")),
                 "event_type": rec.get("eventType"),
+                "event_category": rec.get("eventCategory"),
+                # S3 data events: the object, and how it was encrypted
+                # (SSE_C = a key the caller supplied: the ransomware technique).
+                "object_key": _object_key(rec.get("requestParameters")),
+                "sse": extra.get("SSEApplied") or _sse_c(rec.get("requestParameters")),
                 # Capped copy of the request, so a watched name is found wherever
                 # in the call it appears (a DNS change batch, a role path...).
                 "request": _request_text(rec.get("requestParameters")),
@@ -352,6 +360,21 @@ def _request_text(params: Any) -> str | None:
         return None
     text = json.dumps(params, separators=(",", ":"), default=str)
     return text if len(text) <= 2000 else text[:1997] + "..."
+
+
+def _object_key(params: Any) -> str | None:
+    if isinstance(params, dict) and isinstance(params.get("key"), str):
+        return params["key"][:300]
+    return None
+
+
+def _sse_c(params: Any) -> str | None:
+    """SSE_C when the request carried a customer-supplied encryption key."""
+    if isinstance(params, dict) and any(
+            "customer-algorithm" in str(k).lower() or k == "SSECustomerAlgorithm"
+            for k in params):
+        return "SSE_C"
+    return None
 
 
 def _targets(params: Any) -> list[str]:

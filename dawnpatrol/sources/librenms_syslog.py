@@ -754,42 +754,7 @@ class LibreNMSSyslogSource(Source):
         return Event(**kwargs)
 
     def _parse_sshd_session(self, message: str, common: dict[str, Any]) -> Event | None:
-        """session_open/close are parsed for structure but excluded from the
-        auth-outcome metric in auth_activity.py - every accepted login also
-        produces a session_open line, and counting both would double the
-        headline number for the same event."""
-        if m := _SSH_ACCEPTED_RE.match(message):
-            action = "ssh_accepted"
-        elif m := _SSH_FAILED_RE.match(message):
-            action = "ssh_failed"
-        else:
-            m = None
-
-        if m:
-            kwargs: dict[str, Any] = {
-                **common, "kind": EventKind.AUTH, "action": action,
-                "user": m.group("user"),
-                "src_port": _as_int(m.group("port")),
-                "proto": _SSH_METHODS.get(m.group("method"), m.group("method")[:16]),
-            }
-            kwargs.update(self.assign_zones(src_ip=m.group("ip")))
-            return Event(**kwargs)
-
-        if m := _SSH_INVALID_USER_RE.match(message):
-            kwargs = {**common, "kind": EventKind.AUTH, "action": "ssh_invalid",
-                     "user": m.group("user")}
-            kwargs.update(self.assign_zones(src_ip=m.group("ip")))
-            return Event(**kwargs)
-
-        if m := _SSH_SESSION_OPEN_RE.search(message):
-            return Event(kind=EventKind.AUTH, action="session_open",
-                        user=m.group("user"), **common)
-
-        if m := _SSH_SESSION_CLOSE_RE.search(message):
-            return Event(kind=EventKind.AUTH, action="session_close",
-                        user=m.group("user"), **common)
-
-        return None
+        return parse_openssh(message, common, self.assign_zones)
 
     def _parse_dropbear_session(self, message: str, common: dict[str, Any]) -> Event | None:
         """Dropbear's log vocabulary has no overlap with OpenSSH's, so this is
@@ -941,3 +906,47 @@ def _severity_name(level: Any) -> str | None:
     if isinstance(level, int) or (isinstance(level, str) and level.isdigit()):
         return _SEVERITY_NAMES.get(int(level), str(level))
     return str(level).lower()
+
+
+def parse_openssh(message: str, common: dict[str, Any],
+                  assign_zones: Any) -> Event | None:
+    """An OpenSSH sshd message as an AUTH event, or None if it isn't one.
+
+    Shared with any source that carries sshd lines (``ssh_host`` reads them
+    from a remote journal). session_open/close are parsed for structure but
+    excluded from the auth-outcome metric in auth_activity.py - every accepted
+    login also produces a session_open line, and counting both would double
+    the headline number for the same event.
+    """
+    if m := _SSH_ACCEPTED_RE.match(message):
+        action = "ssh_accepted"
+    elif m := _SSH_FAILED_RE.match(message):
+        action = "ssh_failed"
+    else:
+        m = None
+
+    if m:
+        kwargs: dict[str, Any] = {
+            **common, "kind": EventKind.AUTH, "action": action,
+            "user": m.group("user"),
+            "src_port": _as_int(m.group("port")),
+            "proto": _SSH_METHODS.get(m.group("method"), m.group("method")[:16]),
+        }
+        kwargs.update(assign_zones(src_ip=m.group("ip")))
+        return Event(**kwargs)
+
+    if m := _SSH_INVALID_USER_RE.match(message):
+        kwargs = {**common, "kind": EventKind.AUTH, "action": "ssh_invalid",
+                  "user": m.group("user")}
+        kwargs.update(assign_zones(src_ip=m.group("ip")))
+        return Event(**kwargs)
+
+    if m := _SSH_SESSION_OPEN_RE.search(message):
+        return Event(kind=EventKind.AUTH, action="session_open",
+                     user=m.group("user"), **common)
+
+    if m := _SSH_SESSION_CLOSE_RE.search(message):
+        return Event(kind=EventKind.AUTH, action="session_close",
+                     user=m.group("user"), **common)
+
+    return None

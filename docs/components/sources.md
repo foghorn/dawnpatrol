@@ -211,9 +211,9 @@ more.
   more nonexistent domains than its peers - a DGA-shaped pattern the block rate alone
   cannot see, since a nonexistent domain is never something Pi-hole blocks.
 
-## Walkthrough: `aws_cloudtrail.py` and `aws_guardduty.py`
+## Walkthrough: `aws_cloudtrail.py`, `aws_guardduty.py` and `aws_posture.py`
 
-Two sources for an AWS account, sharing `_aws.py` (a leading underscore keeps the
+Three sources for an AWS account, sharing `_aws.py` (a leading underscore keeps the
 registry from loading it as a plugin). Setting up the AWS side is in
 [`docs/aws-setup.md`](../aws-setup.md).
 
@@ -243,6 +243,51 @@ registry from loading it as a plugin). Setting up the AWS side is in
   updated rather than re-created. Archived findings are excluded, sample findings are
   kept and marked, and a configured region with no detector is an error: GuardDuty is
   regional, so that region is a blind spot.
+- **S3 data events keep the object and its encryption.** For `PutObject`-style calls
+  `raw` also has `object_key` and `sse` (`SSE_C` from `additionalEventData.SSEApplied`
+  or the request's customer-key headers), which the ransomware check reads.
+- **`aws_posture` reports differences, not states.** Once a day (it skips runs inside
+  `DAWNPATROL_SOURCE_AWS_POSTURE_INTERVAL_HOURS`, default 20) it reads the credential
+  report, password policy, Block Public Access, buckets, trails, detectors, Route 53,
+  CloudFront and Beanstalk. It compares them with the previous snapshot in
+  `<data_dir>/aws-posture.json` and emits one event per item. Critical states repeat
+  every snapshot; weaknesses appear once when new (all of them at LOW on the first
+  snapshot); changes and resolved issues appear once. A section that fails to read is
+  an error, and is neither diffed nor allowed to make tomorrow's items look new. A dry
+  run doesn't save the snapshot.
+
+## Walkthrough: `ssh_host.py`
+
+Remote servers read over SSH; the server-side setup is in
+[`docs/ssh-setup.md`](../ssh-setup.md).
+
+- **The system `ssh` client, not a Python SSH library.** OpenSSH already does host-key
+  pinning, modern key types and `~/.ssh/config` jump hosts. `BatchMode=yes` and
+  `StrictHostKeyChecking=yes` mean an unknown or changed host key fails that server's
+  collection instead of prompting or trusting it.
+- **Three sessions per server per run**, all read-only: the journal for the window, a
+  `find -newermt` listing of access logs changed in the window, and one session that
+  streams every listed file, split by a random per-run marker line. Remote file names
+  are shell-quoted, since they come from the server.
+- **Server-side narrowing, client-side precision.** `find` keeps old archives off the
+  wire; each line is still kept only if its own timestamp falls inside the window,
+  because a rotated file spans its rotation boundary.
+- **Caps, not truncation.** The journal and each file are capped at `MAX_LINES`
+  (newest lines kept for files); hitting a cap marks the collection incomplete.
+- **Sites from the folder layout** (`site_for`): the first folder under the matched
+  root, or the file's own name minus its access/log suffixes, or `default`.
+- **Several servers, one source.** `DAWNPATROL_SOURCE_SSH_HOSTS` lists names; each
+  name has its own settings block, and `device` on every event is the server name.
+- **Hosting layouts.** `HTTP_FOLLOW_SYMLINKS` adds `find -L` for hosts that link live
+  logs in from elsewhere; a rotated log kept under two names in one folder is read
+  once; unreadable folders come back from `find` as `!`-prefixed lines and are named in
+  the notes and probe.
+- **The runner is injectable** (`SshHostSource(runner=...)`), which is how the tests
+  run without a server.
+- **`contrib/dawnpatrol-ssh-guard.sh`** is the server-side forced command that only
+  allows these exact command shapes under the configured folders. A test runs it
+  against every command the source generates, so changing a command here without
+  updating the guard fails the suite.
 
 ## Build your own
 

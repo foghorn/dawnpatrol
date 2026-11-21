@@ -9,6 +9,8 @@ config/profile.*.yml
 config/local/
 # Operator IoC lists: third-party feeds under their own licenses.
 config/iocs/
+# SSH keys and pinned host keys for the ssh_host source.
+config/ssh/
 site/
 
 # Secrets and environment

@@ -19,7 +19,7 @@ from ..devices import DeviceDirectory
 from ..models import Metric, Severity, Signal, SourceHealth, Window
 from ..profile import Profile
 
-MAX_SIGNALS = 60
+MAX_SIGNALS = 80
 MAX_METRICS_PER_SECTION = 25
 MAX_DEVICES_SHOWN = 200
 # A taxonomy with at least this many LOW/INFO signals is rendered as a table.
@@ -57,11 +57,13 @@ def build_bundle(
         sections.append(_device_directory_block(devices))
 
     ranked = _rank_signals(signals)
+    real = [s for s in signals if not s.is_canary]
     sections.append(
-        f"ANALYZER SIGNALS ({len(ranked)} shown of {len(signals)})\n"
+        f"ANALYZER SIGNALS ({len(ranked)} shown of {len(real)})\n"
         "Each signal was computed deterministically from the event store. Every\n"
         "finding you report must cite at least one signal id, or event ids when no\n"
         "signal covers the activity (such findings are recorded as SUSPECTED).\n"
+        + _omitted_line(real, ranked)
         + _signals_block(ranked)
     )
 
@@ -183,6 +185,19 @@ def _signal_table(taxonomy: str, rows: list[dict[str, Any]]) -> str:
         f"Example title: {rows[0]['title']}\n"
         + _fence("\n".join(lines))
     )
+
+
+def _omitted_line(real: list[Signal], shown: list[Signal]) -> str:
+    """What the signal cap left out, so the model knows to look rather than
+    assuming nothing else fired."""
+    shown_ids = {s.id for s in shown}
+    left = [s for s in real if s.id not in shown_ids]
+    if not left:
+        return ""
+    counts = Counter((s.taxonomy, s.severity_hint.label()) for s in left)
+    parts = ", ".join(f"{n} {tax} ({sev})" for (tax, sev), n in counts.most_common())
+    return (f"Not shown, all lower-ranked than those below: {parts}. They are in the "
+            f"signals table for this run (query by taxonomy) if one becomes relevant.\n")
 
 
 def _rank_signals(signals: list[Signal]) -> list[Signal]:

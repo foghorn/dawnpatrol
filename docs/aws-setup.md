@@ -1,4 +1,4 @@
-# Setting up AWS for DawnPatrol (CloudTrail and GuardDuty)
+# Setting up AWS for DawnPatrol (CloudTrail, GuardDuty and posture)
 
 DawnPatrol reads two things from an AWS account:
 
@@ -10,6 +10,9 @@ DawnPatrol reads two things from an AWS account:
   don't use.
 - **GuardDuty**: AWS's own threat detection. DawnPatrol collects its findings
   through the API and reports each finding type at GuardDuty's severity.
+- **Posture** (optional): once a day, DawnPatrol reads the account's security
+  settings and reports what changed. That covers IAM users, keys and MFA, the
+  password policy, buckets, trails, detectors, DNS and CloudFront.
 
 This guide builds everything with the AWS CLI:
 
@@ -40,8 +43,10 @@ export REGIONS="us-east-1 us-west-2"           # every region you run anything i
 **Costs to expect.** These are the drivers; check current figures on the AWS
 pricing pages for CloudTrail, GuardDuty and S3.
 
-- One trail's copy of *management* events is free. Data events (every S3
-  object read, every Lambda invoke) are charged per event and are left off here.
+- One trail's copy of *management* events is free. Data events (S3 object
+  calls, Lambda invokes) are charged per event; step 2a logs only writes and
+  deletes on the backup buckets, so the cost follows how much your backups
+  upload.
 - S3 storage for a small account's trail is cents per month. The lifecycle rule
   in step 1 caps how long logs are kept.
 - GuardDuty is charged by the volume of logs it analyzes, after a 30-day free
@@ -141,21 +146,64 @@ The first log files land in the bucket within about 15 minutes:
 aws s3 ls "s3://${BUCKET}/AWSLogs/${ACCOUNT_ID}/CloudTrail/" --recursive | head
 ```
 
-*Optional:* the bucket-sweep check sees bucket-level calls (`GetBucketPolicy`,
-`GetBucketAcl`) from management events alone. To also see every object read,
-add S3 data events. They are charged per event, so scope them to the buckets
-that matter:
+### 2a. S3 data events on backup buckets (recommended)
+
+Management events don't include object reads, writes or deletes, so a backup
+bucket can be emptied or re-encrypted without a trace. Data events fix that.
+They're charged per event, so log only writes and deletes, and only on the
+buckets that matter:
 
 ```bash
 aws cloudtrail put-event-selectors --trail-name "$TRAIL" --region "$AWS_REGION" \
   --advanced-event-selectors '[
-    {"Name": "Management events", "FieldSelectors": [
-      {"Field": "eventCategory", "Equals": ["Management"]}]},
-    {"Name": "S3 object reads on sensitive buckets", "FieldSelectors": [
-      {"Field": "eventCategory", "Equals": ["Data"]},
-      {"Field": "resources.type", "Equals": ["AWS::S3::Object"]},
-      {"Field": "resources.ARN", "StartsWith": ["arn:aws:s3:::my-sensitive-bucket/"]}]}
-  ]'
+ {"Name":"Management events",
+  "FieldSelectors":[{"Field":"eventCategory","Equals":["Management"]}]},
+ {"Name":"Backup bucket writes and deletes",
+  "FieldSelectors":[
+   {"Field":"eventCategory","Equals":["Data"]},
+   {"Field":"resources.type","Equals":["AWS::S3::Object"]},
+   {"Field":"eventName","Equals":[
+     "PutObject","CopyObject","CreateMultipartUpload",
+     "DeleteObject","DeleteObjects","PutObjectAcl",
+     "PutObjectRetention","PutObjectLegalHold"]},
+   {"Field":"resources.ARN","StartsWith":[
+     "arn:aws:s3:::example-backups/"]}]}
+]'
+```
+
+List each bucket as `arn:aws:s3:::<bucket>/`; the trailing slash keeps
+`backups/` from also matching `backups-old/`. `UploadPart` is left out
+because a large upload makes thousands of them; `CreateMultipartUpload`
+carries the same encryption headers. Name the same buckets in the profile's
+`backup_buckets`. With this on, DawnPatrol reports:
+
+- mass deletion by one identity, at 100 or more objects
+  (`DAWNPATROL_SOURCE_AWS_MASS_DELETE_MIN`);
+- objects written with a customer-supplied key (SSE-C), the ransomware
+  technique of re-encrypting your files with the attacker's key;
+- versioning suspended, expiry rules added, or Object Lock, replication or the
+  bucket itself removed on a backup bucket.
+
+Running `put-event-selectors` is itself reported, as a logging change. Record it
+in the profile's notes as yours.
+
+The real protection is versioning, so a deleted or overwritten object can be
+recovered. DawnPatrol then reports anyone turning it off:
+
+```bash
+aws s3api put-bucket-versioning --bucket example-backups \
+  --versioning-configuration Status=Enabled
+```
+
+Expire old versions so they don't pile up. First check that the bucket has no
+lifecycle rules (`aws s3api get-bucket-lifecycle-configuration --bucket
+example-backups`), because the command below replaces them:
+
+```bash
+aws s3api put-bucket-lifecycle-configuration --bucket example-backups \
+  --lifecycle-configuration '{"Rules":[{"ID":"expire-old-versions",
+ "Status":"Enabled","Filter":{},
+ "NoncurrentVersionExpiration":{"NoncurrentDays":30}}]}'
 ```
 
 ## 3. GuardDuty in each region
@@ -208,6 +256,15 @@ cat > dawnpatrol-policy.json <<EOF
     {"Sid": "GuardDutyRead", "Effect": "Allow",
      "Action": ["guardduty:ListDetectors", "guardduty:GetDetector",
                 "guardduty:ListFindings", "guardduty:GetFindings"],
+     "Resource": "*"},
+    {"Sid": "PostureRead", "Effect": "Allow",
+     "Action": ["iam:GenerateCredentialReport", "iam:GetCredentialReport",
+                "iam:GetAccountPasswordPolicy", "s3:ListAllMyBuckets",
+                "s3:GetBucketVersioning", "s3:GetBucketPublicAccessBlock",
+                "s3:GetBucketPolicyStatus", "s3:GetBucketObjectLockConfiguration",
+                "s3:GetAccountPublicAccessBlock", "route53:ListHostedZones",
+                "route53:ListResourceRecordSets", "cloudfront:ListDistributions",
+                "elasticbeanstalk:DescribeEnvironments"],
      "Resource": "*"}
   ]
 }
@@ -215,6 +272,25 @@ EOF
 aws iam create-policy --policy-name DawnPatrolReadOnly \
   --policy-document file://dawnpatrol-policy.json
 ```
+
+`PostureRead` is only needed for the posture snapshot (step 5); leave it out
+if you don't turn that on. All of it is read-only: the credential report lists
+users and when their passwords and keys were last used, never the secrets
+themselves.
+
+**Adding posture to an existing policy.** A managed policy can't be edited in
+place. Save the full document above (with `PostureRead`) as a new default
+version. AWS keeps up to five versions; delete an old one with
+`aws iam delete-policy-version` if it complains:
+
+```bash
+aws iam create-policy-version --set-as-default \
+  --policy-arn "arn:aws:iam::${ACCOUNT_ID}:policy/DawnPatrolReadOnly" \
+  --policy-document file://dawnpatrol-policy.json
+```
+
+That change is itself reported as an IAM change; record it in the profile's
+notes as yours.
 
 If the trail writes under a key prefix, change the `ReadTrailLogs` resource to
 `arn:aws:s3:::${BUCKET}/<prefix>/AWSLogs/*`. If the bucket uses SSE-KMS rather
@@ -286,7 +362,23 @@ DAWNPATROL_SOURCE_AWS_GUARDDUTY_REGIONS=us-east-1,us-west-2
 
 # Write activity anywhere else is reported (global services excepted).
 DAWNPATROL_SOURCE_AWS_EXPECTED_REGIONS=us-east-1,us-west-2
+
+# Daily posture snapshot (needs PostureRead from step 4).
+DAWNPATROL_SOURCE_AWS_POSTURE=true
+#DAWNPATROL_SOURCE_AWS_POSTURE_INTERVAL_HOURS=20
 ```
+
+The posture snapshot is kept in the data folder (`aws-posture.json`). The first
+one lists every weakness it finds once, at LOW, as a starting inventory. From
+then on you see:
+- critical states every day until they're fixed: root access keys, root
+  without MFA, a trail not logging, a detector missing;
+- new weaknesses once, at their own level;
+- every change since the previous day.
+
+DNS names and CloudFront origins that point at an S3 bucket or Elastic
+Beanstalk name that doesn't exist in the account are reported as dangling, at
+HIGH, because whoever creates that name serves content under your domain.
 
 Then describe the account in `profile.yml` with a `cloud_accounts` entry (a
 commented example is in `config/profile.example.yml`; the fields are in
@@ -300,7 +392,15 @@ happen into HIGH signals:
 - `allowed_services` / `allowed_buckets` for single-purpose keys;
 - `blocked_accounts` for vendors you've removed;
 - `watched_resources` for names an attacker would target, such as dangling DNS
-  names and orphaned secrets.
+  names and orphaned secrets;
+- `backup_buckets` for buckets holding backups (retention changes are HIGH);
+- `services_in_use` for any of `bedrock`, `ses`, `sns`, `sms-voice` or
+  `servicequotas` you really use. Calls to the others are reported, because
+  they're how stolen keys are cashed in.
+
+Long-term access keys need no setting. Each one's source addresses are recorded,
+and a call from a new network is reported: the same /24 as before is ignored,
+the same /16 is LOW, and anything further away is MEDIUM.
 
 Set `expected_regions` there too.
 
@@ -309,8 +409,8 @@ Set `expected_regions` there too.
 Restart the container so it picks up the settings, then:
 
 ```bash
-docker exec dawnpatrol dawnpatrol list-plugins   # aws_cloudtrail, aws_guardduty, cloud_activity: ENABLED
-docker exec dawnpatrol dawnpatrol probe          # credentials, bucket, trail-logging, detector-<region>
+docker exec dawnpatrol dawnpatrol list-plugins   # aws_cloudtrail, aws_guardduty, aws_posture, cloud_activity: ENABLED
+docker exec dawnpatrol dawnpatrol probe          # credentials, bucket, trail-logging, detector-<region>, posture-*
 ```
 
 To see a GuardDuty finding travel the whole pipeline, create a sample one.

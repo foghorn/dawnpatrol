@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from . import analyzers as analyzers_pkg
+from . import crawlers
 from . import enrichment as enrichment_pkg
 from . import outputs as outputs_pkg
 from . import sources as sources_pkg
@@ -40,6 +41,7 @@ from .models import (
     UTC,
     CollectionResult,
     DeliveryResult,
+    EventKind,
     Metric,
     Report,
     Signal,
@@ -221,6 +223,9 @@ class Runner:
             # Real analysis excludes canary events entirely, so synthetic
             # activity can never inflate a reported statistic.
             with _timed(timings, "analyze"):
+                if any(e.kind == EventKind.HTTP for e in events):
+                    state = crawlers.refresh(self.settings.data_dir)
+                    log.info("crawler address lists: %s", state)
                 query = EventQuery(self.store, run_id,
                                    exclude_sources={CANARY_SOURCE})
                 baseline = Baseline(self.store, run_id)

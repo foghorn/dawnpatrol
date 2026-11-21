@@ -333,6 +333,14 @@ class EventQuery:
                 ) if r[0])
         return out
 
+    def all_user_agents(self) -> set[str]:
+        """Every distinct user agent this run (HTTP requests, cloud API calls)."""
+        with self._engine.connect() as conn:
+            return {r[0] for r in conn.execute(
+                select(S.events.c.user_agent)
+                .where(self._base(), S.events.c.user_agent.is_not(None)).distinct()
+            ) if r[0]}
+
     def all_dns_domains(self) -> set[str]:
         """Every distinct domain looked up this run, uncapped."""
         with self._engine.connect() as conn:
@@ -407,7 +415,8 @@ class EventQuery:
         with self._engine.connect() as conn:
             rows = conn.execute(
                 select(e.ts, e.kind, e.user, e.program, e.action, e.src_ip, e.dst_ip,
-                       e.dst_port, e.device, e.severity, e.domain, e.message, e.raw_json)
+                       e.dst_port, e.device, e.severity, e.domain, e.message, e.pkt_len,
+                       e.user_agent, e.raw_json)
                 .where(and_(*clauses)).order_by(e.ts).limit(limit)
             ).mappings().all()
         out = []
@@ -428,7 +437,8 @@ class EventQuery:
             rows = conn.execute(
                 select(S.events.c.src_ip, S.events.c.dst_ip, S.events.c.dst_port,
                        S.events.c.proto, func.count().label("n"))
-                .where(self._base(kind=[str(EventKind.FLOW), str(EventKind.FIREWALL)]),
+                .where(self._base(kind=[str(EventKind.FLOW), str(EventKind.FIREWALL),
+                                        str(EventKind.HTTP)]),
                        S.events.c.dst_ip.is_not(None))
                 .group_by(S.events.c.src_ip, S.events.c.dst_ip,
                           S.events.c.dst_port, S.events.c.proto)

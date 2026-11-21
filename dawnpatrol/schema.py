@@ -105,6 +105,7 @@ events = Table(
     Column("severity", String(16)),
     Column("message", Text),
     Column("user", String(_NAME)),
+    Column("user_agent", String(_NAME)),
     Column("src_zone", String(_SHORT)),
     Column("dst_zone", String(_SHORT)),
     Column("raw_json", Text),

@@ -148,9 +148,35 @@ run's watchlist into something that can actually re-fire.
 | `corr.watchlist.<type>.<value>` | `watchlist.hit` | MEDIUM | 0.7 | An entity (`ip`, `domain`, or `host`) the model carried forward on a prior run's watchlist (`watchlist_updates`) shows activity again this run. `host` matches the same way `ip` does — by address — plus `Event.device`, in case some future source populates that with a real hostname | `entity`, `entity_type`, `events_this_period`, `watch_reason`, `watch_expires` |
 | `corr.internal_scan.<ip>` | `lateral.internal_scan` | HIGH | 0.65 | An internal host probes ≥20 distinct destination ports with ≥50 total hits — the shape of lateral-movement enumeration, only visible when internal traffic actually traverses a logging device | `src`, `hits`, `distinct_destination_ports`, `duration_hours` |
 
+## `http_activity` (order 50)
+
+Web access logs from `ssh_host`. Background noise (scanners, refused injection,
+admin pages served) is one summary signal each, however many clients are involved, so a
+heavily scanned host can't crowd the rest of the network out of the model's evidence;
+per-client signals are kept for what reached the application. Evidence on every signal: `requests`, `clients`,
+`sites`, `servers`, `responses`, `methods`, `sample_paths`, `user_agents`, `first_seen`,
+`last_seen`.
+
+| Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Extra evidence |
+|---|---|---|---|---|---|
+| `web.exposed_sensitive_path.<client>` | `web.sensitive_exposure` | HIGH | 0.75 | A scanner-favourite path (`.env`, `.git/`, config/backup files, admin tools, `server-status`, actuator...) answered 2xx | |
+| `web.scanners` | `web.scanner` | LOW | 0.6 | One summary for every client probing ≥3 distinct sensitive paths or drawing ≥30 404s (page count alone never counts, so crawlers don't; the server's own requests to itself are skipped) | `scanning_clients`, `top_scanners` (top 10 by sensitive probes, then 404s: requests, sites), `most_probed_paths` |
+| `web.injection_attempt.<client>` | `web.injection_attempt` | MEDIUM | 0.6 | Traversal, SQL, template/JNDI, script or shell syntax in requested URLs, and at least one got 2xx/5xx | `reached_application` |
+| `web.injection_refused` | `web.injection_attempt` | LOW | 0.6 | One summary for clients whose injection attempts were all refused (4xx) | `clients_refused` |
+| `web.webshell_shape.<site+path>` | `web.webshell` | HIGH | 0.7 | A script (`.php`, `.jsp`, `.aspx`, `.cgi`...) inside an uploads/files/static folder answered 2xx, or took a POST | |
+| `web.login_bruteforce.<client>` | `web.login_bruteforce` | MEDIUM | 0.6 | ≥20 POSTs to login paths from one client | |
+| `web.login_spray.<site>` | `web.login_spray` | LOW | 0.65 | ≥30 WordPress login attempts (`POST /wp-login.php` and `xmlrpc.php`) on one site from ≥10 clients - the distributed attack a per-client count can't see | `login_posts`, `xmlrpc_posts`, `clients`, `busiest_clients` |
+| `web.login_success.<site>.<client>` | `web.login_success` | HIGH if the client failed ≥3 times first or the site was being sprayed, else MEDIUM | 0.7 | `POST /wp-login.php` answered 302 (WordPress's response to a correct password) from a client outside `DAWNPATROL_WEB_TRUSTED_CLIENTS` | `failed_attempts_before`, `site_sprayed`, `admin_pages_after` |
+| `web.fake_crawler` | `web.fake_crawler` | LOW | 0.8 | One summary: Googlebot/Bingbot user agents from addresses outside the ranges Google and Microsoft publish (`crawlers.py`, cached weekly); skipped with a note when the lists are unavailable | `by_client` (claims, requests, sensitive probes, sites) |
+| `web.ua_rotation` | `web.ua_rotation` | LOW | 0.6 | One summary: clients presenting ≥10 different user agents in the window | `by_client` (user agents, requests, 404s) |
+| `web.new_script.<site>` | `web.new_script` | HIGH if a new script accepted a POST, else MEDIUM | 0.65 | Script paths (`.php`, `.jsp`, `.aspx`, `.cgi`...) that ran - answered 2xx or accepted a POST - with no earlier record in the long-term baseline (entity type `url`). Silent on the first run that records web history | `new_scripts` (path, requests, methods, clients), `took_posts` |
+| `web.server_errors.<site>` | `web.server_errors` | LOW | 0.5 | ≥20 server errors and ≥5% of a site's requests | `site_requests` |
+| `web.large_transfer.<client>` | `web.large_transfer` | LOW | 0.5 | A single response ≥200 MB, or ≥1 GB of successful responses to one client | `bytes_sent`, `largest_paths` |
+| `web.admin_access` | `web.admin_access` | LOW | 0.5 | One summary: admin pages (`/wp-admin/`, `/admin/`, `/phpmyadmin`, `/manager/html`...) answered 2xx, static assets (CSS/JS/images/fonts) excluded | `by_client` (top 10: requests, paths, user agent) |
+
 ## `cloud_activity` (order 65)
 
-AWS account activity from `aws_cloudtrail` and `aws_guardduty`. Runs only when one of
+AWS account activity from `aws_cloudtrail`, `aws_guardduty` and `aws_posture`. Runs only when one of
 them is configured. Evidence on every signal: `events`, `apis`, `principals`,
 `source_ips`, `accounts_regions`, `user_agents`, `error_codes`, `first_seen`, `last_seen`.
 
@@ -176,6 +202,16 @@ them is configured. Evidence on every signal: `events`, `apis`, `principals`,
 | `aws.buckets_sweep.<principal>` | `cloud.bucket_sweep` | MEDIUM, LOW if all from the console | 0.6 | ≥15 distinct S3 buckets touched | `distinct`, `all_from_console` |
 | `aws.unexpected_region.<region>` | `cloud.unexpected_region` | MEDIUM | 0.65 | Write calls in a region outside the expected regions (the profile's `cloud_accounts[].expected_regions` plus `DAWNPATROL_SOURCE_AWS_EXPECTED_REGIONS`; only when either is set; global services ignored) | `region`, `expected_regions` |
 | `aws.guardduty.<finding-type>` | `cloud.guardduty_finding` | GuardDuty's (score 1–3.9 LOW, 4–6.9 MEDIUM, 7–8.9 HIGH, 9+ CRITICAL); INFO for sample findings | 0.85, sample 0.3 | GuardDuty findings of this type updated during the run | `finding_type`, `max_score`, `description`, `resources`, `sample` |
+| `aws.key_recon.<access-key>` | `cloud.key_reconnaissance` | MEDIUM; HIGH for a principal the profile limits to `allowed_services`; LOW if all from the console | 0.7 | One key calls `sts:GetCallerIdentity`, then ≥5 read (or denied) APIs across ≥2 services within 15 minutes. DawnPatrol's own calls are excluded | `access_key`, `services`, `read_apis`, `denied_calls`, `long_term_key` |
+| `aws.key_new_network.<access-key>` | `cloud.key_new_network` | Same /24 as a known address: none; same /16: LOW; further: MEDIUM (IPv6 /48, /32). A key with no history: LOW | 0.65 | A long-term key (`AKIA...`) calls from a public address it hasn't used before. Silent until key-network history exists | `access_key`, `new_networks` (address, nearest known, shared bits), `known_addresses` |
+| `aws.abuse_service.<service>.<principal>` | `cloud.abuse_service` | HIGH if a call succeeded outside the console, else MEDIUM | 0.75 | Bedrock, SES, SMS (`sns:Publish` to a phone number, SMS settings), or `RequestServiceQuotaIncrease`, unless the service is in `services_in_use` | `service`, `succeeded`, `checked_logging` (Bedrock invocation-logging lookup) |
+| `aws.mass_delete.<bucket>.<principal>` | `cloud.mass_delete` | MEDIUM at ≥100 deletes (`DAWNPATROL_SOURCE_AWS_MASS_DELETE_MIN`), HIGH at 10× | 0.7 | Many successful `DeleteObject(s)` data events by one principal on one bucket | `bucket`, `deleted`, `sample_keys` |
+| `aws.sse_c_writes.<principal>` | `cloud.ransomware_encryption` | HIGH | 0.85 | Objects written with a customer-supplied key (SSE-C) | `buckets`, `sample_keys` |
+| `aws.backup_retention.<principal>` | `cloud.backup_retention_change` | HIGH | 0.8 | Versioning suspended, lifecycle or replication changed, Object Lock changed, or bucket deleted on a profile `backup_buckets` bucket | `buckets`, `requests` |
+| `aws.posture.critical.<area>.<subject>` | `cloud.posture_critical` | HIGH | 0.8 | Root access keys, root without MFA, a trail not logging, a GuardDuty detector missing or disabled. Repeated every snapshot | `items` |
+| `aws.posture.issue.<area>` | `cloud.posture_issue` | The item's level (LOW on the first snapshot) | 0.6 | A new weakness: password without MFA, old or idle keys, no password policy, S3 Block Public Access off, public bucket, unversioned or missing backup bucket, dangling DNS or CloudFront origin (HIGH) | `items` |
+| `aws.posture.change.<area>` | `cloud.posture_change` | The highest item level | 0.8 | Settings differ from the previous snapshot: users, keys, MFA, passwords, password policy, Block Public Access, buckets, trails, detectors, DNS records (MX/NS/TXT/apex MEDIUM), CloudFront, Beanstalk | `items`, `changes` (before/after) |
+| `aws.posture.resolved.<area>` | `cloud.posture_resolved` | INFO | 0.6 | An earlier posture issue is gone | `items` |
 
 ## `ioc_match` (order 60)
 
@@ -186,6 +222,8 @@ LOW), confidence from the tier (T1 0.9, T2 0.7, T3 0.5, T4 0.2, otherwise 0.5).
 | Signal ID pattern | Taxonomy | Severity | Confidence | Fires when | Key evidence |
 |---|---|---|---|---|---|
 | `ioc.ip.<addr>` / `ioc.cidr.<net>` | `ioc.ip_match` | List severity; capped at LOW when every contact was inbound and all of it dropped or rejected | by tier | A listed address or range appears as source or destination of firewall/flow events | `matched`, `inbound_accepted`, `inbound_blocked`, `outbound_allowed`, `outbound_blocked`, `dst_ports`, `local_addresses`, `tier`, `campaign`, `source`, `warning`, `first_seen`, `last_seen` |
+| `ioc.user_agent.<ua>` / `ioc.user_agent_substring.<ua>` | `ioc.user_agent_match` | List severity (T4 user agents are never signalled) | by tier | A web request or cloud API call carries a listed user agent (exact, case-insensitive) or contains a listed substring | `matched`, `events`, `clients`, `where`, `sites`, `principals`, `responses` |
+| `ioc.url_marker.<marker>` | `ioc.url_marker_match` | List severity | by tier | A requested URL contains a listed marker (string-marker rows; variants like `artx_* / zzartx<n>.php` are split, and parts under 6 characters dropped) | same |
 | `ioc.domain.<d>` / `ioc.domain_suffix.<d>` | `ioc.domain_match` | List severity (a lookup is an internal client reaching out, even when the resolver blocked it) | by tier | A listed domain, a subdomain of it, or a domain under a listed suffix is looked up | `matched`, `queries`, `blocked_by_resolver`, `clients`, `tier`, `campaign`, `source`, `warning`, `first_seen`, `last_seen` |
 
 ## `data_volume` (order 55)

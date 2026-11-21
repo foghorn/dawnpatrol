@@ -39,6 +39,7 @@ dawnpatrol/
 │   ├── schema.py                   # SQLAlchemy Table definitions — the one database
 │   ├── store.py                    # all reads/writes against that database
 │   ├── iocs.py                     # IoC list loading (CSV/text) and matching
+│   ├── crawlers.py                 # published Googlebot/Bingbot ranges, cached weekly
 │   ├── query.py                    # EventQuery: the typed read API analyzers use
 │   ├── devices.py                  # per-run, cross-source device directory
 │   ├── verify.py                   # source health classification (OK/DEGRADED/SUSPECT/FAILED)
@@ -68,7 +69,9 @@ dawnpatrol/
 │   │   ├── pihole_dns.py
 │   │   ├── aws_cloudtrail.py       # CloudTrail from the trail's S3 bucket
 │   │   ├── aws_guardduty.py        # GuardDuty findings via the API
+│   │   ├── aws_posture.py          # daily account-settings snapshot, as changes
 │   │   ├── _aws.py                 # shared boto3 session (not a plugin)
+│   │   ├── ssh_host.py             # remote servers over SSH: journal + nginx logs
 │   │   └── TEMPLATE.py
 │   ├── analyzers/                  # ── PLUGIN FOLDER (discovered, §5.2) ──
 │   │   ├── firewall_volume.py
@@ -82,7 +85,8 @@ dawnpatrol/
 │   │   ├── data_volume.py
 │   │   ├── correlation.py
 │   │   ├── ioc_match.py            # every run's traffic/DNS vs operator IoC lists
-│   │   ├── cloud_activity.py       # CloudTrail behaviour checks + GuardDuty findings
+│   │   ├── cloud_activity.py       # CloudTrail checks, GuardDuty findings, posture
+│   │   ├── http_activity.py        # web access logs: scanning, injection, web shells
 │   │   ├── baseline_delta.py
 │   │   ├── baseline.py             # not a plugin — the Baseline helper every analyzer takes
 │   │   └── TEMPLATE.py
@@ -106,7 +110,7 @@ dawnpatrol/
 │       ├── server.py               # tool registration, bearer-auth middleware
 │       ├── tools.py                # ToolContext: the tool implementations
 │       └── auth.py
-└── tests/                          # 603 tests, offline, zero spend (§14)
+└── tests/                          # 640 tests, offline, zero spend (§14)
 ```
 
 `canary.py` is deliberately not a discovered plugin folder like the five above — it ships
@@ -384,9 +388,15 @@ logs, router-admin logins — everything LibreNMS's syslog collector forwards),
 `pihole_dns.py` (DNS queries and block decisions), and, for an AWS account,
 `aws_cloudtrail.py` (API activity read from the trail's S3 bucket: `program` is
 `<service>:<eventName>`, `user` the principal ARN, `device` `<account>/<region>`, console
-sign-ins as `AUTH`) and `aws_guardduty.py` (findings as `IDS` events, `action=gd_finding`).
-Both AWS sources share `_aws.py`'s session handling, and `boto3` is the optional `aws`
-extra. `EventKind` still reserves `FLOW` for a future NetFlow or VPC flow-log source; adding one is one file
+sign-ins as `AUTH`), `aws_guardduty.py` (findings as `IDS` events, `action=gd_finding`)
+and `aws_posture.py` (a daily settings snapshot diffed against the previous one in the
+data folder: `program` `posture:<area>`, `action` critical/issue/change/resolved,
+`severity` the suggested level). The AWS sources share `_aws.py`'s session handling, and `boto3` is the optional `aws`
+extra. `ssh_host.py` reads any number of servers over OpenSSH: the journal (`SYSTEM`, and
+sshd lines as `AUTH` through `librenms_syslog.parse_openssh`) and nginx access logs as
+`HTTP` events (`domain` = site, `program` = method, `action` = status, `pkt_len` =
+bytes, `user_agent`, `raw.path`). `Event.user_agent` is its own column, also filled by
+CloudTrail, so user-agent indicators can be matched without scanning `raw`. `EventKind` still reserves `FLOW` for a future NetFlow or VPC flow-log source; adding one is one file
 implementing `collect()` and `self_test()`, and every analyzer, enrichment path,
 renderer, output, and the MCP server's own `list_source_plugins`/`trigger_analysis`
 picks it up without modification. See `docs/components/sources.md` for the full
@@ -677,8 +687,9 @@ separate opt-in.
 
 `agent/bundle.py` assembles the single user-turn message: a `RUN` header (window, whether
 a baseline exists), `SOURCE HEALTH`, a `DEVICE DIRECTORY` summary if any devices were
-seen, up to 60 `ANALYZER SIGNALS` (ranked by severity then confidence, canary signals
-excluded), `METRICS` grouped by report section with prior-value deltas where available,
+seen, up to 80 `ANALYZER SIGNALS` (ranked by severity then confidence, canary signals
+excluded; when more fired, a line names what was left out by taxonomy and severity, so
+the model knows to query the signals table rather than assume nothing else happened), `METRICS` grouped by report section with prior-value deltas where available,
 `WATCHLIST CARRIED FORWARD` if anything's outstanding, `ENRICHMENT BUDGET` remaining per
 enricher, and up to 40 `ANALYZER NOTES`. Untrusted content — domain names, log messages,
 ISP strings — only ever appears inside this bundle or inside a later tool result, fenced
@@ -1253,7 +1264,7 @@ that matters for your deployment.
 
 ## 14. Testing
 
-603 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
+640 tests, `pytest -q`, fully offline — no network, no API key, no spend — including a
 full end-to-end pipeline exercise against a stubbed provider. CI runs the same suite plus
 `ruff` on every push and pull request.
 
