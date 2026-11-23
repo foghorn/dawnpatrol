@@ -565,7 +565,14 @@ dawnpatrol hunt --ioc-file iocs.csv     # sweep history for a whole IoC list
 dawnpatrol suppress --taxonomy scan.persistent_prober \
     --entity 203.0.113.45 --reason "my own scanner" --days 90
 dawnpatrol suppressions                 # list active suppressions
+dawnpatrol web                          # only the web console, pointed at an MCP server
 ```
+
+**The web console.** With `DAWNPATROL_MCP_ENABLED=true` and
+`DAWNPATROL_WEB_ENABLED=true`, `serve` also runs a browser console on
+`DAWNPATROL_WEB_PORT`: the latest report, each finding with its evidence, a
+**Runs** page to start a run (email off unless ticked) and watch its stages and
+log, and the notebook. See [docs/web-console.md](docs/web-console.md).
 
 **Following a run.** `docker logs -f dawnpatrol` shows each run's progress as it
 happens: every stage starting and finishing with its duration, each source and
@@ -629,24 +636,27 @@ to connect to directly:
 | Tool | Does |
 |---|---|
 | `list_reports` / `get_latest_report` / `get_report` | Read past reports - the same files the `file` output writes. |
-| `get_events` | Raw events from the latest run, filtered by exact match - no SQL needed. |
+| `get_events` | Raw events from the latest run (or an earlier one, while retained), filtered by exact match - no SQL needed. |
 | `describe_event_schema` / `query_events` | The same guarded read-only SQL the investigation agent uses: one `SELECT`, an allowlisted set of tables, a row cap. |
 | `get_metric_history` | A metric's time series, for trend questions. |
 | `get_network_profile` | The zones/hosts/policy/quirks documentation from `profile.yml`. |
 | `list_source_plugins` | Which sources are enabled - the valid names for the next tool. |
 | `get_device_directory` | Every device known from the most recently completed run (hostname, hardware, OS, status, uptime, location, reporting source) - merged across whichever collectors contributed one, not tied to any single source plugin. |
 | `trigger_analysis` | Collect fresh data and run a full analysis now, optionally scoped to specific sources, **without emailing the result**. Real API spend, same pipeline a scheduled run would use. |
+| `start_analysis` / `get_run_progress` | The same, started in the background (email only if asked for), and its live progress: stages, model and tool calls, log lines. |
+| `get_finding` | One finding with the signals and evidence behind it. |
 | `read_notebook` / `add_notebook_entry` / `delete_notebook_entry` | Read, submit, and retract free-text notes that future runs see alongside `profile.yml` — a separate opt-in, see below. |
 
 This is a second door onto capabilities that already exist, not a new set of
 them: `trigger_analysis` runs the identical `Runner` a scheduled run does,
 `query_events` runs through the identical validator the in-run agent's SQL
 tool does, and reports come from the identical files the `file` output
-writes. Nothing here can email anyone, touch the filesystem outside the
-report directory, or reach a network destination DawnPatrol didn't already
-reach.
+writes. Nothing here can touch the filesystem outside the report and data
+directories or reach a network destination DawnPatrol didn't already reach.
+The only email it can cause is the normal report, to the configured
+recipients, when `start_analysis` is asked to send it.
 
-It is the one thing in this design that listens, so it is off by default and
+It listens on the network (as does the web console, which goes through it), so it is off by default and
 authenticates every request with a bearer token
 (`Authorization: Bearer <token>`) - set `DAWNPATROL_MCP_TOKEN` yourself, or
 leave it unset and a token is generated for that process and printed once to
@@ -670,6 +680,17 @@ finding that isn't backed by a real analyzer signal. It's a materially bigger
 blast radius than the rest of the MCP surface if the token leaks, which is
 exactly why it needs its own opt-in.
 
+**A web console** (`DAWNPATROL_WEB_ENABLED=true`) puts all of this in a
+browser:
+- the latest report, every finding with its evidence, and each run's events;
+- a Runs page to start a run (email off by default) and watch its stages and
+  log as it goes;
+- the notebook, with delete.
+
+It is itself an MCP client, so it runs either inside the same container or on
+its own (`dawnpatrol web`), and has an optional password. See
+[docs/web-console.md](docs/web-console.md).
+
 See [docs/components/mcp-server.md](docs/components/mcp-server.md) for the
 full tool reference, the notebook's full design rationale, deployment
 guidance, and a real example of the detection self-test correctly catching a
@@ -691,6 +712,13 @@ tables. For MySQL, point it at a read-only database user as well.
 
 Every rendered report is scanned for configured secret values before any output
 runs; a match aborts delivery.
+
+The web console is a second listener. Bind it to an address you control and set
+`DAWNPATROL_WEB_PASSWORD` unless every machine that can reach it is yours,
+including anything publishing it beyond the LAN, such as a reverse proxy or tunnel.
+It escapes all report and log text (which is attacker-influenced), refuses
+cross-site form posts, and never sends the MCP token to the browser
+([details](docs/web-console.md#security)).
 
 The container itself drops root before running your code, per the Dockerfile's
 `USER` directive — the non-root uid is also why the `out/` bind mount needs the
@@ -730,6 +758,8 @@ and pull request, across Python 3.11-3.13.
   read-only IAM identity for DawnPatrol with the AWS CLI.
 - [`docs/ssh-setup.md`](docs/ssh-setup.md) — a read-only account, key and pinned
   host key for reading a remote server's journal and nginx logs.
+- [`docs/web-console.md`](docs/web-console.md) — the optional browser console:
+  pages, settings, built-in and standalone deployment, and its security model.
 
 ## License
 

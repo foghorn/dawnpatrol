@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sev %}
+{% block title %}DawnPatrol · {{ finding.title }}{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/">Dashboard</a> / <a href="/runs/{{ run_id }}" class="mono">{{ run_id }}</a> / finding {{ finding.id }}</p>
+<section class="card">
+  <h1>{{ sev(finding.severity) }} {{ finding.title }}</h1>
+  <p class="muted">{{ finding.taxonomy }} · confidence {{ finding.confidence }}{% if finding.zone %} · zone {{ finding.zone }}{% endif %}</p>
+  <dl class="prose">
+    <dt>What happened</dt><dd>{{ finding.what }}</dd>
+    <dt>Why it matters</dt><dd>{{ finding.why }}</dd>
+    {% if finding["not"] %}<dt>What it is not</dt><dd>{{ finding["not"] }}</dd>{% endif %}
+    {% if finding.action %}<dt>Action</dt><dd>{{ finding.action }}</dd>{% endif %}
+  </dl>
+</section>
+
+<div class="grid two">
+<section class="card">
+  <h2>Entities</h2>
+  {% if entity_links %}
+  <ul class="entities">
+  {% for e in entity_links %}
+    <li><span class="chip sev-none">{{ e.entity.type }}</span> <span class="mono">{{ e.entity.value }}</span>{% if e.entity.role %} <span class="muted">({{ e.entity.role }})</span>{% endif %}
+      {% for label, q in e.links %} · <a href="/runs/{{ run_id }}/events?{{ q }}">{{ label }}</a>{% endfor %}</li>
+  {% endfor %}
+  </ul>
+  {% else %}<p class="muted">None recorded.</p>{% endif %}
+</section>
+
+<section class="card">
+  <h2>Context</h2>
+  {% if finding.evidence_kinds %}<p>Evidence kinds: {% for k in finding.evidence_kinds %}<span class="chip sev-none">{{ k }}</span> {% endfor %}</p>{% endif %}
+  {% if finding.enrichment %}<h3>Enrichment</h3><pre>{{ finding.enrichment|pretty }}</pre>{% endif %}
+  {% if finding.adjustments %}<h3>Adjudicator adjustments</h3><ul>{% for a in finding.adjustments %}<li>{{ a if a is string else a|pretty }}</li>{% endfor %}</ul>{% endif %}
+  {% if not (finding.evidence_kinds or finding.enrichment or finding.adjustments) %}<p class="muted">Nothing extra.</p>{% endif %}
+</section>
+</div>
+
+<section class="card">
+  <h2>Signals behind this finding</h2>
+  {% if missing %}<p class="notice warn">Not found in the store (the run may be older than its retention): {{ missing|join(", ") }}</p>{% endif %}
+  {% for s in signals %}
+  <details class="signal" {% if loop.first %}open{% endif %}>
+    <summary>{{ sev(["INFO","LOW","MEDIUM","HIGH","CRITICAL"][s.severity_hint] if s.severity_hint is not none and 0 <= s.severity_hint <= 4 else none) }} {{ s.title }} <span class="muted small mono">{{ s.signal_id }}</span></summary>
+    <p class="muted small">{{ s.analyzer }} · {{ s.taxonomy }} · confidence {{ s.confidence }}</p>
+    {% if s.evidence %}
+    <table class="kv">
+      {% for k, v in s.evidence.items() %}
+      <tr><th>{{ k }}</th><td>
+        {% if v|scalar %}{{ v }}
+        {% elif v is sequence and v is not mapping and v|select("scalar")|list|length == v|length %}{% for x in v %}<span class="tag">{{ x }}</span>{% endfor %}
+        {% else %}<pre>{{ v|pretty }}</pre>{% endif %}
+      </td></tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+  </details>
+  {% else %}
+  {% if not missing %}<p class="muted">No signals recorded for this finding.</p>{% endif %}
+  {% endfor %}
+</section>
+{% endblock %}

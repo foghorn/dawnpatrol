@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}DawnPatrol · Problem{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Something went wrong</h1>
+  <p>{{ message }}</p>
+  {% if mcp_url %}<p class="muted small">MCP server: <span class="mono">{{ mcp_url }}</span>. Check that it is running and that the console has its token.</p>{% endif %}
+  <p><a href="/">Back to the dashboard</a></p>
+</section>
+{% endblock %}

@@ -31,6 +31,8 @@ services:
     # way:
     # ports:
     #   - "127.0.0.1:8420:8420"
+    #   # and the web console (DAWNPATROL_WEB_ENABLED=true; see docs/web-console.md):
+    #   - "127.0.0.1:8421:8421"
 
 volumes:
   dawnpatrol-data:

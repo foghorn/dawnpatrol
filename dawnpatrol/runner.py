@@ -51,6 +51,7 @@ from .models import (
 )
 from .outputs.base import Output
 from .profile import Profile
+from .progress import RunProgress
 from .providers.registry import build_provider
 from .query import EventQuery
 from .registry import discover, env_satisfied
@@ -140,11 +141,37 @@ class Runner:
     def run(self, *, window_hours: int | None = None, dry_run: bool = False,
             stop_after: str = "", now: datetime | None = None,
             reuse_run_id: str | None = None, sources: list[str] | None = None,
-            skip_outputs: frozenset[str] = frozenset()) -> RunOutcome:
+            skip_outputs: frozenset[str] = frozenset(), trigger: str = "manual",
+            fresh_run_id: str | None = None) -> RunOutcome:
+        """Run the pipeline once, recording live progress (``progress.py``).
+
+        ``trigger`` says what started it (scheduled, mcp, web, cli), for the
+        progress view. ``fresh_run_id`` gives a new run a chosen id, so a caller
+        that starts the run in the background can tell its user which one it is.
+        """
         started = now or datetime.now(UTC)
+        run_id = reuse_run_id or fresh_run_id or new_run_id(started)
+        tracker = RunProgress(
+            self.settings.data_dir, run_id=run_id, trigger=trigger,
+            window_hours=window_hours or self.settings.window_hours, sources=sources,
+            send_email="smtp" not in skip_outputs and not dry_run,
+            redact=self.settings.secrets.redact)
+        with tracker:
+            outcome = self._run(window_hours=window_hours, dry_run=dry_run,
+                                stop_after=stop_after, started=started, run_id=run_id,
+                                reuse=reuse_run_id is not None, sources=sources,
+                                skip_outputs=skip_outputs)
+            report = outcome.report
+            tracker.finish(status=report.status.value if report else None,
+                           findings=report.finding_count if report else None,
+                           error=outcome.error, stopped_after=outcome.stopped_after)
+        return outcome
+
+    def _run(self, *, window_hours: int | None, dry_run: bool, stop_after: str,
+             started: datetime, run_id: str, reuse: bool, sources: list[str] | None,
+             skip_outputs: frozenset[str]) -> RunOutcome:
         hours = window_hours or self.settings.window_hours
         window = Window.ending_now(hours, now=started)
-        run_id = reuse_run_id or new_run_id(started)
 
         ctx = RunContext(
             run_id=run_id,
@@ -162,7 +189,7 @@ class Runner:
         log.info("run %s starting | window %s | %s", run_id, window,
                  "DRY RUN" if dry_run else "live")
 
-        if reuse_run_id is None:
+        if not reuse:
             self.store.start_run(run_id, ctx.run_number, started, window)
 
         try:

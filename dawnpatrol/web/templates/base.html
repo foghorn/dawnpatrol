@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}DawnPatrol{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/"><img src="/static/icon.svg" alt="" width="22" height="22">DawnPatrol</a>
+  <nav>
+    <a href="/" {% if path == "/" %}aria-current="page"{% endif %}>Dashboard</a>
+    <a href="/runs" {% if path == "/runs" %}aria-current="page"{% endif %}>Runs</a>
+    {% if notebook %}<a href="/notebook" {% if path == "/notebook" %}aria-current="page"{% endif %}>Notebook</a>{% endif %}
+    {% if auth and path != "/login" %}
+    <form method="post" action="/logout" class="inline">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button class="link">Sign out</button>
+    </form>
+    {% endif %}
+  </nav>
+</header>
+<main>
+{% block content %}{% endblock %}
+</main>
+</body>
+</html>

@@ -316,7 +316,8 @@ class ScheduleSettings:
 class MCPSettings:
     """The optional read/trigger surface for an external agent.
 
-    Off by default - this is the one thing in the whole design that listens.
+    Off by default - with the web console (a client of it), the only thing in the
+    design that listens.
     The bearer token is never logged when the operator supplied it; it is
     logged once, at startup, only when none was configured and one had to be
     generated, since that log line is the only place to learn it.
@@ -352,6 +353,44 @@ class MCPSettings:
             notebook_max_entry_chars=read_int(
                 f"{ENV_PREFIX}MCP_NOTEBOOK_MAX_ENTRY_CHARS", 4000
             ),
+        )
+
+
+@dataclass(slots=True)
+class WebSettings:
+    """The optional web console (``dawnpatrol/web``), an MCP client.
+
+    It reads everything and starts runs through the MCP server, so it needs
+    that server's URL and bearer token. Built into ``serve`` it defaults to the
+    local MCP server; standalone (``dawnpatrol web``) set ``WEB_MCP_URL``.
+    ``WEB_PASSWORD`` turns on a login page; unset, anyone who can reach the
+    port can use the console.
+    """
+
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8421
+    #: Empty means the local MCP server: http://127.0.0.1:<MCP_PORT><MCP_PATH>.
+    mcp_url: str = ""
+    #: Empty means DAWNPATROL_MCP_TOKEN (or the generated token, when built in).
+    mcp_token: SecretStr = field(default_factory=lambda: SecretStr(""))
+    password: SecretStr = field(default_factory=lambda: SecretStr(""))
+    session_hours: int = 12
+
+    @classmethod
+    def from_env(cls, registry: SecretRegistry) -> WebSettings:
+        token = read_secret(f"{ENV_PREFIX}WEB_MCP_TOKEN")
+        password = read_secret(f"{ENV_PREFIX}WEB_PASSWORD")
+        registry.register(token)
+        registry.register(password)
+        return cls(
+            enabled=read_bool(f"{ENV_PREFIX}WEB_ENABLED", False),
+            host=read_env(f"{ENV_PREFIX}WEB_HOST", "0.0.0.0") or "0.0.0.0",
+            port=read_int(f"{ENV_PREFIX}WEB_PORT", 8421),
+            mcp_url=read_env(f"{ENV_PREFIX}WEB_MCP_URL", "") or "",
+            mcp_token=token,
+            password=password,
+            session_hours=read_int(f"{ENV_PREFIX}WEB_SESSION_HOURS", 12),
         )
 
 
@@ -408,6 +447,7 @@ class Settings:
     log_level: str = "INFO"
     dry_run: bool = False
     mcp: MCPSettings = field(default_factory=MCPSettings)
+    web: WebSettings = field(default_factory=WebSettings)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -444,6 +484,7 @@ class Settings:
             schedule=ScheduleSettings.from_env(),
             retention=RetentionSettings.from_env(),
             mcp=MCPSettings.from_env(registry),
+            web=WebSettings.from_env(registry),
             secrets=registry,
             enabled_sources=read_list(f"{ENV_PREFIX}SOURCES"),
             enabled_analyzers=read_list(f"{ENV_PREFIX}ANALYZERS"),
@@ -503,4 +544,7 @@ class Settings:
                     if self.mcp.enabled else "disabled"),
             "mcp_notebook": ("enabled" if self.mcp.notebook_enabled
                              else "disabled"),
+            "web": (f"enabled on {self.web.host}:{self.web.port}"
+                    + (" (password)" if self.web.password.get() else " (no password)")
+                    if self.web.enabled else "disabled"),
         }

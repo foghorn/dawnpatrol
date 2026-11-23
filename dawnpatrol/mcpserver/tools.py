@@ -43,7 +43,8 @@ LATEST_ALIASES = frozenset({"latest", "last", "newest", "recent", "most recent",
 
 #: Filters get_events accepts, each an exact match on the events column of the
 #: same name. Kept small so a weak model has few ways to get it wrong.
-EVENT_FILTERS = ("kind", "src_ip", "dst_ip", "client_ip", "domain", "action", "dst_port")
+EVENT_FILTERS = ("kind", "src_ip", "dst_ip", "client_ip", "domain", "action", "dst_port",
+                 "user")
 
 #: Columns left out of get_events rows: bulky, and never needed to read an event.
 _HIDDEN_EVENT_COLUMNS = {"raw_json", "dedup_key", "run_id"}
@@ -53,11 +54,15 @@ class ToolContext:
     """Everything a tool function needs, bound once when the server starts."""
 
     def __init__(self, *, settings: Settings, profile: Profile, store: Store,
-                 trigger_run: Callable[..., Any]) -> None:
+                 trigger_run: Callable[..., Any],
+                 start_run: Callable[..., tuple[str | None, str | None]] | None = None
+                 ) -> None:
         self.settings = settings
         self.profile = profile
         self.store = store
         self.trigger_run = trigger_run
+        #: Starts a run in the background: returns (run_id, None) or (None, why not).
+        self.start_run = start_run
 
     # ----- reports ----------------------------------------------------------- #
 
@@ -123,8 +128,10 @@ class ToolContext:
             return result
         return {"columns": columns, "row_count": len(rows), "rows": rows}
 
-    def get_events(self, limit: int = 20, **filters: Any) -> dict[str, Any]:
-        run_id = self._latest_run_id()
+    def get_events(self, limit: int = 20, run_id: str = "", **filters: Any) -> dict[str, Any]:
+        run_id = run_id.strip()
+        if not run_id or run_id.lower() in LATEST_ALIASES:
+            run_id = self._latest_run_id()
         if not run_id:
             return {"error": "no run has been recorded yet, so there are no events"}
         unknown = set(filters) - set(EVENT_FILTERS)
@@ -232,6 +239,50 @@ class ToolContext:
                 return {"error": f"no directory entry for {ip!r}. Known IPs: {known}"}
             return match
         return {"devices": devices, "run_id": report.get("run_id")}
+
+    # ----- findings ------------------------------------------------------------- #
+
+    def get_finding(self, run_id: str, finding_id: str) -> dict[str, Any]:
+        report = self.get_report(run_id, "json")
+        if "error" in report:
+            return report
+        body = report.get("report")
+        if not isinstance(body, dict):
+            return {"error": "this run's report was not saved as JSON, so its findings "
+                             "can't be read one by one; read it with get_report"}
+        findings = body.get("findings") or []
+        match = next((f for f in findings if str(f.get("id")) == finding_id.strip()), None)
+        if match is None:
+            return {"error": f"no finding {finding_id!r} in run {body.get('run_id')}",
+                    "finding_ids": [f.get("id") for f in findings]}
+        rid = body.get("run_id") or run_id
+        signals = self.store.signals_for(rid, match.get("signal_ids") or [])
+        return {"run_id": rid, "generated_at": body.get("generated_at"),
+                "finding": match, "signals": signals,
+                "missing_signals": sorted(set(match.get("signal_ids") or [])
+                                          - {s["signal_id"] for s in signals})}
+
+    # ----- background runs and progress --------------------------------------- #
+
+    def start_analysis(self, sources: list[str] | None = None,
+                       window_hours: int | None = None, send_email: bool = False,
+                       requested_by: str = "mcp") -> dict[str, Any]:
+        if self.start_run is None:
+            return {"error": "background runs are not available in this process; "
+                             "use trigger_analysis"}
+        run_id, busy = self.start_run(
+            sources=sources or None, window_hours=window_hours or None,
+            skip_outputs=frozenset() if send_email else MCP_SKIP_OUTPUTS,
+            trigger=requested_by if requested_by in ("mcp", "web") else "mcp")
+        if busy:
+            return {"error": busy, "progress": self.get_run_progress()}
+        return {"started": True, "run_id": run_id, "send_email": send_email,
+                "note": "Follow it with get_run_progress; read the result with "
+                        "get_report once its state is finished."}
+
+    def get_run_progress(self) -> dict[str, Any]:
+        from ..progress import read_progress
+        return read_progress(self.settings.data_dir)
 
     # ----- trigger --------------------------------------------------------------- #
 

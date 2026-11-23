@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}DawnPatrol · events{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/">Dashboard</a> / <a href="/runs/{{ run_id }}" class="mono">{{ run_id }}</a> / events</p>
+<section class="card">
+  <h1>Events</h1>
+  <form method="get" class="filters">
+    {% for k in ["src_ip","dst_ip","client_ip","domain","user","action","kind","dst_port"] %}
+    <label>{{ k }}<input name="{{ k }}" value="{{ filters.get(k, "") }}"></label>
+    {% endfor %}
+    <button class="button" type="submit">Filter</button>
+  </form>
+  {% if error %}<p class="notice warn">{{ error }}</p>{% endif %}
+  <p class="muted">{{ rows|length }} event(s), newest first{% if rows|length == 200 %} (first 200){% endif %}. Raw events are kept only for the retention period.</p>
+  {% if rows %}
+  <div class="table-wrap">
+  <table class="compact events">
+    <thead><tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>{% for c in columns %}<td class="{{ 'mono' if c in ('src_ip','dst_ip','ts') else '' }}">{{ r[c] if r[c] is not none else "" }}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

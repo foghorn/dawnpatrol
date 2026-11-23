@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_macros.html" import progress_strip %}
+{% block title %}DawnPatrol · Runs{% endblock %}
+{% block content %}
+{% if busy %}<div class="notice warn">{{ busy }}</div>{% endif %}
+
+<div class="grid runs-layout" id="live" data-poll="/api/progress">
+<section class="card">
+  <h2>Start a run</h2>
+  <p class="muted" data-busy-note {% if progress.state != "running" %}hidden{% endif %}>A run is in progress; only one runs at a time. The form comes back when it finishes.</p>
+  <form method="post" action="/runs/start" class="start-form" data-start-form {% if progress.state == "running" %}hidden{% endif %}>
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Window (hours)
+      <input type="number" name="window_hours" min="1" max="720" placeholder="default">
+    </label>
+    <fieldset>
+      <legend>Sources</legend>
+      {% for s in sources %}
+      <input type="hidden" name="available" value="{{ s }}">
+      <label class="check"><input type="checkbox" name="sources" value="{{ s }}" checked> {{ s }}</label>
+      {% endfor %}
+    </fieldset>
+    <label class="check"><input type="checkbox" name="send_email"> Send the report by email</label>
+    <button class="button" type="submit">Start run</button>
+    <p class="hint">Runs in the background; its progress appears alongside.</p>
+  </form>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2><span class="pulse" data-pulse {% if progress.state != "running" %}hidden{% endif %}></span><span data-headline>{% if progress.state == "running" %}Run in progress{% elif progress.state == "idle" %}No run yet{% else %}Last run: {{ progress.state }}{% endif %}</span></h2>
+    <a class="button secondary" data-report href="/runs/{{ progress.run_id }}" {% if progress.state not in ("finished",) %}hidden{% endif %}>Open report</a>
+  </div>
+  <dl class="facts">
+    <dt>Run</dt><dd class="mono" data-field="run_id">{{ progress.run_id or "—" }}</dd>
+    <dt>Started</dt><dd data-field="started_at">{{ progress.started_at|when }}</dd>
+    <dt>Started by</dt><dd data-field="trigger">{{ progress.trigger or "—" }}</dd>
+    <dt>Elapsed</dt><dd data-field="elapsed">{{ progress.elapsed_seconds|duration }}</dd>
+    <dt>Current stage</dt><dd data-field="current_stage">{{ progress.current_stage or "—" }}</dd>
+    <dt>Model calls</dt><dd data-field="model_calls">{{ progress.model_calls or 0 }}</dd>
+    <dt>Tool calls</dt><dd data-field="tool_calls">{{ progress.tool_calls or 0 }}{% if progress.tool_budget %} / {{ progress.tool_budget }}{% endif %}</dd>
+    <dt>Email</dt><dd data-field="send_email">{{ "yes" if progress.send_email else "no" }}</dd>
+    <dt>Result</dt><dd data-field="result">{% if progress.result %}{{ progress.result.status or "" }}{% if progress.result.finding_count is not none %}, {{ progress.result.finding_count }} finding(s){% endif %}{% if progress.result.error %} — {{ progress.result.error }}{% endif %}{% else %}—{% endif %}</dd>
+  </dl>
+</section>
+
+<section class="card span-all">
+  <h2>Pipeline</h2>
+  {{ progress_strip(progress) }}
+</section>
+</div>
+
+<section class="card">
+  <div class="card-head"><h2>Log</h2><label class="check small"><input type="checkbox" data-follow checked> follow</label></div>
+  <pre class="log" data-log>{% for l in progress.log or [] %}{{ l.ts }} {{ "%-7s"|format(l.level) }} {{ l.logger }}  {{ l.msg }}
+{% endfor %}</pre>
+  <p class="muted small" data-status>Refreshes every 2 seconds.</p>
+</section>
+{% endblock %}

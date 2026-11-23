@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sev, status, sevcounts, progress_strip %}
+{% block title %}DawnPatrol · Dashboard{% endblock %}
+{% block content %}
+
+{% if progress.state == "running" %}
+<section class="card running">
+  <div class="card-head">
+    <h2><span class="pulse"></span>Run in progress</h2>
+    <a class="button" href="/runs">Watch it</a>
+  </div>
+  <p class="muted">{{ progress.run_id }} · started {{ progress.started_at|when }} by {{ progress.trigger }}
+    · {{ progress.elapsed_seconds|duration }} so far{% if progress.current_stage %} · now: <strong>{{ progress.current_stage }}</strong>{% endif %}</p>
+  {{ progress_strip(progress) }}
+</section>
+{% endif %}
+
+<section class="card">
+  <div class="card-head">
+    <h2>Latest report</h2>
+    {% if report %}<a class="button secondary" href="/runs/{{ report.run_id }}">Open report</a>{% endif %}
+  </div>
+  {% if report %}
+    <dl class="facts">
+      <dt>Status</dt><dd>{{ status(report.status) }}{% if report.degraded %} <span class="chip sev-medium">degraded</span>{% endif %}</dd>
+      <dt>Run</dt><dd class="mono">{{ report.run_id }}</dd>
+      <dt>Window</dt><dd>{{ report.window.start|when }} → {{ report.window.end|when }} ({{ report.window.hours|round(1) }} h)</dd>
+      <dt>Findings</dt><dd>{{ sevcounts(counts) }}</dd>
+      {% if report.usage %}<dt>Model</dt><dd>{{ report.usage.model }} · {{ report.usage.model_calls }} calls · {{ report.usage.analysis_seconds|duration }} · ${{ "%.3f"|format(report.usage.cost_usd or 0) }}</dd>{% endif %}
+    </dl>
+    <p class="summary">{{ report.executive_summary }}</p>
+    {% if report.findings %}
+    <ul class="finding-list">
+      {% for f in report.findings[:8] %}
+      <li><a href="/runs/{{ report.run_id }}/findings/{{ f.id }}">{{ sev(f.severity) }} {{ f.title }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if report.sources %}
+    <h3>Sources</h3>
+    <ul class="sources">
+      {% for s in report.sources %}<li><span class="dot state-{{ s.state|lower }}"></span>{{ s.source }} <span class="muted">{{ s.records }} records</span></li>{% endfor %}
+    </ul>
+    {% endif %}
+  {% else %}
+    <p class="muted">{{ report_error or "No report yet." }}</p>
+  {% endif %}
+</section>
+
+</div>
+
+<section class="card">
+  <h2>Recent runs</h2>
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Run</th><th>Started</th><th>Status</th><th class="num">Findings</th><th>Model</th><th class="num">Cost</th></tr></thead>
+    <tbody>
+    {% for r in runs %}
+      <tr>
+        <td class="mono"><a href="/runs/{{ r.run_id }}">{{ r.run_id }}</a></td>
+        <td>{{ r.started_at|when }}</td>
+        <td>{% if r.error %}<span class="status status-failed" title="{{ r.error }}">failed</span>{% elif not r.finished_at %}<span class="muted">running / incomplete</span>{% else %}{{ status(r.status) }}{% endif %}</td>
+        <td class="num">{{ r.finding_count or 0 }}</td>
+        <td>{{ r.model or "" }}</td>
+        <td class="num">{% if r.cost_usd %}${{ "%.3f"|format(r.cost_usd) }}{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">No runs yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endblock %}

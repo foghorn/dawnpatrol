@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}DawnPatrol · {{ run_id }}{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/">Dashboard</a> / <a href="/runs/{{ run_id }}" class="mono">{{ run_id }}</a> / plain text</p>
+<section class="card">
+  {% if note %}<p class="notice">{{ note }}</p>{% endif %}
+  <pre class="report-text">{{ body }}</pre>
+</section>
+{% endblock %}

@@ -33,22 +33,23 @@ EventKindFilter = Literal["any", "firewall", "dns", "system", "auth", "ids", "fl
 
 
 def build_app(settings: Settings, profile: Profile, store: Store,
-              trigger_run: Callable[..., Any]):
+              trigger_run: Callable[..., Any], start_run: Callable[..., Any] | None = None,
+              token: str | None = None):
     """Returns the fully wrapped ASGI app (tools registered, auth applied)."""
-    mcp = build_server(settings, profile, store, trigger_run)
-    token = resolve_token(settings)
+    mcp = build_server(settings, profile, store, trigger_run, start_run)
+    token = token or resolve_token(settings)
     app = mcp.streamable_http_app(host=settings.mcp.host,
                                   streamable_http_path=settings.mcp.path)
     return BearerAuthMiddleware(app, token)
 
 
 def build_server(settings: Settings, profile: Profile, store: Store,
-                 trigger_run: Callable[..., Any]):
+                 trigger_run: Callable[..., Any], start_run: Callable[..., Any] | None = None):
     """The MCP server with every tool registered, before transport and auth."""
     from mcp.server.mcpserver import MCPServer
 
     ctx = ToolContext(settings=settings, profile=profile, store=store,
-                      trigger_run=trigger_run)
+                      trigger_run=trigger_run, start_run=start_run)
     mcp = MCPServer(
         name="dawnpatrol",
         version="0.1.0",
@@ -63,9 +64,13 @@ def build_server(settings: Settings, profile: Profile, store: Store,
             "describe_event_schema first: it gives the current run id and the real "
             "column names. Every query on the events table must contain "
             "WHERE run_id = '<the current run id>', copied exactly.\n\n"
-            "trigger_analysis is the one tool with a side effect - it runs the same "
-            "pipeline a scheduled run would, without sending email, so you can "
-            "investigate something on demand instead of waiting for tomorrow's report."
+            "get_finding shows one finding with the signals and evidence behind it.\n\n"
+            "trigger_analysis and start_analysis are the tools with a side effect: "
+            "they run the same pipeline a scheduled run would (without email unless "
+            "start_analysis is asked for it), so you can investigate something on "
+            "demand instead of waiting for tomorrow's report. trigger_analysis waits "
+            "for the result; start_analysis returns at once - follow it with "
+            "get_run_progress."
         ),
     )
 
@@ -113,15 +118,60 @@ def build_server(settings: Settings, profile: Profile, store: Store,
                         "ssh_failed. Leave empty for any.")] = "",
         dst_port: Annotated[int, Field(
             description="Only events to this destination port. 0 means any.")] = 0,
+        user: Annotated[str, Field(
+            description="Only events by exactly this user or principal (an AWS ARN, "
+                        "an SSH user name). Leave empty for any.")] = "",
         limit: Annotated[int, Field(description="How many events to return, 1-200.")] = 20,
+        run_id: Annotated[str, Field(
+            description="Which run's events. Leave empty for the latest run. Older "
+                        "runs' events exist only while raw retention keeps them.")] = "",
     ) -> dict:
         """Get raw events from the latest run, newest first. No SQL needed: every
         filter is optional and must match exactly. With no filters, returns the 20
         most recent events of any kind. Use this instead of query_events whenever
         you just want to look at events."""
-        return ctx.get_events(limit, kind=kind, src_ip=src_ip, dst_ip=dst_ip,
-                              client_ip=client_ip, domain=domain, action=action,
-                              dst_port=dst_port)
+        return ctx.get_events(limit, run_id=run_id, kind=kind, src_ip=src_ip,
+                              dst_ip=dst_ip, client_ip=client_ip, domain=domain,
+                              action=action, dst_port=dst_port, user=user)
+
+    @mcp.tool()
+    def get_finding(
+        run_id: Annotated[str, Field(
+            description="Run id as list_reports shows it, or latest.")],
+        finding_id: Annotated[str, Field(
+            description="The finding's id as the JSON report shows it, e.g. F1.")],
+    ) -> dict:
+        """One finding in full, with the deterministic signals behind it and each
+        signal's evidence (counts, addresses, sample rows). Use this to dig into
+        why a finding was raised."""
+        return ctx.get_finding(run_id, finding_id)
+
+    @mcp.tool()
+    def get_run_progress() -> dict:
+        """The current or most recent run's progress: state (running, finished,
+        failed, interrupted or idle), what started it, each pipeline stage with its
+        status and duration, model and tool call counts, and the latest log lines.
+        Takes no arguments."""
+        return ctx.get_run_progress()
+
+    @mcp.tool()
+    def start_analysis(
+        sources: Annotated[list[str] | None, Field(
+            description="Source names from list_source_plugins. Omit to use every "
+                        "enabled source.")] = None,
+        window_hours: Annotated[int | None, Field(
+            description="Hours of history to analyse. Omit for the normal "
+                        "window.")] = None,
+        send_email: Annotated[bool, Field(
+            description="Also email the report, like a scheduled run. Default "
+                        "false.")] = False,
+        requested_by: Annotated[Literal["mcp", "web"], Field(
+            description="Who is asking, shown in the progress view.")] = "mcp",
+    ) -> dict:
+        """Start a full analysis in the background and return at once with its
+        run_id. Only one run happens at a time; if one is running this says so.
+        Follow it with get_run_progress. Costs the same as a scheduled run."""
+        return ctx.start_analysis(sources, window_hours, send_email, requested_by)
 
     @mcp.tool()
     def describe_event_schema() -> str:
@@ -245,11 +295,12 @@ def build_server(settings: Settings, profile: Profile, store: Store,
 
 
 def serve_forever(settings: Settings, profile: Profile, store: Store,
-                  trigger_run: Callable[..., Any]) -> None:
+                  trigger_run: Callable[..., Any], start_run: Callable[..., Any] | None = None,
+                  token: str | None = None) -> None:
     """Blocking call - run this in its own thread."""
     import uvicorn
 
-    app = build_app(settings, profile, store, trigger_run)
+    app = build_app(settings, profile, store, trigger_run, start_run, token)
     log.info("MCP server listening on http://%s:%d%s (bearer token required)",
              settings.mcp.host, settings.mcp.port, settings.mcp.path)
     config = uvicorn.Config(app, host=settings.mcp.host, port=settings.mcp.port,

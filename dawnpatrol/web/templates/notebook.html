@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}DawnPatrol · Notebook{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>Notebook</h1>
+  <p class="muted">Notes added through MCP. The {{ injected }} most recent are included in every run's context alongside the network profile. Newest first.</p>
+  {% if deleted %}<p class="notice ok">Entry {{ deleted }} deleted.</p>{% endif %}
+  {% for e in entries %}
+  <article class="note">
+    <header>
+      <span class="mono">#{{ e.id }}</span> · {{ e.created_at|when }}{% if e.author %} · {{ e.author }}{% endif %}
+      {% if loop.index <= injected %}<span class="chip sev-low">in context</span>{% endif %}
+      <form method="post" action="/notebook/{{ e.id }}/delete" class="inline" data-confirm="Delete note #{{ e.id }}? This can't be undone.">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button class="button danger small" type="submit">Delete</button>
+      </form>
+    </header>
+    <p class="note-text">{{ e.text }}</p>
+  </article>
+  {% else %}
+  <p class="muted">The notebook is empty.</p>
+  {% endfor %}
+</section>
+{% endblock %}

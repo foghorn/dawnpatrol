@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sev, status, sevcounts %}
+{% block title %}DawnPatrol · {{ report.run_id }}{% endblock %}
+{% block content %}
+<p class="crumbs"><a href="/">Dashboard</a> / run</p>
+<section class="card">
+  <div class="card-head">
+    <h1 class="mono">{{ report.run_id }}</h1>
+    <a class="button secondary" href="/runs/{{ report.run_id }}/text">Plain-text report</a>
+  </div>
+  <dl class="facts">
+    <dt>Status</dt><dd>{{ status(report.status) }}{% if report.degraded %} <span class="chip sev-medium">degraded</span>{% endif %}</dd>
+    <dt>Generated</dt><dd>{{ report.generated_at|when }}</dd>
+    <dt>Window</dt><dd>{{ report.window.start|when }} → {{ report.window.end|when }} ({{ report.window.hours|round(1) }} h)</dd>
+    <dt>Findings</dt><dd>{{ sevcounts(counts) }}</dd>
+    {% if report.usage %}<dt>Analysis</dt><dd>{{ report.usage.model }} · {{ report.usage.model_calls }} model calls · {{ report.usage.analysis_seconds|duration }} · {{ report.usage.input_tokens }} in / {{ report.usage.output_tokens }} out tokens · ${{ "%.3f"|format(report.usage.cost_usd or 0) }}</dd>{% endif %}
+  </dl>
+  <p class="summary">{{ report.executive_summary }}</p>
+</section>
+
+<section class="card">
+  <h2>Findings</h2>
+  {% if findings %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Severity</th><th>Finding</th><th>Confidence</th><th>Zone</th></tr></thead>
+    <tbody>
+    {% for f in findings %}
+      <tr>
+        <td>{{ sev(f.severity) }}</td>
+        <td><a href="/runs/{{ report.run_id }}/findings/{{ f.id }}">{{ f.title }}</a><div class="muted small">{{ f.taxonomy }}</div></td>
+        <td>{{ f.confidence }}</td>
+        <td>{{ f.zone }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% else %}<p class="muted">No findings.</p>{% endif %}
+</section>
+
+{% if report.actions %}
+<section class="card">
+  <h2>Recommended actions</h2>
+  <ol class="actions">
+  {% for a in report.actions|sort(attribute="priority") %}
+    <li>{{ a.text }}{% if a.command %}<pre>{{ a.command }}</pre>{% endif %}</li>
+  {% endfor %}
+  </ol>
+</section>
+{% endif %}
+
+{% if report.trends %}
+<section class="card">
+  <h2>Trends</h2>
+  <ul>{% for t in report.trends %}<li><span class="chip sev-none">{{ t.kind }}</span> {{ t.text }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<div class="grid two">
+{% for section, metrics in sections.items() %}
+<section class="card">
+  <h2>Statistics · {{ section }}</h2>
+  <div class="table-wrap">
+  <table class="compact">
+    <thead><tr><th>Metric</th><th class="num">Value</th><th class="num">Prior</th><th class="num">Change</th></tr></thead>
+    <tbody>
+    {% for m in metrics %}
+      <tr><td>{{ m.label or m.key }}</td><td class="num">{{ m.value }}{% if m.unit %} {{ m.unit }}{% endif %}</td>
+        <td class="num muted">{% if m.prior is not none %}{{ m.prior|round(1) }}{% endif %}</td>
+        <td class="num {% if m.delta_pct and m.delta_pct > 0 %}up{% elif m.delta_pct and m.delta_pct < 0 %}down{% endif %}">{% if m.delta_pct is not none %}{{ "%+.0f"|format(m.delta_pct) }}%{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+{% endfor %}
+</div>
+
+<section class="card">
+  <h2>Sources</h2>
+  <div class="table-wrap">
+  <table class="compact">
+    <thead><tr><th>Source</th><th>State</th><th class="num">Records</th><th class="num">Span</th><th>Notes</th></tr></thead>
+    <tbody>
+    {% for s in report.sources or [] %}
+      <tr><td>{{ s.source }}</td><td><span class="dot state-{{ s.state|lower }}"></span>{{ s.state }}</td>
+        <td class="num">{{ s.records }}</td><td class="num">{{ s.span_hours|round(1) }} / {{ s.requested_hours|round(1) }} h</td>
+        <td class="small">{{ (s.notes or [])|join("; ") }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+{% if report.data_quality or report.detection_gaps %}
+<div class="grid two">
+  {% if report.data_quality %}
+  <section class="card"><h2>Data quality</h2><ul>{% for d in report.data_quality %}<li>{{ d }}</li>{% endfor %}</ul></section>
+  {% endif %}
+  {% if report.detection_gaps %}
+  <section class="card"><h2>Detection gaps</h2><ul>{% for g in report.detection_gaps %}<li><strong>{{ g.what }}</strong>{% if g.suggestion %} — {{ g.suggestion }}{% endif %}</li>{% endfor %}</ul></section>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if report.rejected_findings %}
+<section class="card">
+  <h2>Rejected by the adjudicator</h2>
+  <ul>{% for r in report.rejected_findings %}<li>{{ r.title or r }}{% if r.reason %} <span class="muted">— {{ r.reason }}</span>{% endif %}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+{% if report.canaries %}
+<section class="card">
+  <h2>Detection self-test</h2>
+  <ul class="sources">{% for c in report.canaries %}<li><span class="dot state-{{ 'ok' if c.detected else 'failed' }}"></span>{{ c.name }} <span class="muted">{{ c.detail }}</span></li>{% endfor %}</ul>
+</section>
+{% endif %}
+{% endblock %}

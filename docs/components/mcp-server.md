@@ -28,15 +28,15 @@ this surface means auditing whether the wrapping is thin, not auditing a second
 implementation of read access.
 
 **Off by default, authenticated always.** `DAWNPATROL_MCP_ENABLED` must be set
-explicitly - this is the one thing in the whole design that listens on a network
-interface. Every request needs `Authorization: Bearer <token>`, checked with a
+explicitly - with the web console, which is only a client of it, this is the one thing
+in the design that listens on a network interface. Every request needs `Authorization: Bearer <token>`, checked with a
 constant-time comparison so response timing can't leak the token, in a small ASGI
 middleware wrapped *around* the MCP app rather than built into it - a choice that keeps
 the auth guarantee independent of how a future MCP SDK version changes its own
 authentication internals.
 
-**A shared lock, not a convention.** A triggered analysis and the scheduled cron job
-both go through the same lock. Two runs writing to the event store at once isn't a
+**A shared lock, not a convention.** `trigger_analysis`, `start_analysis` and the
+scheduled cron job all go through the same lock. Two runs writing to the event store at once isn't a
 scenario worth supporting; a trigger that arrives mid-cron gets a clean `"a run is
 already in progress"` response.
 
@@ -47,7 +47,7 @@ already in progress"` response.
 | `list_reports` | `(limit=10)` | Recent runs: id, status, findings, cost, window. |
 | `get_latest_report` | `(format="text")` | The most recently delivered report. `format`: `text` \| `json` \| `markdown`. If the deployment didn't write that format (see `DAWNPATROL_OUTPUT_FILE_FORMATS`), returns one it did, with a `note` saying so. |
 | `get_report` | `(run_id, format="text")` | A specific past report by id (from `list_reports`), or `latest` for the newest. An unknown id returns the five most recent ids. |
-| `get_events` | `(kind="any", src_ip="", dst_ip="", client_ip="", domain="", action="", dst_port=0, limit=20)` | Raw events from the latest run, newest first, with no SQL. Every filter is an optional exact match; canary events are left out. |
+| `get_events` | `(kind="any", src_ip="", dst_ip="", client_ip="", domain="", action="", dst_port=0, user="", limit=20, run_id="")` | Raw events from the latest run (or `run_id`, while raw retention keeps its events), newest first, with no SQL. Every filter is an optional exact match; canary events are left out. |
 | `describe_event_schema` | `()` | The current run id, the real column names, and example queries. Call this before `query_events`. |
 | `query_events` | `(sql, limit=200)` | One read-only `SELECT` over events/metrics/signals/entities, for counting and grouping. Queries against `events` must filter by the latest run's `run_id`. |
 | `get_metric_history` | `(key, days=30)` | A metric's time series, for trend questions. |
@@ -55,6 +55,9 @@ already in progress"` response.
 | `list_source_plugins` | `()` | Which sources are enabled - the valid `sources` values for the next tool. |
 | `get_device_directory` | `(ip="")` | Every network device known from the most recently completed run - hostname, hardware, OS, status, uptime, location, and which source(s) reported it - or full detail for one IP. |
 | `trigger_analysis` | `(sources=None, window_hours=None)` | Collect fresh data and run a full analysis now, **without emailing the result**. Real API spend, real time (a couple of minutes). |
+| `start_analysis` | `(sources=None, window_hours=None, send_email=False, requested_by="mcp")` | Start the same run in the background and return its `run_id` at once. Emails only when `send_email` is true. Busy if a run is already going. |
+| `get_run_progress` | `()` | The current or last run's state, stages with durations, model/tool call counts and recent log lines (from `<data_dir>/run-progress.json`). |
+| `get_finding` | `(run_id, finding_id)` | One finding from the JSON report with its backing signals and their evidence. |
 | `read_notebook`¹ | `(limit=500)` | Every note submitted so far, oldest first. |
 | `add_notebook_entry`¹ | `(text, author="")` | Submit a note that future runs will see alongside `profile.yml`. |
 | `delete_notebook_entry`¹ | `(entry_id)` | Permanently remove a note that's no longer relevant, by id (from `read_notebook`). |
@@ -82,12 +85,20 @@ includes the current run id and a working example query; when a query fails on a
 column name, it includes every readable table's real columns. `get_events` exists so
 a model that only wants to look at events never has to write SQL at all.
 
-`trigger_analysis` is the one tool with a side effect, and it's worth being precise
-about what "without emailing" means mechanically: it calls
+`trigger_analysis` and `start_analysis` are the tools with a side effect, and it's worth
+being precise about what "without emailing" means mechanically: they call
 `Runner.run(skip_outputs=frozenset({"smtp"}))`, which drops the `smtp` output from the
 delivery list before stage 10 runs at all. File output still happens, so the result is
 retrievable afterward through `get_report` - a real report exists, it just never leaves
-the box as an email.
+the box as an email. `start_analysis(send_email=True)` is the one way to send it: the
+normal report, to the configured recipients, exactly like a scheduled run.
+
+The two differ in waiting. `trigger_analysis` holds the call open until the run ends,
+which suits an agent that wants the result in one step but can take many minutes on a
+local model. `start_analysis` takes the lock, starts the run in a background thread and
+returns its `run_id` at once; `get_run_progress` then reports its stages, model and
+tool calls, and recent log lines, read from `<data_dir>/run-progress.json`. Every run
+writes that file, whatever started it (see `dawnpatrol/progress.py`).
 
 ## A real example of the guardrails holding up
 
@@ -102,8 +113,8 @@ call, not just asserted in a design doc.
 
 ## The agent notebook: a second, narrower door
 
-Every tool above is read-only except `trigger_analysis`, and even that only *runs*
-something - it doesn't change what future runs think. `add_notebook_entry` is
+Every tool above is read-only except `trigger_analysis` and `start_analysis`, and they
+only *run* something - it doesn't change what future runs think. `add_notebook_entry` is
 different in kind: it writes free-text context that gets read back into every future
 run's prompt, alongside `profile.yml`, until it ages out. That's a genuinely different
 trust boundary - not "can this agent see my data or spend my API budget," but "can this
@@ -190,7 +201,10 @@ DAWNPATROL_MCP_TOKEN is not set; generated a bearer token for this process only,
 shown once: <token> -- set DAWNPATROL_MCP_TOKEN to keep a stable token across restarts.
 ```
 
-Point any MCP client at `http://<host>:<port><path>` with that bearer token. The
+Point any MCP client at `http://<host>:<port><path>` with that bearer token. The web
+console (`DAWNPATROL_WEB_ENABLED=true`, [docs/web-console.md](../web-console.md)) is one
+such client: built into `serve`, it shares the server's token in-process, so even a
+generated token works for it. The
 official `mcp` Python SDK's `streamable_http_client` (used in this project's own
 integration tests) or Claude Code's own MCP connector both work unmodified against it.
 
@@ -244,3 +258,9 @@ async with streamable_http_client(url, http_client=auth_client) as (read, write)
 
 That's the exact pattern used to validate this server against a real production
 deployment before it was trusted with a real network.
+
+## The web console
+
+`dawnpatrol/web/` is a browser front end built entirely on these tools: it
+holds an MCP client, not a database connection. See
+[`docs/web-console.md`](../web-console.md).

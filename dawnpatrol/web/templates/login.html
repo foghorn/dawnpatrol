@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}DawnPatrol · Sign in{% endblock %}
+{% block content %}
+<section class="card narrow">
+  <h1>Sign in</h1>
+  {% if error %}<p class="notice warn">{{ error }}</p>{% endif %}
+  <form method="post" action="/login">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="{{ request.query_params.get('next', '/') }}">
+    <label>Password <input type="password" name="password" autocomplete="current-password" autofocus required></label>
+    <button class="button" type="submit">Sign in</button>
+  </form>
+</section>
+{% endblock %}

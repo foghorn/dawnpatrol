@@ -106,10 +106,17 @@ dawnpatrol/
 │   │   ├── openai_compatible.py    # any /v1/chat/completions server
 │   │   ├── context_window.py       # keeps a local model inside its context window (§6.1)
 │   │   └── TEMPLATE.py
-│   └── mcpserver/                  # external-agent MCP surface (§12)
-│       ├── server.py               # tool registration, bearer-auth middleware
-│       ├── tools.py                # ToolContext: the tool implementations
-│       └── auth.py
+│   ├── progress.py                 # live run progress file, read by MCP and the console
+│   ├── mcpserver/                  # external-agent MCP surface (§12)
+│   │   ├── server.py               # tool registration, bearer-auth middleware
+│   │   ├── tools.py                # ToolContext: the tool implementations
+│   │   └── auth.py
+│   └── web/                        # optional browser console - an MCP client (docs/web-console.md)
+│       ├── app.py                  # Starlette routes, auth and CSRF guard
+│       ├── gateway.py              # MCP tool calls with the bearer token
+│       ├── security.py             # sessions, form tokens, login throttle
+│       ├── templates/              # Jinja2, autoescaped
+│       └── static/                 # CSS, the live-view script, icon
 └── tests/                          # 640 tests, offline, zero spend (§14)
 ```
 
@@ -968,6 +975,11 @@ DAWNPATROL_OUTPUT_WEBHOOK_RUN_WHEN=AMBER,RED
 # MCP — off by default; see §12
 DAWNPATROL_MCP_ENABLED=false
 DAWNPATROL_MCP_PORT=8420
+
+# Web console — off by default; an MCP client (docs/web-console.md)
+DAWNPATROL_WEB_ENABLED=false
+DAWNPATROL_WEB_PORT=8421
+DAWNPATROL_WEB_PASSWORD=          # unset: no login
 ```
 
 **AI model configs are named and namespaced, not a single flat block.** A model config is
@@ -1080,7 +1092,8 @@ analysis in detail.
 ## 10. CLI and operations
 
 ```bash
-dawnpatrol serve                        # scheduler loop (default)
+dawnpatrol serve                        # scheduler loop (default), plus MCP and the web console when enabled
+dawnpatrol web                          # only the web console, against DAWNPATROL_WEB_MCP_URL
 dawnpatrol run                          # one full run now
 dawnpatrol run --stop-after analyze     # no API spend; dumps the evidence bundle
 dawnpatrol run --dry-run                # everything except real delivery
@@ -1174,20 +1187,23 @@ pipeline already does:
 |---|---|
 | `list_reports`, `get_latest_report`, `get_report` | the files `file_report.py` already writes |
 | `describe_event_schema`, `query_events` | the identical `agent/sqlguard.py` validator the in-run agent's SQL tool uses (§6.3) |
-| `get_events` | `EventQuery.sample()` over the latest run, canary events excluded — the same helper the in-run agent's `sample_events` uses |
+| `get_events` | `EventQuery.sample()` over the latest run (or a given `run_id`, while raw retention keeps it), canary events excluded — the same helper the in-run agent's `sample_events` uses |
 | `get_metric_history` | `Store.metric_history` |
 | `get_network_profile` | `Profile.as_context()` — the same text block cached into the harness system prompt |
 | `list_source_plugins` | `registry.discover` + `env_satisfied` — the same introspection `list-plugins` uses |
 | `get_device_directory` | `Report.devices` in `latest.json` — not a live, plugin-specific lookup |
 | `read_notebook`, `add_notebook_entry`, `delete_notebook_entry` | the `notebook` table — a second, narrower door (below) |
-| `trigger_analysis` | `Runner.run()` — the identical pipeline a scheduled run executes |
+| `get_finding` | one finding from the run's JSON report plus `Store.signals_for()` — the stored signals and evidence behind it |
+| `trigger_analysis` | `Runner.run()` — the identical pipeline a scheduled run executes, waiting for the result |
+| `start_analysis` | the same `Runner.run()` in a background thread (`cli.cmd_serve`'s `start_run`), returning the `run_id` at once |
+| `get_run_progress` | `progress.read_progress()` — the live progress file every run writes |
 
 Two things carry the actual safety weight. **It's one door onto existing rooms, not a new
 room.** `trigger_analysis` cannot make the pipeline do anything `dawnpatrol run` at a
 terminal couldn't already do, and `query_events` cannot reach a table or bypass a rule
 `agent/sqlguard.py` doesn't already enforce for the in-run investigation agent itself —
 auditing the MCP surface is auditing whether the wrapping is thin, not auditing a second
-implementation of read access. And **it's the one thing in this design that listens, so
+implementation of read access. And **it listens (the only other listener, the web console, is a client of it), so
 it defaults off and to authenticated**: `DAWNPATROL_MCP_ENABLED` must be set explicitly,
 every request needs `Authorization: Bearer <token>` checked with a constant-time
 comparison (`hmac.compare_digest`) in a small ASGI middleware wrapped *around* the MCP
@@ -1195,17 +1211,22 @@ app rather than inside it, and the token is either operator-supplied
 (`DAWNPATROL_MCP_TOKEN`, stable across restarts) or generated fresh and logged exactly
 once at startup.
 
-`trigger_analysis` and the scheduled cron job share one real lock
+`trigger_analysis`, `start_analysis` and the scheduled cron job share one real lock
 (`threading.Lock` in `cli.cmd_serve`), so a triggered run arriving mid-cron gets a clean
-"a run is already in progress" response instead of racing the scheduled one. It also
-never sends email — `Runner.run(skip_outputs={"smtp"})` drops that output from the
-delivery list before stage 10 runs at all, the same code path any other output-skip uses,
-not a special case bolted onto the SMTP plugin. File output still happens, so the result
-is retrievable afterward exactly like a scheduled run's.
+"a run is already in progress" response instead of racing the scheduled one.
+`start_analysis` takes the lock before it returns, then runs in a background thread that
+releases it when the run ends. Neither sends email by default —
+`Runner.run(skip_outputs={"smtp"})` drops that output from the delivery list before
+stage 10 runs at all, the same code path any other output-skip uses, not a special case
+bolted onto the SMTP plugin. `start_analysis(send_email=True)` leaves the list alone, so
+the report goes to the configured recipients exactly as a scheduled one does. File
+output always happens, so the result is retrievable afterward exactly like a scheduled
+run's. Every run records what started it (`trigger`: scheduled, mcp, web, cli) in its
+progress file.
 
 **The notebook is a materially different trust boundary, and gated separately.** Every
-other MCP tool is read-only, and even `trigger_analysis` only re-runs the existing
-pipeline — it doesn't change what a *future* run believes going in.
+other MCP tool is read-only, and even `trigger_analysis`/`start_analysis` only re-run the
+existing pipeline — it doesn't change what a *future* run believes going in.
 `add_notebook_entry` does: text lands in the `notebook` table and is read back by
 `agent/harness.py`, appended to the system context right after the profile, on every
 subsequent run. There are two independent writers into that same table — this MCP tool,
@@ -1224,10 +1245,24 @@ going in, and a note is neither a signal nor an event. `delete_notebook_entry` r
 note is context an agent retracts when it's stale or wrong, not a tuning rule that needs
 its own audit trail the way a suppression does.
 
+**The web console.** `dawnpatrol/web/` is a browser front end that is itself an MCP client: every page is
+a handful of tool calls through `web/gateway.py`, never a database read. Inside
+`serve` it is a third daemon thread next to the scheduler and MCP server, sharing
+the MCP server's token in-process; `dawnpatrol web` runs it alone against any MCP URL.
+Background runs come from `start_analysis`, which takes the same run lock as
+the scheduler and `trigger_analysis`, so there is never more than one run. Live
+progress comes from `progress.py`: a logging handler attached for the duration of
+`Runner.run` turns the pipeline's own log lines (`stage X: started/done in`, `model
+call N`, `tool N/M`) into `<data_dir>/run-progress.json`. The handler throttles writes
+to about one a second and flushes after the last line, and `get_run_progress`
+reads the file. A file still marked running whose process is gone reads as
+`interrupted`.
+
 See `docs/components/mcp-server.md` for the full tool reference, deployment guidance, and
-a worked example of adding a new tool.
+a worked example of adding a new tool, and `docs/web-console.md` for the console.
 
 ---
+
 
 ## 13. Security posture
 
@@ -1254,6 +1289,18 @@ placeholders only.
 **SQL tool.** Covered in full in §6.3: single statement, table allowlist, an actual
 run_id-value binding requirement (not a substring check) for `events`, injected `LIMIT`,
 and a connection opened read-only regardless.
+
+**Listeners.** Nothing listens by default. The MCP server (§12) needs a bearer token on
+every request. The web console (`dawnpatrol/web/`, `docs/web-console.md`) is a client
+of it, and its own guards hold with or without its optional password:
+- every page autoescapes report and log text, and its Content-Security-Policy allows no
+  inline script;
+- state-changing requests are POSTs with a form token and a same-site `Origin`;
+- the MCP token never reaches the browser.
+
+Without `DAWNPATROL_WEB_PASSWORD`, anyone who can reach its port can read reports and
+start runs, so it logs a warning at startup when bound beyond loopback. Anything that
+republishes either port (a reverse proxy, a tunnel) extends that reach.
 
 **Egress.** The container talks to whatever monitoring hosts are configured, up to two
 reputation APIs, the configured model provider's API, and your SMTP/webhook

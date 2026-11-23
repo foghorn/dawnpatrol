@@ -45,6 +45,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
 
     sub.add_parser("serve", help="run the scheduler loop (default)")
+    sub.add_parser("web", help="run only the web console, against an MCP server "
+                               "(DAWNPATROL_WEB_MCP_URL)")
 
     run = sub.add_parser("run", help="execute one run now")
     run.add_argument("--window-hours", type=int, default=None)
@@ -136,6 +138,8 @@ def _dispatch(command: str, args: argparse.Namespace, settings: Settings) -> int
         return cmd_list_plugins(settings)
     if command == "healthcheck":
         return cmd_healthcheck(settings)
+    if command == "web":
+        return cmd_web(settings)
 
     settings.ensure_dirs()
     profile = Profile.load(settings.profile_path)
@@ -167,18 +171,39 @@ def _dispatch(command: str, args: argparse.Namespace, settings: Settings) -> int
 def cmd_serve(settings, profile, store, args) -> int:
     runner = Runner(settings, profile, store)
     run_lock = threading.Lock()
+    busy_msg = "a run is already in progress; try again shortly"
 
     def guarded_run(**kwargs):
         """Shared by the scheduler and the MCP trigger tool - never two runs at once."""
         if not run_lock.acquire(blocking=False):
-            return None, "a run is already in progress; try again shortly"
+            return None, busy_msg
         try:
             return runner.run(**kwargs), None
         finally:
             run_lock.release()
 
+    def start_run(**kwargs):
+        """Start a run in a background thread (MCP start_analysis, the web
+        console). Takes the same lock, so it can't overlap any other run."""
+        if not run_lock.acquire(blocking=False):
+            return None, busy_msg
+        run_id = new_run_id()
+
+        def work() -> None:
+            try:
+                outcome = runner.run(fresh_run_id=run_id, **kwargs)
+                if outcome.error:
+                    log.error("run error: %s", outcome.error)
+            except Exception:  # noqa: BLE001 - runner.run records its own failures
+                log.exception("background run %s crashed", run_id)
+            finally:
+                run_lock.release()
+
+        threading.Thread(target=work, name=f"run-{run_id}", daemon=True).start()
+        return run_id, None
+
     def job() -> None:
-        outcome, busy = guarded_run()
+        outcome, busy = guarded_run(trigger="scheduled")
         if busy:
             log.warning("scheduled run skipped: %s", busy)
         elif outcome.error:
@@ -186,13 +211,34 @@ def cmd_serve(settings, profile, store, args) -> int:
 
     if settings.mcp.enabled:
         from .mcpserver import serve_forever
+        from .mcpserver.auth import resolve_token
+        token = resolve_token(settings)
         thread = threading.Thread(
             target=serve_forever, args=(settings, profile, store, guarded_run),
+            kwargs={"start_run": start_run, "token": token},
             name="mcp-server", daemon=True,
         )
         thread.start()
+        if settings.web.enabled:
+            from .web import serve_forever as serve_web
+            threading.Thread(target=serve_web, args=(settings,),
+                             kwargs={"default_token": token},
+                             name="web-console", daemon=True).start()
+    elif settings.web.enabled:
+        log.warning("DAWNPATROL_WEB_ENABLED is set but the console needs the MCP server: "
+                    "set DAWNPATROL_MCP_ENABLED=true (the console is not started)")
 
     return Scheduler(settings, job).serve()
+
+
+def cmd_web(settings) -> int:
+    """The console on its own, pointed at an MCP server elsewhere."""
+    from .web import serve_forever as serve_web
+    if not settings.web.mcp_url and not settings.mcp.enabled:
+        log.info("DAWNPATROL_WEB_MCP_URL is not set; using the local MCP address "
+                 "http://127.0.0.1:%d%s", settings.mcp.port, settings.mcp.path)
+    serve_web(settings)
+    return 0
 
 
 def cmd_run(settings, profile, store, args) -> int:
@@ -201,6 +247,7 @@ def cmd_run(settings, profile, store, args) -> int:
         window_hours=args.window_hours,
         dry_run=args.dry_run,
         stop_after=args.stop_after,
+        trigger="cli",
     )
     try:
         if outcome.error:

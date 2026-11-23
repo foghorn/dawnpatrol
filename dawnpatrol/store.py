@@ -275,6 +275,30 @@ class Store:
                 for s in signals
             ])
 
+    def signals_for(self, run_id: str, signal_ids: Sequence[str] | None = None
+                    ) -> list[dict[str, Any]]:
+        """A run's stored signals (all, or these ids), evidence decoded."""
+        c = S.signals.c
+        q = select(c.signal_id, c.analyzer, c.title, c.taxonomy, c.severity_hint,
+                   c.confidence, c.entities_json, c.evidence_json) \
+            .where(c.run_id == run_id, c.is_canary.is_not(True))
+        if signal_ids is not None:
+            if not signal_ids:
+                return []
+            q = q.where(c.signal_id.in_(list(signal_ids)))
+        with self.engine.connect() as conn:
+            rows = conn.execute(q.order_by(c.severity_hint.desc())).mappings().all()
+        out = []
+        for r in rows:
+            d = dict(r)
+            for key in ("entities_json", "evidence_json"):
+                try:
+                    d[key.removesuffix("_json")] = json.loads(d.pop(key) or "null")
+                except ValueError:
+                    d[key.removesuffix("_json")] = None
+            out.append(d)
+        return out
+
     def save_findings(self, run_id: str, ts: datetime, findings: Sequence[Finding]) -> None:
         if not findings:
             return

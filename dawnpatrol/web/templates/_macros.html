@@ -1,0 +1,22 @@
+{% macro sev(s) -%}
+<span class="chip {{ s|sevclass }}">{{ (s or "unrated")|upper }}</span>
+{%- endmacro %}
+
+{% macro status(s) -%}
+<span class="status status-{{ (s or 'none')|lower }}">{{ s or "—" }}</span>
+{%- endmacro %}
+
+{% macro sevcounts(items) -%}
+{% if items %}{% for s, n in items %}<span class="chip {{ s|sevclass }}">{{ n }} {{ s|lower }}</span> {% endfor %}{% else %}<span class="muted">no findings</span>{% endif %}
+{%- endmacro %}
+
+{% macro progress_strip(p) -%}
+<ol class="stages" data-stages>
+{% for name, st in (p.stages or {}).items() %}
+  <li class="stage stage-{{ st.state }}" data-stage="{{ name }}">
+    <span class="stage-name">{{ name }}</span>
+    <span class="stage-time">{% if st.seconds is not none %}{{ st.seconds|duration }}{% elif st.state == "active" %}running{% endif %}</span>
+  </li>
+{% endfor %}
+</ol>
+{%- endmacro %}
