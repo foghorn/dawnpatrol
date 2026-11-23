@@ -376,6 +376,10 @@ class WebSettings:
     mcp_token: SecretStr = field(default_factory=lambda: SecretStr(""))
     password: SecretStr = field(default_factory=lambda: SecretStr(""))
     session_hours: int = 12
+    #: How people reach the console, e.g. https://dawnpatrol.example.org (a
+    #: reverse proxy or tunnel). Reports link to it; over https the console
+    #: marks its cookies Secure and accepts form posts from that origin.
+    public_url: str = ""
 
     @classmethod
     def from_env(cls, registry: SecretRegistry) -> WebSettings:
@@ -391,7 +395,26 @@ class WebSettings:
             mcp_token=token,
             password=password,
             session_hours=read_int(f"{ENV_PREFIX}WEB_SESSION_HOURS", 12),
+            public_url=_public_url(read_env(f"{ENV_PREFIX}WEB_PUBLIC_URL", "") or ""),
         )
+
+
+def _public_url(raw: str) -> str:
+    """``https://host[:port][/prefix]`` without a trailing slash; a bare host
+    name gets https://. Anything else is a configuration error."""
+    from urllib.parse import urlsplit
+
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"https://{raw}"
+    parts = urlsplit(raw)
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.query \
+            or parts.fragment:
+        raise ConfigError(f"DAWNPATROL_WEB_PUBLIC_URL must look like "
+                          f"https://dawnpatrol.example.org, got {raw!r}")
+    return raw.rstrip("/")
 
 
 @dataclass(slots=True)
@@ -547,4 +570,5 @@ class Settings:
             "web": (f"enabled on {self.web.host}:{self.web.port}"
                     + (" (password)" if self.web.password.get() else " (no password)")
                     if self.web.enabled else "disabled"),
+            "web_public_url": self.web.public_url or "(none)",
         }

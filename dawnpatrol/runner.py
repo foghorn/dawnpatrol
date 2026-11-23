@@ -321,6 +321,8 @@ class Runner:
             if stop_after == "adjudicate":
                 return self._stop(outcome, "adjudicate", timings, run_id)
 
+            report.web_url = self.settings.web.public_url
+
             # 9 RENDER
             with _timed(timings, "render"):
                 outputs = [o for o in self.load_outputs() if o.name not in skip_outputs]

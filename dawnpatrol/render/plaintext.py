@@ -84,6 +84,8 @@ def render(report: Report) -> str:
     if report.canaries:
         a(kv("Detection self-test", report.canary_summary, ""))
     a(kv("Analysis", report.analysis_summary, ""))
+    if report.report_url:
+        a(kv("Web console", report.report_url, ""))
     if report.degraded:
         a(kv("NOTE", "AI analysis unavailable - statistics only", ""))
 

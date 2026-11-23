@@ -51,7 +51,17 @@ _OPEN_PATHS = ("/login", "/static/", "/healthz")
 
 
 def build_app(gateway: McpGateway, *, password: str = "", session_hours: int = 12,
-              secure_cookies: bool = False) -> Starlette:
+              secure_cookies: bool = False, public_url: str = "") -> Starlette:
+    """``public_url`` is how browsers reach the console (DAWNPATROL_WEB_PUBLIC_URL);
+    form posts from that origin are accepted. Cookies are marked Secure per
+    request when it arrived over https (directly, or via a proxy that says so in
+    X-Forwarded-Proto), so the same console still works over plain http on the
+    LAN; ``secure_cookies=True`` forces the flag on."""
+
+    def secure(request: Request) -> bool:
+        return secure_cookies or request.url.scheme == "https" or \
+            request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+
     # Chainable: a field a tool didn't return (an idle progress state has no
     # elapsed time) renders as nothing instead of failing the page.
     env = Environment(loader=FileSystemLoader(HERE / "templates"),
@@ -77,7 +87,7 @@ def build_app(gateway: McpGateway, *, password: str = "", session_hours: int = 1
         resp = HTMLResponse(html, status_code=status)
         if request.cookies.get(CSRF_COOKIE) != csrf:
             resp.set_cookie(CSRF_COOKIE, csrf, httponly=True, samesite="strict",
-                            secure=secure_cookies)
+                            secure=secure(request))
         return resp
 
     async def failure(request: Request, exc: Exception) -> HTMLResponse:
@@ -89,7 +99,7 @@ def build_app(gateway: McpGateway, *, password: str = "", session_hours: int = 1
         token = str(form.get("csrf") or "")
         cookie = request.cookies.get(CSRF_COOKIE) or ""
         if not cookie or token != cookie or not same_origin(
-                request.headers.get("origin"), request.headers.get("host")):
+                request.headers.get("origin"), request.headers.get("host"), public_url):
             return None
         return {"_raw": form, **{k: form.get(k) for k in form}}
 
@@ -273,7 +283,7 @@ def build_app(gateway: McpGateway, *, password: str = "", session_hours: int = 1
         throttle.succeeded(client)
         resp = RedirectResponse(_safe_next(str(form.get("next") or "/")), status_code=303)
         resp.set_cookie(SESSION_COOKIE, sessions.issue(), max_age=sessions.ttl,
-                        httponly=True, samesite="strict", secure=secure_cookies)
+                        httponly=True, samesite="strict", secure=secure(request))
         return resp
 
     async def logout(request: Request) -> Response:

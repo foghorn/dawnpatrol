@@ -572,7 +572,9 @@ dawnpatrol web                          # only the web console, pointed at an MC
 `DAWNPATROL_WEB_ENABLED=true`, `serve` also runs a browser console on
 `DAWNPATROL_WEB_PORT`: the latest report, each finding with its evidence, a
 **Runs** page to start a run (email off unless ticked) and watch its stages and
-log, and the notebook. See [docs/web-console.md](docs/web-console.md).
+log, and the notebook. Set `DAWNPATROL_WEB_PUBLIC_URL` to its address and every
+emailed report links straight to its own page there, each finding to its
+evidence. See [docs/web-console.md](docs/web-console.md).
 
 **Following a run.** `docker logs -f dawnpatrol` shows each run's progress as it
 happens: every stage starting and finishing with its duration, each source and

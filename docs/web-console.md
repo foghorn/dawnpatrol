@@ -104,6 +104,21 @@ It needs no database, profile or data volume.
 | `DAWNPATROL_WEB_MCP_TOKEN` | `DAWNPATROL_MCP_TOKEN` | The token it sends |
 | `DAWNPATROL_WEB_PASSWORD` | unset | Turns on the login page |
 | `DAWNPATROL_WEB_SESSION_HOURS` | `12` | How long a login lasts |
+| `DAWNPATROL_WEB_PUBLIC_URL` | unset | How people reach the console, e.g. `https://dawnpatrol.example.org` (a bare host name gets `https://`). Reports link to it; form posts from it are accepted |
+
+## Links in reports
+
+With `DAWNPATROL_WEB_PUBLIC_URL` set, every report links into the console:
+- the email gets an **Open this report in the web console** button, and each
+  finding an **Evidence and events in the web console** link to its page;
+- the plain-text part, the saved text, Markdown and HTML reports carry the
+  report's link;
+- the JSON report carries it as `web_url`.
+
+The link names the run (`/runs/<run_id>`), so an old email still opens its own
+report rather than whatever is newest. Without the setting, reports have no
+links. The setting doesn't need `DAWNPATROL_WEB_ENABLED` in the same container,
+so a standalone console elsewhere can be linked too.
 
 ## Starting runs
 
@@ -121,15 +136,18 @@ appears when the run finishes.
 - **Password (optional).**
   - With `DAWNPATROL_WEB_PASSWORD` set, every page except the login page needs
     a session. The session cookie is signed with a per-process key, `HttpOnly`
-    and `SameSite=Strict`.
+    and `SameSite=Strict`, and also `Secure` when the request came over https
+    (see [behind a reverse proxy](#behind-a-reverse-proxy-or-tunnel)).
   - Restarting the container signs everyone out.
   - Five wrong passwords from one address within 15 minutes lock it out for
     15 minutes.
   - The password is registered as a secret, so it can't leak into a report.
 - **No password.** Anyone who can reach the port can read every report and
   start runs. The console logs a warning at startup when it listens on a
-  non-loopback address without one. Bind it to a LAN address you trust, as
-  with MCP.
+  non-loopback address without one, and a second one when
+  `DAWNPATROL_WEB_PUBLIC_URL` says it's published beyond the LAN. That second
+  warning is expected when the proxy in front authenticates (Cloudflare Access,
+  for example). Bind it to a LAN address you trust, as with MCP.
 - **Forms.**
   - Starting a run, deleting a note and signing out are POSTs carrying a form
     token that must match a cookie, and an `Origin` header (when sent) that
@@ -157,13 +175,14 @@ Tunnel) makes it reachable by anyone who can reach that hostname. Before you do:
 - **The login lockout counts per client address.** Behind a proxy, every
   request arrives from the proxy, so five wrong passwords lock *everyone* out
   for 15 minutes. That's annoying but safe. Proxy-level authentication avoids it.
-- **Cookies are not marked `Secure`**, because the console itself only speaks
-  plain HTTP. Over a TLS proxy they still travel encrypted between the browser
-  and the proxy.
-- **Keep the original `Host` header.** The same-site check compares the
-  browser's `Origin` with the `Host` the console receives. A proxy that
-  rewrites `Host` makes every form post fail with "came from another site".
-  Most proxies, and Cloudflare tunnels by default, pass it through.
+- **Set `DAWNPATROL_WEB_PUBLIC_URL`** to the public address. Form posts from
+  that origin are then accepted even if the proxy rewrites the `Host` header;
+  without it, a rewritten `Host` makes every form fail with "came from another
+  site". Cloudflare tunnels pass the original `Host` by default.
+- **Cookies are marked `Secure` on https requests**: requests that arrive over
+  TLS, or through a proxy that says so in `X-Forwarded-Proto` (Cloudflare does).
+  Plain-http requests on the LAN get ordinary cookies, so the console works both
+  ways at once.
 
 ## Troubleshooting
 
@@ -174,5 +193,7 @@ Tunnel) makes it reachable by anyone who can reach that hostname. Before you do:
 | No Notebook link | `DAWNPATROL_MCP_NOTEBOOK_ENABLED` is off on the MCP server |
 | Runs page shows stages but no model or tool counts, or an empty log | `DAWNPATROL_LOG_LEVEL` is above `INFO`; progress is read from INFO lines |
 | Last run shows `interrupted` | The process running it stopped (a restart mid-run); the run itself is recorded as unfinished |
-| "Form expired or came from another site" | The page was open across a restart, or a proxy rewrote `Host`; reload and retry |
+| "Form expired or came from another site" | The page was open across a restart, or a proxy rewrote `Host` and `DAWNPATROL_WEB_PUBLIC_URL` isn't set; reload and retry |
+| Report links point to the wrong place | `DAWNPATROL_WEB_PUBLIC_URL` is wrong; it applies to reports rendered after the change |
+| Container won't start: "DAWNPATROL_WEB_PUBLIC_URL must look like ..." | The value has a query, fragment or unsupported scheme |
 | Console not starting, log says it needs the MCP server | `DAWNPATROL_WEB_ENABLED=true` without `DAWNPATROL_MCP_ENABLED=true` |

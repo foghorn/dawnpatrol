@@ -251,6 +251,8 @@ class Report:                     # everything the renderers need, fully assembl
     trend_notes: list[TrendNote]; actions: list[Action]; data_quality: list[str]
     detection_gaps: list[DetectionGap]; rejected_findings: list[str]
     canaries: list[CanaryResult]; usage: TokenUsage; degraded: bool
+    ai_model: str; analysis_seconds: float | None
+    web_url: str                  # DAWNPATROL_WEB_PUBLIC_URL; report_url / finding_url() link into the console
 ```
 
 Validated citations are the structural anti-hallucination measure: a finding that cites
@@ -980,6 +982,7 @@ DAWNPATROL_MCP_PORT=8420
 DAWNPATROL_WEB_ENABLED=false
 DAWNPATROL_WEB_PORT=8421
 DAWNPATROL_WEB_PASSWORD=          # unset: no login
+DAWNPATROL_WEB_PUBLIC_URL=        # e.g. https://dawnpatrol.example.org: reports link there
 ```
 
 **AI model configs are named and namespaced, not a single flat block.** A model config is
@@ -1299,8 +1302,11 @@ of it, and its own guards hold with or without its optional password:
 - the MCP token never reaches the browser.
 
 Without `DAWNPATROL_WEB_PASSWORD`, anyone who can reach its port can read reports and
-start runs, so it logs a warning at startup when bound beyond loopback. Anything that
-republishes either port (a reverse proxy, a tunnel) extends that reach.
+start runs, so it logs a warning at startup when bound beyond loopback, and another
+when `DAWNPATROL_WEB_PUBLIC_URL` says it is published. Anything that republishes either
+port (a reverse proxy, a tunnel) extends that reach; put authentication in front of it.
+The public URL is also the only way report content gets a link to the console, and it
+comes from configuration, never from run data.
 
 **Egress.** The container talks to whatever monitoring hosts are configured, up to two
 reputation APIs, the configured model provider's API, and your SMTP/webhook

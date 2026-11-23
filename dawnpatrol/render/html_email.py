@@ -78,6 +78,10 @@ _TH_STYLE = (
     f"color:{_MUTED};font-weight:600;"
 )
 _TD_STYLE = "padding:6px 10px;border-bottom:1px solid #eaeef2;"
+_LINK = "#0969da"
+_BUTTON_STYLE = ("display:inline-block;background:#0969da;color:#ffffff;"
+                 "text-decoration:none;font-size:14px;font-weight:600;"
+                 "padding:8px 14px;border-radius:6px;")
 _FOOTER_STYLE = (
     f"margin-top:28px;padding-top:14px;border-top:1px solid {_BORDER};"
     f"color:{_MUTED};font-size:12px;line-height:1.6;"
@@ -105,6 +109,9 @@ def render(report: Report) -> str:
         add(f' &middot; self-test: {escape(report.canary_summary)}')
     add('</p>')
     add(f'<p style="{_META_STYLE}">analysis: {escape(report.analysis_summary)}</p>')
+    if report.report_url:
+        add(f'<p style="margin:12px 0 4px 0;"><a href="{escape(report.report_url)}" '
+            f'style="{_BUTTON_STYLE}">Open this report in the web console</a></p>')
     if report.degraded:
         add(f'<p style="{_P_STYLE}"><em>AI analysis was unavailable for this run. '
             f'Statistics only.</em></p>')
@@ -118,7 +125,7 @@ def render(report: Report) -> str:
         add(f'<p style="{_P_STYLE}">No findings this period. Baseline activity only.</p>')
     else:
         for f in report.findings_sorted():
-            add(_finding_html(f))
+            add(_finding_html(f, report.finding_url(f.id)))
     if report.suppressed_findings:
         add(f'<p style="{_P_STYLE}">{len(report.suppressed_findings)} finding(s) matched '
             f'an active suppression and were withheld:</p>')
@@ -191,7 +198,9 @@ def render(report: Report) -> str:
         add(f'<li style="{_LI_STYLE}">{escape(note)}</li>')
     add('</ul>')
 
-    add(f'<div style="{_FOOTER_STYLE}">Run {escape(report.run_id)} &mdash; generated '
+    link = (f' &mdash; <a href="{escape(report.report_url)}" style="color:{_LINK};">'
+            f'web console</a>' if report.report_url else "")
+    add(f'<div style="{_FOOTER_STYLE}">Run {escape(report.run_id)}{link} &mdash; generated '
         f'automatically, without human review. Do not reply to this message.</div>')
 
     add('</div></body></html>')
@@ -220,7 +229,7 @@ def _segment_client_counts(report: Report) -> dict[str, dict[str, int]]:
     return counts
 
 
-def _finding_html(f: Finding) -> str:
+def _finding_html(f: Finding, url: str = "") -> str:
     border = _SEVERITY_COLORS.get(f.severity.label(), _MUTED)
     out = [f'<div style="{_FINDING_STYLE}border-left-color:{border};">']
     out.append(f'<p style="{_FINDING_TITLE_STYLE}">[{escape(f.severity.label())}] '
@@ -248,6 +257,10 @@ def _finding_html(f: Finding) -> str:
     for adj in f.adjustments:
         out.append(f'<div style="{_DT_STYLE}">Adjusted</div>'
                    f'<div style="{_DD_STYLE}">{escape(adj)}</div>')
+    if url:
+        out.append(f'<p style="margin:8px 0 0 0;font-size:13px;">'
+                   f'<a href="{escape(url)}" style="color:{_LINK};">Evidence and events '
+                   f'in the web console &rarr;</a></p>')
     out.append('</div>')
     return "".join(out)
 

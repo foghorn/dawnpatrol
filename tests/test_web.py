@@ -331,3 +331,40 @@ def test_start_analysis_without_a_background_runner_is_a_clear_error(settings, p
     ctx = ToolContext(settings=settings, profile=profile, store=store,
                       trigger_run=lambda **k: None)
     assert "error" in ctx.start_analysis()
+
+
+# --------------------------------------------------------------------------- #
+# Public address (DAWNPATROL_WEB_PUBLIC_URL)
+# --------------------------------------------------------------------------- #
+
+def test_public_url_setting_is_normalised(monkeypatch):
+    from dawnpatrol.config import _public_url
+    from dawnpatrol.errors import ConfigError
+    assert _public_url("dp.example.org") == "https://dp.example.org"
+    assert _public_url("https://dp.example.org/") == "https://dp.example.org"
+    assert _public_url("http://10.0.0.5:8421/console") == "http://10.0.0.5:8421/console"
+    assert _public_url("") == ""
+    for bad in ("ftp://dp.example.org", "https://", "https://dp.example.org/?x=1"):
+        with pytest.raises(ConfigError):
+            _public_url(bad)
+
+
+def test_forms_from_the_public_origin_are_accepted(world):
+    from dawnpatrol.web.security import same_origin
+    assert same_origin("https://dp.example.org", "10.0.0.5:8421", "https://dp.example.org")
+    assert not same_origin("https://evil.example", "10.0.0.5:8421", "https://dp.example.org")
+    app = build_app(McpGateway(server=world["server"]), public_url="https://dp.example.org")
+    c = TestClient(app, base_url="http://10.0.0.5:8421")
+    c.get("/")
+    token = c.cookies.get("dp_csrf")
+    r = c.post("/runs/start", data={"csrf": token}, follow_redirects=False,
+               headers={"origin": "https://dp.example.org"})
+    assert r.status_code == 303 and world["started"]
+
+
+def test_cookies_are_secure_only_on_https_requests(world):
+    app = build_app(McpGateway(server=world["server"]), public_url="https://dp.example.org")
+    tunnel = TestClient(app).get("/", headers={"x-forwarded-proto": "https"})
+    assert "secure" in tunnel.headers["set-cookie"].lower()
+    lan = TestClient(app).get("/")          # plain http on the LAN keeps working
+    assert "secure" not in lan.headers["set-cookie"].lower()

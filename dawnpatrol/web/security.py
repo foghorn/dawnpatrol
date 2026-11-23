@@ -78,11 +78,15 @@ def new_csrf() -> str:
     return secrets.token_urlsafe(24)
 
 
-def same_origin(origin: str | None, host: str | None) -> bool:
+def same_origin(origin: str | None, host: str | None, public_url: str = "") -> bool:
     """A missing Origin is allowed (older browsers, same-origin GET-turned-POST
-    redirects); a present one must name this host."""
+    redirects); a present one must name this host, or the console's public
+    address (a proxy or tunnel that rewrites ``Host``)."""
     if not origin:
         return True
-    if origin == "null" or not host:
+    if origin == "null":
         return False
-    return urlsplit(origin).netloc.lower() == host.lower()
+    netloc = urlsplit(origin).netloc.lower()
+    if host and netloc == host.lower():
+        return True
+    return bool(public_url) and netloc == urlsplit(public_url).netloc.lower()

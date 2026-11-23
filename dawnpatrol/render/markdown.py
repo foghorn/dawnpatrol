@@ -37,6 +37,8 @@ def render(report: Report) -> str:
     if report.canaries:
         a(f"**Detection self-test:** {report.canary_summary}  ")
     a(f"**Analysis:** {report.analysis_summary}  ")
+    if report.report_url:
+        a(f"**Web console:** <{report.report_url}>  ")
     if report.degraded:
         a("")
         a("> AI analysis was unavailable for this run. Statistics only.")

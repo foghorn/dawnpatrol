@@ -76,6 +76,12 @@ you're designing for, but there. Recipients come from `DAWNPATROL_OUTPUT_SMTP_TO
 environment variable, never from anything in the report body - the structural reason
 log content can't redirect a delivery.
 
+With `DAWNPATROL_WEB_PUBLIC_URL` set (the web console's public address), the runner puts
+it on `Report.web_url` before rendering, and the renderers link to the run's page there:
+a button at the top of the email, a link on each finding, a "Web console" line in the
+plain-text part (see [web-console.md](../web-console.md#links-in-reports)). The URL
+comes from configuration, never from report content, for the same reason recipients do.
+
 `html_email.py` is a separate module from the general-purpose `html.py` renderer used by
 `file_report`/`webhook`, not a shared one, because email has a stricter rendering
 contract than a browser or a webhook does: every mail client (Outlook's desktop client

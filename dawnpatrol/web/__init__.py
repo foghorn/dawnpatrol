@@ -43,10 +43,15 @@ def serve_forever(settings: Settings, default_token: str = "") -> None:
         log.warning("web console: no password set (DAWNPATROL_WEB_PASSWORD) - anyone "
                     "who can reach %s:%d can read reports and start runs",
                     web.host, web.port)
+    if not password and web.public_url:
+        log.warning("web console: published at %s with no password - anything that can "
+                    "reach that address can read reports and start runs unless the proxy "
+                    "in front authenticates", web.public_url)
     app = build_app(McpGateway(mcp_url(settings), token), password=password,
-                    session_hours=web.session_hours)
-    log.info("web console listening on http://%s:%d (MCP at %s, %s)", web.host, web.port,
-             mcp_url(settings), "password required" if password else "no password")
+                    session_hours=web.session_hours, public_url=web.public_url)
+    log.info("web console listening on http://%s:%d (MCP at %s, %s%s)", web.host, web.port,
+             mcp_url(settings), "password required" if password else "no password",
+             f", public at {web.public_url}" if web.public_url else "")
     uvicorn.Server(uvicorn.Config(app, host=web.host, port=web.port,
                                   log_level="warning")).run()
 

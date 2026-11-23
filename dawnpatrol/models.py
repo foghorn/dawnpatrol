@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum, StrEnum
 from typing import Any
+from urllib.parse import quote
 
 UTC = UTC
 
@@ -639,8 +640,23 @@ class Report:
     # how long the investigate stage took, failed attempts included.
     ai_model: str = ""
     analysis_seconds: float | None = None
+    #: The web console's public address (DAWNPATROL_WEB_PUBLIC_URL), when set:
+    #: renderers then link to this run's page there. Empty means no links.
+    web_url: str = ""
 
     # ----- convenience accessors used by renderers ------------------------- #
+
+    @property
+    def report_url(self) -> str:
+        """This run's report in the web console, or ""."""
+        if not self.web_url:
+            return ""
+        return f"{self.web_url}/runs/{quote(self.run_id, safe='')}"
+
+    def finding_url(self, finding_id: str) -> str:
+        """One finding's page in the web console, or ""."""
+        base = self.report_url
+        return f"{base}/findings/{quote(str(finding_id), safe='')}" if base else ""
 
     def metrics_for(self, section: str) -> list[Metric]:
         return [m for m in self.metrics if m.section == section]
@@ -712,6 +728,7 @@ class Report:
             "status": str(self.status),
             "degraded": self.degraded,
             "executive_summary": self.executive_summary,
+            "web_url": self.report_url or None,
             "finding_count": self.finding_count,
             "findings": [
                 {

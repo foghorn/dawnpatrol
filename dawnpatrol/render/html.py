@@ -63,6 +63,8 @@ def render(report: Report) -> str:
     if report.canaries:
         a(f" &middot; self-test: {escape(report.canary_summary)}")
     a(f"<br>analysis: {escape(report.analysis_summary)}")
+    if report.report_url:
+        a(f'<br><a href="{escape(report.report_url)}">Open in the web console</a>')
     a("</p>")
     if report.degraded:
         a("<p><em>AI analysis was unavailable for this run. Statistics only.</em></p>")

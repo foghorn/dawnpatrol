@@ -440,3 +440,28 @@ def test_min_severity_holds_email_back_unless_a_finding_is_high(monkeypatch):
     daily = SMTPEmailOutput()
     daily.configure()
     assert daily.should_run(make_report())[0]
+
+
+# --------------------------------------------------------------------------- #
+# Links to the web console (DAWNPATROL_WEB_PUBLIC_URL)
+# --------------------------------------------------------------------------- #
+
+def test_reports_link_to_the_web_console_when_a_public_url_is_set():
+    import json as _json
+    r = make_report(findings=[sample_finding()], web_url="https://dp.example.org")
+    url = "https://dp.example.org/runs/20260601T060000Z-abc123"
+    assert r.report_url == url and r.finding_url("F1") == f"{url}/findings/F1"
+    email = render_with("html_email", r)
+    assert f'href="{url}"' in email and f'href="{url}/findings/F1"' in email
+    assert "Open this report in the web console" in email
+    assert f"Web console: {url}" in render_with("plaintext", r)
+    assert f"<{url}>" in render_with("markdown", r)
+    assert f'href="{url}"' in render_with("html", r)
+    assert _json.loads(render_with("json", r))["web_url"] == url
+
+
+def test_no_console_links_without_a_public_url():
+    r = make_report(findings=[sample_finding()])
+    assert r.report_url == "" and r.finding_url("F1") == ""
+    for name in ("html_email", "plaintext", "markdown", "html"):
+        assert "web console" not in render_with(name, r).lower(), name
